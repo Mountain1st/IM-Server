@@ -1,6 +1,8 @@
 #include "eventloop_thread.hpp"
 
+#include <iostream>
 #include <memory>
+#include <thread>
 
 namespace im {
 
@@ -19,6 +21,7 @@ EventLoop* EventLoopThread::startLoop() {
 }
 
 void EventLoopThread::threadFunc() {
+    std::cout << "[io] IO 线程创建, id=" << std::this_thread::get_id() << std::endl;
     EventLoop loop;
     {
         std::lock_guard<std::mutex> lock(mutex_);

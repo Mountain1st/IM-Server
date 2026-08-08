@@ -1,5 +1,6 @@
 #include "threadpool.hpp"
 
+#include <iostream>
 #include <utility>
 
 namespace im {
@@ -8,6 +9,7 @@ ThreadPool::ThreadPool(size_t threads) {
     workers_.reserve(threads);
     for (size_t i = 0; i < threads; ++i) {
         workers_.emplace_back([this] { workerLoop(); });
+        std::cout << "[pool] 工作线程-" << (i + 1) << " 创建完成 (共 " << threads << ")" << std::endl;
     }
 }
 

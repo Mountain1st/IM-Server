@@ -11,7 +11,7 @@ namespace im {
 
 Session::Session(EventLoop* loop, ThreadPool* pool,
                  const std::shared_ptr<Connection>& conn)
-    : loop_(loop), pool_(pool), conn_(conn) {}
+    : loop_(loop), pool_(pool), conn_(conn), fd_(conn->fd()) {}
 
 Session::~Session() {
     std::cout << "[session] 会话销毁" << std::endl;
@@ -160,9 +160,14 @@ void Session::handle(const ws::Frame& frame) {
 void Session::handleData(ws::Opcode opcode, const std::string& payload) {
     // 业务入口：目前仅回显，后续在此接入登录/消息路由等 IM 逻辑
     if (opcode == ws::Opcode::Text) {
-        std::cout << "[session] 收到文本消息: " << payload << std::endl;
+        std::cout << "[session] fd=" << fd_ << " 收到文本消息: " << payload << std::endl;
         reply("echo: " + payload);
+        return;
     }
+    // 二进制等其它数据仅记录字节数
+    std::cout << "[session] fd=" << fd_
+              << " 收到二进制数据 " << payload.size() << " 字节" << std::endl;
+    reply("echo: [binary " + std::to_string(payload.size()) + " bytes]");
 }
 
 void Session::reply(const std::string& text) {
@@ -170,7 +175,7 @@ void Session::reply(const std::string& text) {
 }
 
 void Session::onClose(const std::shared_ptr<Connection>&) {
-    std::cout << "[session] 连接关闭" << std::endl;
+    std::cout << "[session] fd=" << fd_ << " 断开连接" << std::endl;
     if (closedHandler_) closedHandler_();
 }
 

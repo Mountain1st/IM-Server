@@ -44,6 +44,7 @@ private:
     EventLoop* loop_;
     ThreadPool* pool_;
     std::shared_ptr<Connection> conn_;
+    int fd_; // 连接 fd，预先缓存供日志使用（连接关闭后 fd 会被置 -1）
     std::function<void()> closedHandler_;
 
     bool handshaked_ = false;
