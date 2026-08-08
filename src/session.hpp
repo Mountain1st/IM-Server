@@ -1,7 +1,10 @@
 #pragma once
 
+#include "eventloop.hpp"
 #include "websocket.hpp"
 
+#include <atomic>
+#include <chrono>
 #include <deque>
 #include <functional>
 #include <memory>
@@ -23,6 +26,9 @@ public:
 
     void start();
     void setClosedHandler(std::function<void()> handler) { closedHandler_ = std::move(handler); }
+    void onHeartbeat();
+
+    EventLoop* loop() { return loop_; }
 
 private:
     void onMessage(const std::shared_ptr<Connection>&,
@@ -54,6 +60,13 @@ private:
     bool fragmenting_ = false;
     ws::Opcode fragmentOpcode_ = ws::Opcode::Text;
     std::string fragmentBuffer_;
+
+    // 心跳：服务器定时发 Ping，客户端须回 Pong；连续超时判为僵尸连接并断开
+    EventLoop::TimerId heartbeatTimer_ = 0;
+    std::atomic<std::chrono::steady_clock::time_point::rep> lastPongUs_{0};
+    // 追踪最后一次收到任意消息的时间（loop 线程访问）
+    std::chrono::steady_clock::time_point lastRecv_{};
+    std::chrono::steady_clock::time_point lastPingSent_{};
 };
 
 } // namespace im

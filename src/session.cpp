@@ -9,6 +9,13 @@
 
 namespace im {
 
+namespace {
+// 心跳间隔：每 30 秒发一个 Ping
+constexpr std::chrono::seconds kHeartbeatInterval(30);
+// 僵尸判定：超过 2 个心跳周期未收到任何数据/Pong，判为死连接
+constexpr std::chrono::seconds kZombieTimeout(60);
+}
+
 Session::Session(EventLoop* loop, ThreadPool* pool,
                  const std::shared_ptr<Connection>& conn)
     : loop_(loop), pool_(pool), conn_(conn), fd_(conn->fd()) {}
@@ -21,13 +28,41 @@ void Session::start() {
     auto self = shared_from_this();
     conn_->setMessageCallback(
         [self](const auto& conn, const char* data, size_t len) {
-            // 读事件在 loop 线程发生，把数据按序入队，由线程池串行处理
+            // 读事件在 loop 线程发生。任何收到数据即视为连接存活
+            self->lastRecv_ = std::chrono::steady_clock::now();
+            // 把数据按序入队，由线程池串行处理
             self->enqueueAndDrain(data, len);
         });
     conn_->setCloseCallback([self](const std::shared_ptr<Connection>&) {
         self->onClose(self->conn_);
     });
     conn_->start();
+
+    lastRecv_ = std::chrono::steady_clock::now();
+    // 在会话所属的 IO loop 线程注册心跳定时器
+    loop_->runInLoop([self, this] {
+        if (self->heartbeatTimer_ == 0) {
+            self->heartbeatTimer_ =
+                loop_->addTimer([self] { self->onHeartbeat(); }, kHeartbeatInterval);
+        }
+    });
+}
+
+void Session::onHeartbeat() {
+    auto now = std::chrono::steady_clock::now();
+
+    // 僵尸判定：超过 kZombieTimeout 没收到过任何数据/Pong，直接断开
+    if (now - lastRecv_ > kZombieTimeout) {
+        std::cout << "[session] fd=" << fd_ << " 心跳超时，判定为僵尸连接，断开" << std::endl;
+        conn_->shutdown();
+        return;
+    }
+
+    // 到点发一个 Ping 探活
+    if (now - lastPingSent_ >= kHeartbeatInterval) {
+        lastPingSent_ = now;
+        conn_->send(ws::buildFrame(ws::Opcode::Ping, "heartbeat"));
+    }
 }
 
 void Session::enqueueAndDrain(const char* data, size_t len) {
@@ -175,6 +210,11 @@ void Session::reply(const std::string& text) {
 }
 
 void Session::onClose(const std::shared_ptr<Connection>&) {
+    // 取消心跳定时器
+    if (heartbeatTimer_ != 0) {
+        loop_->cancelTimer(heartbeatTimer_);
+        heartbeatTimer_ = 0;
+    }
     std::cout << "[session] fd=" << fd_ << " 断开连接" << std::endl;
     if (closedHandler_) closedHandler_();
 }

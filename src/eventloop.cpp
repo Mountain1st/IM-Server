@@ -5,6 +5,7 @@
 
 #include <sys/epoll.h>
 #include <sys/eventfd.h>
+#include <sys/timerfd.h>
 #include <unistd.h>
 #include <cerrno>
 #include <cstring>
@@ -13,7 +14,16 @@
 
 namespace im {
 
+namespace {
+// 定时器基础扫描周期：100ms
+constexpr long kTimerTickUs = 100000L; // 微妙
+constexpr uint64_t kMaxTimerExp = 16384; // 一次最多处理的定时器触发数
+}
+
+std::atomic<uint64_t> EventLoop::s_instances_{0};
+
 EventLoop::EventLoop() {
+    instanceId_ = s_instances_.fetch_add(1, std::memory_order_relaxed);
     epfd_ = ::epoll_create1(EPOLL_CLOEXEC);
     if (epfd_ == -1) {
         std::cerr << "[eventloop] epoll_create1 失败: " << std::strerror(errno) << std::endl;
@@ -31,11 +41,35 @@ EventLoop::EventLoop() {
         while (::read(wakeupFd_, &one, sizeof one) > 0) {}
     });
     wakeupChannel_->enableReading(this);
+
+    timerFd_ = ::timerfd_create(CLOCK_MONOTONIC, TFD_NONBLOCK | TFD_CLOEXEC);
+    if (timerFd_ == -1) {
+        std::cerr << "[eventloop] timerfd_create 失败: " << std::strerror(errno) << std::endl;
+        ::exit(1);
+    }
+    // 固定 100ms 小周期重复触发，handleTimer 里按各定时器的 next 判定到期。
+    // 用周期触发可避免一次性 timerfd 重新 arm 导致的事件丢失问题。
+    struct itimerspec its{};
+    its.it_value.tv_sec = 0;
+    its.it_value.tv_nsec = kTimerTickUs * 1000L;
+    its.it_interval.tv_sec = 0;
+    its.it_interval.tv_nsec = kTimerTickUs * 1000L;
+    ::timerfd_settime(timerFd_, 0, &its, nullptr);
+
+    timerChannel_ = std::make_unique<Channel>(timerFd_);
+    timerChannel_->setReadCallback([this] {
+        uint64_t exp;
+        // 已到期的定时器由 timerfd 触发，清空计数
+        while (::read(timerFd_, &exp, sizeof exp) > 0) {}
+        handleTimer();
+    });
+    timerChannel_->enableReading(this);
 }
 
 EventLoop::~EventLoop() {
     ::close(epfd_);
     ::close(wakeupFd_);
+    if (timerFd_ >= 0) ::close(timerFd_);
 }
 
 void EventLoop::run() {
@@ -131,6 +165,76 @@ void EventLoop::handlePending() {
         flush.swap(pendingFlush_);
     }
     for (auto* conn : flush) conn->flushWrite();
+}
+
+EventLoop::TimerId EventLoop::addTimer(std::function<void()> cb,
+                                       std::chrono::milliseconds interval) {
+    TimerId id = nextTimerId_++;
+    auto& e = timers_[id];
+    e.cb = std::move(cb);
+    e.interval = interval;
+    e.active = true;
+    e.next = std::chrono::steady_clock::now() + interval;
+    scheduleNextTimer();
+    return id;
+}
+
+void EventLoop::cancelTimer(TimerId id) {
+    if (isInLoopThread()) {
+        destroyTimer(id);
+    } else {
+        runInLoop([id, this] { destroyTimer(id); });
+    }
+}
+
+void EventLoop::destroyTimer(TimerId id) {
+    auto it = timers_.find(id);
+    if (it != timers_.end()) {
+        timers_.erase(it);
+    }
+    scheduleNextTimer();
+}
+
+void EventLoop::scheduleNextTimer() {
+    // timerfd 已是固定 100ms 周期触发，无需逐次重 arm。
+    // 若无任何定时器，则将周期拉长为最大间隔以节能。
+    struct itimerspec its{};
+    if (timers_.empty()) {
+        its.it_value.tv_sec = 3600;
+        its.it_interval.tv_sec = 3600;
+    } else {
+        its.it_value.tv_sec = 0;
+        its.it_value.tv_nsec = kTimerTickUs * 1000L;
+        its.it_interval.tv_sec = 0;
+        its.it_interval.tv_nsec = kTimerTickUs * 1000L;
+    }
+    ::timerfd_settime(timerFd_, 0, &its, nullptr);
+}
+
+void EventLoop::handleTimer() {
+    auto now = std::chrono::steady_clock::now();
+
+    // 收集所有已到期的定时器
+    std::vector<uint64_t> due;
+    for (auto& [id, e] : timers_) {
+        if (e.active && e.next <= now) due.push_back(id);
+    }
+
+    for (auto id : due) {
+        auto it = timers_.find(id);
+        if (it == timers_.end() || !it->second.active) continue;
+
+        auto cb = it->second.cb;
+        if (it->second.interval.count() > 0) {
+            // 周期定时器：以当前时间为基准安排下次触发
+            it->second.next = now + it->second.interval;
+            if (it->second.next <= now) it->second.next = now + std::chrono::milliseconds(1);
+        } else {
+            it->second.active = false;
+            timers_.erase(it); // 一次性
+        }
+        cb();
+    }
 }
 
 } // namespace im

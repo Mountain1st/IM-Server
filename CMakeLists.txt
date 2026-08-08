@@ -29,3 +29,10 @@ add_executable(imclient
 )
 target_include_directories(imclient PRIVATE src)
 target_link_libraries(imclient PRIVATE Threads::Threads)
+
+# 交互式客户端：等待用户输入，Enter 后发送
+add_executable(imchat
+    client/imchat.cpp
+)
+target_include_directories(imchat PRIVATE src)
+target_link_libraries(imchat PRIVATE Threads::Threads)

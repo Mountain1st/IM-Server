@@ -1,5 +1,7 @@
 #pragma once
 
+#include <chrono>
+#include <cstdint>
 #include <functional>
 #include <map>
 #include <memory>
@@ -42,12 +44,30 @@ public:
     bool isInLoopThread() const;
     std::thread::id threadId() const { return threadId_; }
 
+    // 注册一个周期定时器，interval 毫秒触发一次。回调在本 loop 线程执行。
+    // 必须由本 loop 线程调用。返回定时器 ID。
+    using TimerId = uint64_t;
+    TimerId addTimer(std::function<void()> cb, std::chrono::milliseconds interval);
+    // 取消定时器（线程安全，可被任意线程调用）
+    void cancelTimer(TimerId id);
+
+    // 每个 loop 独立编号，防止跨 loop 误取消
+    uint64_t instanceId() const { return instanceId_; }
+
 private:
     void handlePending();
+    void handleTimer();
+    void scheduleNextTimer();
+    void destroyTimer(TimerId id);
+
+    static std::atomic<uint64_t> s_instances_;
+    uint64_t instanceId_;
 
     int epfd_;
     int wakeupFd_;
+    int timerFd_ = -1;
     std::unique_ptr<Channel> wakeupChannel_;
+    std::unique_ptr<Channel> timerChannel_;
     std::map<int, Channel*> channels_;
     bool running_ = false;
     std::thread::id threadId_{};
@@ -57,6 +77,16 @@ private:
     std::mutex flushMutex_;
     std::vector<Connection*> pendingFlush_;
     std::mutex updateMutex_;
+
+    // 定时器只允许 loop 线程修改；cancel 可被任意线程调用（内部投递到 loop）
+    struct TimerEntry {
+        std::function<void()> cb;
+        std::chrono::milliseconds interval; // 0 表示一次性定时器
+        std::chrono::steady_clock::time_point next; // 下次触发时间
+        bool active = true;
+    };
+    std::map<uint64_t, TimerEntry> timers_;
+    uint64_t nextTimerId_ = 1;
 };
 
 } // namespace im
