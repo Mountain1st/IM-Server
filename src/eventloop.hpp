@@ -1,5 +1,6 @@
 #pragma once
 
+#include <atomic>
 #include <chrono>
 #include <cstdint>
 #include <functional>
@@ -18,75 +19,78 @@ class Connection;
 // 其它线程通过 wakeup() / postToLoop() 通知 loop 线程处理任务。
 class EventLoop {
 public:
-    EventLoop();
-    ~EventLoop();
+  EventLoop();
+  ~EventLoop();
 
-    EventLoop(const EventLoop&) = delete;
-    EventLoop& operator=(const EventLoop&) = delete;
+  EventLoop(const EventLoop&) = delete;
+  EventLoop& operator=(const EventLoop&) = delete;
 
-    void run();
-    void stop();
+  void run();
+  void stop();
 
-    // 增/改某个 fd 的 ET 事件关注（应由本 loop 线程调用）
-    void update(Channel* ch);
-    // 移除某个 fd 的事件关注（应由本 loop 线程调用）
-    void remove(Channel* ch);
+  // 增/改某个 fd 的 ET 事件关注（应由本 loop 线程调用）
+  void update(Channel* ch);
+  // 移除某个 fd 的事件关注（应由本 loop 线程调用）
+  void remove(Channel* ch);
 
-    // 若当前线程就是本 loop 线程则直接执行，否则投递并唤醒 loop 线程执行
-    void runInLoop(std::function<void()> task);
-    // 唤醒 loop 线程（线程安全，可被任意线程调用）
-    void wakeup();
-    // 把一个要在 loop 线程执行的函数投递过去（线程安全）
-    void postToLoop(std::function<void()> task);
-    // 通知 loop 线程稍后 flush 一个连接的待写数据（线程安全）
-    void addPendingFlush(Connection* conn);
+  // 若当前线程就是本 loop 线程则直接执行，否则投递并唤醒 loop 线程执行
+  void runInLoop(std::function<void()> task);
+  // 唤醒 loop 线程（线程安全，可被任意线程调用）
+  void wakeup();
+  // 把一个要在 loop 线程执行的函数投递过去（线程安全）
+  void postToLoop(std::function<void()> task);
+  // 通知 loop 线程稍后 flush 一个连接的待写数据（线程安全）
+  // 传入 shared_ptr 以便 flush 期间持有连接，避免并发关闭导致悬垂指针
+  void addPendingFlush(std::shared_ptr<Connection> conn);
 
-    bool isInLoopThread() const;
-    std::thread::id threadId() const { return threadId_; }
+  bool isInLoopThread() const;
+  std::thread::id threadId() const { return threadId_; }
 
-    // 注册一个周期定时器，interval 毫秒触发一次。回调在本 loop 线程执行。
-    // 必须由本 loop 线程调用。返回定时器 ID。
-    using TimerId = uint64_t;
-    TimerId addTimer(std::function<void()> cb, std::chrono::milliseconds interval);
-    // 取消定时器（线程安全，可被任意线程调用）
-    void cancelTimer(TimerId id);
+  // 注册一个周期定时器，interval 毫秒触发一次。回调在本 loop 线程执行。
+  // 必须由本 loop 线程调用。返回定时器 ID。
+  using TimerId = uint64_t;
+  TimerId addTimer(std::function<void()> cb, std::chrono::milliseconds interval);
+  // 取消定时器（线程安全，可被任意线程调用）
+  void cancelTimer(TimerId id);
 
-    // 每个 loop 独立编号，防止跨 loop 误取消
-    uint64_t instanceId() const { return instanceId_; }
+  // 每个 loop 独立编号，防止跨 loop 误取消
+  uint64_t instanceId() const { return instanceId_; }
 
 private:
-    void handlePending();
-    void handleTimer();
-    void scheduleNextTimer();
-    void destroyTimer(TimerId id);
+  void handlePending();
+  void handleTimer();
+  void scheduleNextTimer();
+  void destroyTimer(TimerId id);
 
-    static std::atomic<uint64_t> s_instances_;
-    uint64_t instanceId_;
+  static std::atomic<uint64_t> s_instances_;
+  uint64_t instanceId_;
 
-    int epfd_;
-    int wakeupFd_;
-    int timerFd_ = -1;
-    std::unique_ptr<Channel> wakeupChannel_;
-    std::unique_ptr<Channel> timerChannel_;
-    std::map<int, Channel*> channels_;
-    bool running_ = false;
-    std::thread::id threadId_{};
+  int epfd_;
+  int wakeupFd_;
+  int timerFd_ = -1;
+  std::unique_ptr<Channel> wakeupChannel_;
+  std::unique_ptr<Channel> timerChannel_;
+  std::map<int, Channel*> channels_;
+  // 跨线程读写（stop() 可能被主线程/信号处理器调用），用原子防止数据竞争
+  std::atomic<bool> running_{false};
+  std::thread::id threadId_{};
 
-    std::mutex taskMutex_;
-    std::vector<std::function<void()>> tasks_;
-    std::mutex flushMutex_;
-    std::vector<Connection*> pendingFlush_;
-    std::mutex updateMutex_;
+  std::mutex taskMutex_;
+  std::vector<std::function<void()>> tasks_;
+  std::mutex updateMutex_;
 
-    // 定时器只允许 loop 线程修改；cancel 可被任意线程调用（内部投递到 loop）
-    struct TimerEntry {
-        std::function<void()> cb;
-        std::chrono::milliseconds interval; // 0 表示一次性定时器
-        std::chrono::steady_clock::time_point next; // 下次触发时间
-        bool active = true;
-    };
-    std::map<uint64_t, TimerEntry> timers_;
-    uint64_t nextTimerId_ = 1;
+  std::mutex flushMutex_;
+  std::vector<std::shared_ptr<Connection>> pendingFlush_;
+
+  // 定时器只允许 loop 线程修改；cancel 可被任意线程调用（内部投递到 loop）
+  struct TimerEntry {
+    std::function<void()> cb;
+    std::chrono::milliseconds interval; // 0 表示一次性定时器
+    std::chrono::steady_clock::time_point next; // 下次触发时间
+    bool active = true;
+  };
+  std::map<uint64_t, TimerEntry> timers_;
+  uint64_t nextTimerId_ = 1;
 };
 
 } // namespace im

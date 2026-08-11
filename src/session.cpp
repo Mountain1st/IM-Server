@@ -14,209 +14,302 @@ namespace {
 constexpr std::chrono::seconds kHeartbeatInterval(30);
 // 僵尸判定：超过 2 个心跳周期未收到任何数据/Pong，判为死连接
 constexpr std::chrono::seconds kZombieTimeout(60);
+// 读方向排队上限：超过视为对端洪泛，断开避免内存无限增长
+constexpr size_t kMaxQueuedBytes = 8 * 1024 * 1024;
+// 单条消息（含分片累积）上限：防御恶意超大帧
+constexpr size_t kMaxMessageBytes = 2 * 1024 * 1024;
 }
 
 Session::Session(EventLoop* loop, ThreadPool* pool,
-                 const std::shared_ptr<Connection>& conn)
-    : loop_(loop), pool_(pool), conn_(conn), fd_(conn->fd()) {}
+        const std::shared_ptr<Connection>& conn)
+  : loop_(loop), pool_(pool), conn_(conn), fd_(conn->fd()) {}
 
 Session::~Session() {
-    std::cout << "[session] 会话销毁" << std::endl;
+  std::cout << "[session] 会话销毁" << std::endl;
 }
 
 void Session::start() {
-    auto self = shared_from_this();
-    conn_->setMessageCallback(
-        [self](const auto& conn, const char* data, size_t len) {
-            // 读事件在 loop 线程发生。任何收到数据即视为连接存活
-            self->lastRecv_ = std::chrono::steady_clock::now();
-            // 把数据按序入队，由线程池串行处理
-            self->enqueueAndDrain(data, len);
-        });
-    conn_->setCloseCallback([self](const std::shared_ptr<Connection>&) {
-        self->onClose(self->conn_);
+  // 连接可能在被调度到本函数前已由 loop 线程关闭（如先到达的关闭任务）。
+  // 此时 fd 已置 -1，不能对已关闭 fd 注册 epoll；直接走关闭清理路径，
+  // 由上层摘除在线表并移除连接，避免残留无效会话。
+  if (conn_->isClosed()) {
+    std::cerr << "[session] fd=" << fd_ << " start 时连接已关闭，直接清理" << std::endl;
+    if (closedHandler_) closedHandler_();
+    return;
+  }
+  // 自持，保证收到关闭前本会话一定存活；Connection 侧只持有弱引用
+  guard_ = shared_from_this();
+  parser_.setMaxBytes(kMaxMessageBytes);
+  auto weakSelf = std::weak_ptr<Session>(guard_);
+  conn_->setMessageCallback(
+    [weakSelf](const auto& conn, std::string data) {
+      auto self = weakSelf.lock();
+      if (!self) return;
+      // 读事件在 loop 线程发生。任何收到数据即视为连接存活
+      self->lastRecv_ = std::chrono::steady_clock::now();
+      // 把数据按序入队，由线程池串行处理（move 语义，零拷贝）
+      self->enqueueAndDrain(conn, std::move(data));
     });
-    conn_->start();
+  conn_->setCloseCallback(
+    [weakSelf](const std::shared_ptr<Connection>& conn) {
+      auto self = weakSelf.lock();
+      if (!self) return;
+      self->onClose(conn);
+    });
+  conn_->start();
 
-    lastRecv_ = std::chrono::steady_clock::now();
-    // 在会话所属的 IO loop 线程注册心跳定时器
-    loop_->runInLoop([self, this] {
-        if (self->heartbeatTimer_ == 0) {
-            self->heartbeatTimer_ =
-                loop_->addTimer([self] { self->onHeartbeat(); }, kHeartbeatInterval);
-        }
-    });
+  lastRecv_ = std::chrono::steady_clock::now();
+  // 在会话所属的 IO loop 线程注册心跳定时器
+  loop_->runInLoop([weakSelf, this] {
+    if (!guard_) return; // 已被关闭
+    auto self = weakSelf.lock();
+    if (!self) return;
+    if (self->heartbeatTimer_ == 0) {
+      self->heartbeatTimer_ =
+        loop_->addTimer([weakSelf] {
+          auto s = weakSelf.lock();
+          if (s) s->onHeartbeat();
+        }, kHeartbeatInterval);
+    }
+  });
 }
 
 void Session::onHeartbeat() {
-    auto now = std::chrono::steady_clock::now();
+  auto now = std::chrono::steady_clock::now();
 
-    // 僵尸判定：超过 kZombieTimeout 没收到过任何数据/Pong，直接断开
-    if (now - lastRecv_ > kZombieTimeout) {
-        std::cout << "[session] fd=" << fd_ << " 心跳超时，判定为僵尸连接，断开" << std::endl;
-        conn_->shutdown();
-        return;
-    }
+  // 僵尸判定：超过 kZombieTimeout 没收到过任何数据/Pong，直接断开
+  if (now - lastRecv_ > kZombieTimeout) {
+    std::cout << "[session] fd=" << fd_ << " 心跳超时，判定为僵尸连接，断开" << std::endl;
+    conn_->shutdown();
+    return;
+  }
 
-    // 到点发一个 Ping 探活
-    if (now - lastPingSent_ >= kHeartbeatInterval) {
-        lastPingSent_ = now;
-        conn_->send(ws::buildFrame(ws::Opcode::Ping, "heartbeat"));
-    }
+  // 到点发一个 Ping 探活
+  if (now - lastPingSent_ >= kHeartbeatInterval) {
+    lastPingSent_ = now;
+    conn_->send(ws::buildFrame(ws::Opcode::Ping, "heartbeat"));
+  }
 }
 
-void Session::enqueueAndDrain(const char* data, size_t len) {
-    bool needTask = false;
-    {
-        std::lock_guard<std::mutex> lock(queueMutex_);
-        pendingData_.emplace_back(data, len);
-        if (!draining_) {
-            draining_ = true;
-            needTask = true;
-        }
+void Session::enqueueAndDrain(const std::shared_ptr<Connection>&, std::string data) {
+  bool needTask = false;
+  {
+    std::lock_guard<std::mutex> lock(queueMutex_);
+    if (queueOverflow_) return; // 已超限，丢弃后续数据
+    if (queuedBytes_ + data.size() > kMaxQueuedBytes) {
+      // 读方向洪泛：清空队列并断开，避免等待积压继续增长
+      queueOverflow_ = true;
+      pendingData_.clear();
+      queuedBytes_ = 0;
+    } else {
+      pendingData_.emplace_back(std::move(data));
+      queuedBytes_ += pendingData_.back().size();
+      if (!draining_) {
+        draining_ = true;
+        needTask = true;
+      }
     }
-    if (needTask) {
-        auto self = shared_from_this();
-        pool_->submit([self] { self->drain(); });
-    }
+  }
+  if (queueOverflow_) {
+    std::cerr << "[session] fd=" << fd_ << " 读队列超限，断开洪泛连接" << std::endl;
+    conn_->shutdown();
+    return;
+  }
+  if (needTask) {
+    auto self = shared_from_this();
+    pool_->submit([self] { self->drain(); });
+  }
 }
 
 void Session::drain() {
-    for (;;) {
-        std::string chunk;
-        {
-            std::lock_guard<std::mutex> lock(queueMutex_);
-            if (pendingData_.empty()) {
-                draining_ = false;
-                return;
-            }
-            chunk = std::move(pendingData_.front());
-            pendingData_.pop_front();
-        }
-        onMessage(conn_, chunk.data(), chunk.size());
+  for (;;) {
+    std::string chunk;
+    {
+      std::lock_guard<std::mutex> lock(queueMutex_);
+      if (pendingData_.empty()) {
+        draining_ = false;
+        return;
+      }
+      chunk = std::move(pendingData_.front());
+      pendingData_.pop_front();
+      queuedBytes_ -= chunk.size();
     }
+    // 业务回调可能抛出异常（如 JSON 字段类型错误）。若不在工作线程兜底，
+    // 异常会逃逸到线程池 worker 导致 std::terminate 整个进程崩溃，故捕获并断开该连接。
+    try {
+      onMessage(conn_, chunk.data(), chunk.size());
+    } catch (const std::exception& e) {
+      std::cerr << "[session] fd=" << fd_ << " 业务处理异常: " << e.what() << std::endl;
+      conn_->shutdown();
+      return;
+    } catch (...) {
+      std::cerr << "[session] fd=" << fd_ << " 未知业务异常，断开" << std::endl;
+      conn_->shutdown();
+      return;
+    }
+  }
 }
 
 void Session::onMessage(const std::shared_ptr<Connection>&, const char* data, size_t len) {
-    if (!handshaked_) {
-        // 累积 HTTP 握手头
-        httpBuffer_.append(data, len);
-        size_t end = httpBuffer_.find("\r\n\r\n");
-        if (end == std::string::npos) {
-            if (httpBuffer_.size() > 8192) {
-                std::cerr << "[session] 握手头过大" << std::endl;
-                conn_->shutdown();
-            }
-            return;
-        }
-        std::string request = httpBuffer_.substr(0, end + 4);
-        handleHandshake(request);
-        if (!handshaked_) return; // 握手失败已关闭
-
-        std::string rest = httpBuffer_.substr(end + 4);
-        httpBuffer_.clear();
-        if (!rest.empty()) parser_.feed(rest.data(), rest.size());
-        processFrames();
-        return;
+  if (parser_.overflow()) {
+    std::cerr << "[session] fd=" << fd_ << " 帧缓冲超限，断开" << std::endl;
+    conn_->shutdown();
+    return;
+  }
+  if (!handshaked_) {
+    // 累积 HTTP 握手头
+    httpBuffer_.append(data, len);
+    size_t end = httpBuffer_.find("\r\n\r\n");
+    if (end == std::string::npos) {
+      if (httpBuffer_.size() > 8192) {
+        std::cerr << "[session] 握手头过大" << std::endl;
+        conn_->shutdown();
+      }
+      return;
     }
-    parser_.feed(data, len);
+    std::string request = httpBuffer_.substr(0, end + 4);
+    handleHandshake(request);
+    if (!handshaked_) return; // 握手失败已关闭
+
+    std::string rest = httpBuffer_.substr(end + 4);
+    httpBuffer_.clear();
+    if (!rest.empty()) parser_.feed(rest.data(), rest.size());
+    if (parser_.overflow()) {
+      std::cerr << "[session] fd=" << fd_ << " 帧缓冲超限，断开" << std::endl;
+      conn_->shutdown();
+      return;
+    }
     processFrames();
+    return;
+  }
+  parser_.feed(data, len);
+  processFrames();
 }
 
 void Session::processFrames() {
-    ws::Frame frame;
-    while (parser_.parseOne(&frame)) {
-        handle(frame);
-    }
+  ws::Frame frame;
+  while (parser_.parseOne(&frame)) {
+    handle(frame);
+  }
 }
 
 void Session::handleHandshake(const std::string& request) {
-    std::string key;
-    if (!ws::parseHandshakeKey(request, &key)) {
-        std::cerr << "[session] 缺 Sec-WebSocket-Key，拒绝握手" << std::endl;
-        conn_->shutdown();
-        return;
-    }
-    std::string accept = ws::computeAccept(key);
+  std::string key;
+  std::string reason;
+  if (!ws::validateHandshake(request, &key, &reason)) {
+    std::cerr << "[session] 握手校验失败: " << reason << std::endl;
+    conn_->shutdown();
+    return;
+  }
+  std::string accept = ws::computeAccept(key);
 
-    std::ostringstream oss;
-    oss << "HTTP/1.1 101 Switching Protocols\r\n"
-        << "Upgrade: websocket\r\n"
-        << "Connection: Upgrade\r\n"
-        << "Sec-WebSocket-Accept: " << accept << "\r\n"
-        << "\r\n";
-    conn_->send(oss.str());
-    handshaked_ = true;
-    std::cout << "[session] WebSocket 握手成功" << std::endl;
+  std::ostringstream oss;
+  oss << "HTTP/1.1 101 Switching Protocols\r\n"
+    << "Upgrade: websocket\r\n"
+    << "Connection: Upgrade\r\n"
+    << "Sec-WebSocket-Accept: " << accept << "\r\n"
+    << "\r\n";
+  conn_->send(oss.str());
+  handshaked_ = true;
+  std::cout << "[session] WebSocket 握手成功" << std::endl;
 }
 
 void Session::handle(const ws::Frame& frame) {
-    switch (frame.opcode) {
-    case ws::Opcode::Text:
-    case ws::Opcode::Binary:
-        if (frame.fin) {
-            handleData(frame.opcode, frame.payload);
-        } else {
-            fragmenting_ = true;
-            fragmentOpcode_ = frame.opcode;
-            fragmentBuffer_ = frame.payload;
-        }
-        break;
-    case ws::Opcode::Continuation:
-        if (!fragmenting_) {
-            std::cerr << "[session] 收到意外分片帧" << std::endl;
-            conn_->shutdown();
-            return;
-        }
-        fragmentBuffer_ += frame.payload;
-        if (frame.fin) {
-            handleData(fragmentOpcode_, fragmentBuffer_);
-            fragmenting_ = false;
-            fragmentBuffer_.clear();
-        }
-        break;
-    case ws::Opcode::Ping:
-        // 自动回 Pong
-        conn_->send(ws::buildFrame(ws::Opcode::Pong, frame.payload));
-        break;
-    case ws::Opcode::Pong:
-        break;
-    case ws::Opcode::Close:
-        // 回 Close 帧并关闭连接
-        conn_->send(ws::buildFrame(ws::Opcode::Close, frame.payload));
-        conn_->shutdown();
-        break;
-    default:
-        conn_->shutdown();
-        break;
+  // 控制帧（Close/Ping/Pong）校验：payload 必须 ≤125 字节且不可分片（RFC 6455 §5.5）。
+  // 缺失校验会让恶意客户端用大 Ping 触发同量级 Pong 回发，造成内存/带宽放大。
+  if (frame.opcode >= ws::Opcode::Close && (frame.payload.size() > 125 || !frame.fin)) {
+    std::cerr << "[session] fd=" << fd_ << " 非法控制帧，断开" << std::endl;
+    conn_->shutdown();
+    return;
+  }
+  switch (frame.opcode) {
+  case ws::Opcode::Text:
+  case ws::Opcode::Binary:
+    // 已有未完成分片时再收新数据帧：RFC 6455 要求协议错误断开，禁止静默覆盖旧分片
+    if (fragmenting_) {
+      std::cerr << "[session] fd=" << fd_ << " 分片未完成收到新数据帧，断开" << std::endl;
+      conn_->shutdown();
+      return;
     }
+    if (frame.fin) {
+      if (frame.payload.size() > kMaxMessageBytes) {
+        std::cerr << "[session] fd=" << fd_ << " 单条消息过大" << std::endl;
+        conn_->shutdown();
+        return;
+      }
+      handleData(frame.opcode, frame.payload);
+    } else {
+      fragmenting_ = true;
+      fragmentOpcode_ = frame.opcode;
+      fragmentBuffer_ = frame.payload;
+      if (fragmentBuffer_.size() > kMaxMessageBytes) {
+        std::cerr << "[session] fd=" << fd_ << " 分片累积超限" << std::endl;
+        conn_->shutdown();
+        return;
+      }
+    }
+    break;
+  case ws::Opcode::Continuation:
+    if (!fragmenting_) {
+      std::cerr << "[session] 收到意外分片帧" << std::endl;
+      conn_->shutdown();
+      return;
+    }
+    fragmentBuffer_ += frame.payload;
+    if (fragmentBuffer_.size() > kMaxMessageBytes) {
+      std::cerr << "[session] fd=" << fd_ << " 分片累积超限" << std::endl;
+      conn_->shutdown();
+      return;
+    }
+    if (frame.fin) {
+      handleData(fragmentOpcode_, fragmentBuffer_);
+      fragmenting_ = false;
+      fragmentBuffer_.clear();
+    }
+    break;
+  case ws::Opcode::Ping:
+    // 自动回 Pong
+    conn_->send(ws::buildFrame(ws::Opcode::Pong, frame.payload));
+    break;
+  case ws::Opcode::Pong:
+    break;
+  case ws::Opcode::Close:
+    // 回 Close 帧并关闭连接
+    conn_->send(ws::buildFrame(ws::Opcode::Close, frame.payload));
+    conn_->shutdown();
+    break;
+  default:
+    conn_->shutdown();
+    break;
+  }
 }
 
 void Session::handleData(ws::Opcode opcode, const std::string& payload) {
-    // 业务入口：目前仅回显，后续在此接入登录/消息路由等 IM 逻辑
-    if (opcode == ws::Opcode::Text) {
-        std::cout << "[session] fd=" << fd_ << " 收到文本消息: " << payload << std::endl;
-        reply("echo: " + payload);
-        return;
-    }
-    // 二进制等其它数据仅记录字节数
-    std::cout << "[session] fd=" << fd_
-              << " 收到二进制数据 " << payload.size() << " 字节" << std::endl;
-    reply("echo: [binary " + std::to_string(payload.size()) + " bytes]");
+  if (opcode == ws::Opcode::Text) {
+    std::cout << "[session] fd=" << fd_ << " 收到文本消息: " << payload << std::endl;
+    // 交由业务层处理（AppServer 通过 textHandler_ 接入回显等业务）
+    if (textHandler_) textHandler_(shared_from_this(), payload);
+    return;
+  }
+  // 二进制等其它数据仅记录字节数
+  std::cout << "[session] fd=" << fd_
+            << " 收到二进制数据 " << payload.size() << " 字节" << std::endl;
 }
 
 void Session::reply(const std::string& text) {
-    conn_->send(ws::buildFrame(ws::Opcode::Text, text));
+  conn_->send(ws::buildFrame(ws::Opcode::Text, text));
 }
 
 void Session::onClose(const std::shared_ptr<Connection>&) {
-    // 取消心跳定时器
-    if (heartbeatTimer_ != 0) {
-        loop_->cancelTimer(heartbeatTimer_);
-        heartbeatTimer_ = 0;
-    }
-    std::cout << "[session] fd=" << fd_ << " 断开连接" << std::endl;
-    if (closedHandler_) closedHandler_();
+  // 取消心跳定时器
+  if (heartbeatTimer_ != 0) {
+    loop_->cancelTimer(heartbeatTimer_);
+    heartbeatTimer_ = 0;
+  }
+  std::cout << "[session] fd=" << fd_ << " 断开连接" << std::endl;
+  if (closedHandler_) closedHandler_();
+  // 释放自持，让会话在本函数结束后可被销毁（不再循环引用）
+  guard_.reset();
 }
 
 } // namespace im
