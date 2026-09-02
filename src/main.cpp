@@ -2,9 +2,11 @@
 
 #include <csignal>
 #include <cstdlib>
+#include <exception>
 #include <iostream>
 #include <memory>
 #include <string>
+#include <vector>
 
 namespace {
 im::AppServer* g_server = nullptr;
@@ -18,8 +20,10 @@ void stop(int) {
 }
 } // namespace
 
-// 用法: imserver [端口] [IO线程数] [工作线程数] [最大连接数]
+// 用法: imserver [端口] [IO线程数] [工作线程数] [最大连接数] [允许Origin列表]
 // 缺省: 端口 9191，IO 线程 3，工作线程 5，连接数 0(不限)
+// 允许Origin列表: 逗号分隔，条目可为 "scheme://host[:port]" 或裸 "host[:port]"
+// （如 "http://localhost:8080,localhost:9191"）；缺省不校验 Origin/Host。
 int main(int argc, char* argv[]) {
   unsigned short port = 9191;
   unsigned ioThreads = 3;
@@ -50,8 +54,49 @@ int main(int argc, char* argv[]) {
     maxConnections = parseUint(argv[4]);
   }
 
-  // 业务层：内部启动工作线程并通知 TcpServer（其负责主从 eventloop）
-  auto server = std::make_shared<im::AppServer>(port, ioThreads, workThreads, maxConnections);
+  // 允许的 Origin/Host 列表（逗号分隔，可省略 scheme）；缺省为空 → 不校验
+  std::vector<std::string> allowedOrigins;
+  if (argc > 5) {
+    std::string list = argv[5];
+    size_t pos = 0;
+    for (;;) {
+      size_t comma = list.find(',', pos);
+      std::string item = list.substr(
+          pos, comma == std::string::npos ? std::string::npos : comma - pos);
+      size_t start = item.find_first_not_of(" \t");
+      size_t end = item.find_last_not_of(" \t");
+      if (start != std::string::npos) {
+        allowedOrigins.push_back(item.substr(start, end - start + 1));
+      }
+      if (comma == std::string::npos) break;
+      pos = comma + 1;
+    }
+    if (!allowedOrigins.empty()) {
+      std::cout << "[server] 握手允许 Origin/Host: ";
+      for (const auto& o : allowedOrigins) std::cout << o << " ";
+      std::cout << std::endl;
+    }
+  }
+
+  // 用户存储后端：缺省连接开发库 IMS_reactor_db（用户 IMS_jack）。
+  // 可用 IM_MYSQL_HOST/PORT/USER/PASSWORD/DB 环境变量覆盖；连接失败将启动报错。
+  im::UserStoreConfig userConfig;
+  if (const char* v = std::getenv("IM_MYSQL_DB")) userConfig.mysqlDb = v;
+  if (const char* v = std::getenv("IM_MYSQL_HOST")) userConfig.mysqlHost = v;
+  if (const char* v = std::getenv("IM_MYSQL_PORT")) userConfig.mysqlPort = static_cast<unsigned>(std::atoi(v));
+  if (const char* v = std::getenv("IM_MYSQL_USER")) userConfig.mysqlUser = v;
+  if (const char* v = std::getenv("IM_MYSQL_PASSWORD")) userConfig.mysqlPassword = v;
+
+  // 业务层：内部启动工作线程并通知 TcpServer（其负责主从 eventloop）。
+  // 用户存储为 MySQL：配置缺失或连接失败时抛异常，这里捕获并明确报错退出。
+  std::shared_ptr<im::AppServer> server;
+  try {
+    server = std::make_shared<im::AppServer>(
+        port, ioThreads, workThreads, maxConnections, allowedOrigins, userConfig);
+  } catch (const std::exception& e) {
+    std::cerr << "[server] 启动失败: " << e.what() << std::endl;
+    return 1;
+  }
   g_server = server.get();
   server->start();
 

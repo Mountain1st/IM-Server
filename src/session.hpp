@@ -10,6 +10,7 @@
 #include <memory>
 #include <mutex>
 #include <string>
+#include <vector>
 
 namespace im {
 
@@ -22,6 +23,11 @@ class Session : public std::enable_shared_from_this<Session> {
 public:
   Session(EventLoop* loop, ThreadPool* pool,
       const std::shared_ptr<Connection>& conn);
+  // allowedOrigins：允许的 Origin/Host 列表（条目格式见 websocket.hpp）。
+  // 为空表示不校验（向后兼容）。
+  Session(EventLoop* loop, ThreadPool* pool,
+      const std::shared_ptr<Connection>& conn,
+      std::vector<std::string> allowedOrigins);
   ~Session();
 
   void start();
@@ -57,6 +63,8 @@ private:
   void handle(const ws::Frame& frame);
   void handleData(ws::Opcode opcode, const std::string& payload);
   void handleHandshake(const std::string& request);
+  // 握手失败：回 403 响应，先冲刷响应字节再关闭连接（在连接所属 loop 线程执行）
+  void rejectHandshake(const std::string& reason);
 
   // 保证同一会话的消息按序、串行被线程池处理
   std::mutex queueMutex_;
@@ -71,6 +79,7 @@ private:
   ThreadPool* pool_;
   std::shared_ptr<Connection> conn_;
   int fd_; // 连接 fd，预先缓存供日志使用（连接关闭后 fd 会被置 -1）
+  std::vector<std::string> allowedOrigins_; // 允许的 Origin/Host；空表示不校验
   std::function<void()> closedHandler_;
   TextHandler textHandler_; // 业务回调（不持有，由上层注入）
 

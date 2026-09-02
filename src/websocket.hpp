@@ -3,6 +3,7 @@
 #include <cstdint>
 #include <functional>
 #include <string>
+#include <vector>
 
 namespace im {
 
@@ -21,6 +22,16 @@ enum class Opcode : uint8_t {
 
 // 从握手请求头解析出 Sec-WebSocket-Key
 bool parseHandshakeKey(const std::string& request, std::string* key);
+
+// 解析请求头中指定字段值（字段名大小写不敏感匹配），未找到返回空串
+std::string getRequestHeader(const std::string& request, const char* name);
+
+// Origin/Host 校验（防跨站 WebSocket 连接）：
+// allow 条目可为 "scheme://host[:port]" 或裸 "host[:port]"，比较时忽略大小写。
+// 判断 Origin 头是否被允许；空 origin 恒为 false。
+bool originAllowed(const std::string& origin, const std::vector<std::string>& allow);
+// 判断 Host 头是否被允许（与 allow 条目的 host[:port] 部分比较，忽略 scheme）。
+bool hostAllowed(const std::string& host, const std::vector<std::string>& allow);
 
 // 校验握手请求头（RFC 6455）：
 // - 首行必须为 GET

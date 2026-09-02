@@ -4,12 +4,15 @@
 #include "msg_dedup.hpp"
 #include "offline_store.hpp"
 #include "online_manager.hpp"
+#include "rate_limiter.hpp"
 #include "tcpserver.hpp"
 #include "threadpool.hpp"
 #include "user_store.hpp"
 
 #include <cstdint>
 #include <memory>
+#include <string>
+#include <vector>
 
 namespace im {
 
@@ -25,6 +28,13 @@ class AppServer : public std::enable_shared_from_this<AppServer> {
 public:
   AppServer(uint16_t port, size_t ioThreads, size_t workThreads);
   AppServer(uint16_t port, size_t ioThreads, size_t workThreads, size_t maxConnections);
+  // allowedOrigins：允许的 Origin/Host 列表（条目格式见 websocket.hpp），
+  // 为空表示握手不校验 Origin/Host（向后兼容）。
+  AppServer(uint16_t port, size_t ioThreads, size_t workThreads, size_t maxConnections,
+            std::vector<std::string> allowedOrigins);
+  // userConfig：MySQL 连接配置（必需；缺失/连接失败则启动报错退出）
+  AppServer(uint16_t port, size_t ioThreads, size_t workThreads, size_t maxConnections,
+            std::vector<std::string> allowedOrigins, UserStoreConfig userConfig);
   ~AppServer();
 
   void start();
@@ -47,10 +57,12 @@ private:
 
   std::shared_ptr<TcpServer> tcpServer_;
   ThreadPool workPool_;
-  UserStore userStore_;
+  std::vector<std::string> allowedOrigins_; // 握手 Origin/Host 允许列表；空=不校验
+  std::unique_ptr<UserStore> userStore_;    // MySQL 用户存储（连接失败时构造抛错）
   OnlineManager onlineMgr_;
   OfflineStore offlineStore_;
   MsgDedup msgDedup_;
+  RateLimiter msgLimiter_; // msg.send 每用户限流
 };
 
 } // namespace im

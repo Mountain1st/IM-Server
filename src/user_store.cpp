@@ -17,7 +17,13 @@ constexpr size_t kTokenCleanupThreshold = 1024;
 constexpr int kMaxLoginFailures = 5;
 constexpr std::chrono::seconds kLockWindow(60);
 constexpr size_t kLoginGuardLimit = 1024;
+// 密码派生参数：PBKDF2-HMAC-SHA256，10 万次迭代，输出 32 字节（256 位）
+constexpr unsigned kPbkdf2Iterations = 100000;
+constexpr size_t kPbkdf2DkLen = 32;
 }
+
+UserStore::UserStore(std::shared_ptr<UserRepository> repo)
+  : repo_(std::move(repo)) {}
 
 std::string UserStore::genSalt() {
   std::random_device rd;
@@ -30,7 +36,8 @@ std::string UserStore::genSalt() {
 }
 
 std::string UserStore::hashPassword(const std::string& salt, const std::string& password) {
-  return sha1Hex(salt + ":" + password);
+  // 慢哈希：PBKDF2-HMAC-SHA256，迭代 10 万次，抵御 GPU/ASIC 离线爆破
+  return pbkdf2HmacSha256Hex(password, salt, kPbkdf2Iterations, kPbkdf2DkLen);
 }
 
 std::string UserStore::genToken() {
@@ -44,13 +51,8 @@ std::string UserStore::genToken() {
 
 int UserStore::registerUser(const std::string& username, const std::string& password, int64_t* userId) {
   std::lock_guard<std::mutex> lock(mutex_);
-  if (byName_.count(username)) return 409; // 用户名已存在
-  int64_t id = nextId_++;
   std::string salt = genSalt();
-  users_.emplace(id, User{id, username, salt, hashPassword(salt, password)});
-  byName_[username] = id;
-  *userId = id;
-  return 0;
+  return repo_->insertUser(username, salt, hashPassword(salt, password), userId);
 }
 
 int UserStore::login(const std::string& username, const std::string& password, int64_t* userId, std::string* token) {
@@ -67,20 +69,20 @@ int UserStore::login(const std::string& username, const std::string& password, i
     }
   }
 
-  auto it = byName_.find(username);
-  if (it == byName_.end()) { // 用户不存在，统一按密码错误处理
+  int64_t id = 0;
+  std::string salt, passwordHash;
+  if (!repo_->fetchUser(username, &id, &salt, &passwordHash)) { // 用户不存在，统一按密码错误处理
     recordFail(username, now);
     return 403;
   }
-  const User& u = users_.at(it->second);
-  if (u.passwordHash != hashPassword(u.salt, password)) {
+  if (hashPassword(salt, password) != passwordHash) {
     recordFail(username, now);
     return 403;
   }
   loginGuards_.erase(username); // 登录成功，清空失败记录
   *token = genToken();
-  tokens_[*token] = TokenEntry{u.id, now + kTokenTtl};
-  *userId = u.id;
+  tokens_[*token] = TokenEntry{id, now + kTokenTtl};
+  *userId = id;
   // 顺带清理过期 token，防止表无限膨胀
   if (tokens_.size() > kTokenCleanupThreshold) {
     for (auto t = tokens_.begin(); t != tokens_.end();) {
@@ -126,10 +128,11 @@ int UserStore::verifyToken(const std::string& token, int64_t* userId, std::strin
     if (it != tokens_.end()) tokens_.erase(it); // 顺手清掉过期 token
     return 401; // token 无效或已过期
   }
-  auto u = users_.find(it->second.userId);
-  if (u == users_.end()) return 401;
-  *userId = u->second.id;
-  *username = u->second.username;
+  int64_t uid = it->second.userId;
+  std::string name;
+  if (!repo_->fetchUserNameById(uid, &name)) return 401; // 用户已不存在
+  *username = name;
+  *userId = uid;
   return 0;
 }
 
@@ -140,7 +143,7 @@ void UserStore::logout(const std::string& token) {
 
 bool UserStore::exists(int64_t userId) {
   std::lock_guard<std::mutex> lock(mutex_);
-  return users_.count(userId) != 0;
+  return repo_->userExists(userId);
 }
 
 } // namespace im

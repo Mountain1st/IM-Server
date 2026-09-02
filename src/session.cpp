@@ -24,6 +24,12 @@ Session::Session(EventLoop* loop, ThreadPool* pool,
         const std::shared_ptr<Connection>& conn)
   : loop_(loop), pool_(pool), conn_(conn), fd_(conn->fd()) {}
 
+Session::Session(EventLoop* loop, ThreadPool* pool,
+        const std::shared_ptr<Connection>& conn,
+        std::vector<std::string> allowedOrigins)
+  : loop_(loop), pool_(pool), conn_(conn), fd_(conn->fd()),
+    allowedOrigins_(std::move(allowedOrigins)) {}
+
 Session::~Session() {
   std::cout << "[session] 会话销毁" << std::endl;
 }
@@ -193,6 +199,19 @@ void Session::processFrames() {
   }
 }
 
+void Session::rejectHandshake(const std::string& reason) {
+  std::cerr << "[session] 握手拒绝: " << reason << std::endl;
+  conn_->send("HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+  // 本函数运行在工作线程；send 只是入队。若直接 shutdown()，
+  // loop 线程会在 handlePending 里先执行 close 任务再 flush，403 字节会被丢弃。
+  // 因此投递「先冲刷、后关闭」的任务到连接所属 loop 线程。
+  auto c = conn_;
+  loop_->runInLoop([c] {
+    c->flushWrite();
+    c->forceClose();
+  });
+}
+
 void Session::handleHandshake(const std::string& request) {
   std::string key;
   std::string reason;
@@ -201,6 +220,22 @@ void Session::handleHandshake(const std::string& request) {
     conn_->shutdown();
     return;
   }
+
+  // Origin/Host 校验（防跨站 WebSocket 连接 / Host 头注入）。
+  // 配置了允许列表才启用；缺省不校验，兼容命令行工具等不携带 Origin 的客户端。
+  if (!allowedOrigins_.empty()) {
+    const std::string origin = ws::getRequestHeader(request, "Origin");
+    const std::string host = ws::getRequestHeader(request, "Host");
+    if (!origin.empty() && !ws::originAllowed(origin, allowedOrigins_)) {
+      rejectHandshake("Origin 不在允许列表 (" + origin + ")");
+      return;
+    }
+    if (!host.empty() && !ws::hostAllowed(host, allowedOrigins_)) {
+      rejectHandshake("Host 不在允许列表 (" + host + ")");
+      return;
+    }
+  }
+
   std::string accept = ws::computeAccept(key);
 
   std::ostringstream oss;
@@ -286,7 +321,9 @@ void Session::handle(const ws::Frame& frame) {
 
 void Session::handleData(ws::Opcode opcode, const std::string& payload) {
   if (opcode == ws::Opcode::Text) {
-    std::cout << "[session] fd=" << fd_ << " 收到文本消息: " << payload << std::endl;
+    // 只记录字节数，不打印消息内容（隐私/安全脱敏）
+    std::cout << "[session] fd=" << fd_ << " 收到文本消息 " << payload.size()
+              << " 字节" << std::endl;
     // 交由业务层处理（AppServer 通过 textHandler_ 接入回显等业务）
     if (textHandler_) textHandler_(shared_from_this(), payload);
     return;

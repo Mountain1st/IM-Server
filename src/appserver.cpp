@@ -1,24 +1,57 @@
 #include "appserver.hpp"
 
 #include "connection.hpp"
+#include "mysql_user_repository.hpp"
 #include "session.hpp"
 
 #include <ctime>
 #include <iostream>
+#include <stdexcept>
 
 namespace im {
 
 namespace {
 // 单条消息 content 长度上限（与 docs/protocol.md 一致）
 constexpr size_t kMaxContentBytes = 64 * 1024;
+// msg.send 限流：窗口时长内每用户最多发送条数；空 clientMsgId 无法参与去重，走更严限制
+constexpr std::chrono::seconds kSendWindow(10);
+constexpr size_t kMaxSendPerWindow = 30;
+constexpr size_t kMaxSendNoIdPerWindow = 5;
+
+// 构造 MySQL 用户存储；配置为空（被环境变量置空）或连接失败直接抛错退出。
+std::shared_ptr<UserRepository> makeUserRepository(const UserStoreConfig& c) {
+  if (c.mysqlDb.empty() || c.mysqlUser.empty()) {
+    throw std::runtime_error(
+        "MySQL 配置为空：请勿用环境变量 IM_MYSQL_USER / IM_MYSQL_DB 置空默认配置");
+  }
+  auto repo = std::make_shared<MySqlUserRepository>(
+      c.mysqlHost, c.mysqlPort, c.mysqlUser, c.mysqlPassword, c.mysqlDb);
+  if (!repo->ok()) {
+    throw std::runtime_error("MySQL 连接失败: " + repo->errStr());
+  }
+  std::cout << "[db] 用户存储: MySQL (host=" << c.mysqlHost << ":" << c.mysqlPort
+            << ", db=" << c.mysqlDb << ")" << std::endl;
+  return repo;
 }
+} // namespace
 
 AppServer::AppServer(uint16_t port, size_t ioThreads, size_t workThreads)
     : AppServer(port, ioThreads, workThreads, 0) {}
 
 AppServer::AppServer(uint16_t port, size_t ioThreads, size_t workThreads, size_t maxConnections)
+    : AppServer(port, ioThreads, workThreads, maxConnections, {}) {}
+
+AppServer::AppServer(uint16_t port, size_t ioThreads, size_t workThreads, size_t maxConnections,
+                     std::vector<std::string> allowedOrigins)
+    : AppServer(port, ioThreads, workThreads, maxConnections, std::move(allowedOrigins),
+                UserStoreConfig{}) {}
+
+AppServer::AppServer(uint16_t port, size_t ioThreads, size_t workThreads, size_t maxConnections,
+                     std::vector<std::string> allowedOrigins, UserStoreConfig userConfig)
     : tcpServer_(std::make_shared<TcpServer>(port, ioThreads, maxConnections)),
-      workPool_(workThreads) {}
+      workPool_(workThreads),
+      allowedOrigins_(std::move(allowedOrigins)),
+      userStore_(std::make_unique<UserStore>(makeUserRepository(userConfig))) {}
 
 AppServer::~AppServer() = default;
 
@@ -49,7 +82,7 @@ void AppServer::requestStop() {
 }
 
 void AppServer::onNewConnection(EventLoop* ioLoop, const TcpServer::ConnectionPtr& conn) {
-  auto session = std::make_shared<Session>(ioLoop, &workPool_, conn);
+  auto session = std::make_shared<Session>(ioLoop, &workPool_, conn, allowedOrigins_);
   auto self = shared_from_this();
   // 会话关闭：先从在线表摘除，再通知网络层移除连接。
   // 注意：closedHandler 是 Session 成员，必须捕获弱引用，避免 Session 自引用循环泄漏。
@@ -127,9 +160,9 @@ void AppServer::onRegister(const std::shared_ptr<Session>& session, const json& 
     return;
   }
   int64_t userId = 0;
-  int rc = userStore_.registerUser(username, password, &userId);
+  int rc = userStore_->registerUser(username, password, &userId);
   if (rc != 0) {
-    session->reply(makeResult("auth.register_res", rc, "USER_EXISTS", {}));
+    session->reply(makeResult("auth.register_res", rc, "USER_EXISTS", json::object()));
     return;
   }
   session->reply(makeResult("auth.register_res", 0, "ok",
@@ -145,18 +178,18 @@ void AppServer::onLogin(const std::shared_ptr<Session>& session, const json& dat
   }
   int64_t userId = 0;
   std::string token;
-  int rc = userStore_.login(username, password, &userId, &token);
+  int rc = userStore_->login(username, password, &userId, &token);
   if (rc != 0) {
     // 透传真实错误码：403 密码错误 / 429 登录限流
     const std::string msg = (rc == 429) ? "TOO_MANY_ATTEMPTS" : "WRONG_PASSWORD";
-    session->reply(makeResult("auth.login_res", rc, msg, {}));
+    session->reply(makeResult("auth.login_res", rc, msg, json::object()));
     return;
   }
   // 防重复登录：本会话若已登录其它账号，先注销旧绑定（在线表+token），
   // 否则在线表会残留指向本会话的旧 userId 条目，导致发给旧用户的消息被错投。
   if (session->isLoggedIn()) {
     onlineMgr_.remove(session->userId(), session);
-    userStore_.logout(session->token());
+    userStore_->logout(session->token());
   }
   session->setLogin(userId, token);
   // 连接可能恰在此时被 loop 线程关闭，先检查避免往在线表加已死会话。
@@ -189,16 +222,16 @@ void AppServer::onToken(const std::shared_ptr<Session>& session, const json& dat
   }
   int64_t userId = 0;
   std::string username;
-  int rc = userStore_.verifyToken(token, &userId, &username);
+  int rc = userStore_->verifyToken(token, &userId, &username);
   if (rc != 0) {
-    session->reply(makeResult("auth.token_res", 401, "INVALID_TOKEN", {}));
+    session->reply(makeResult("auth.token_res", 401, "INVALID_TOKEN", json::object()));
     return;
   }
   // 防重复登录：本会话若已登录其它账号，先注销旧绑定（在线表+token），
   // 否则在线表会残留指向本会话的旧 userId 条目。
   if (session->isLoggedIn()) {
     onlineMgr_.remove(session->userId(), session);
-    userStore_.logout(session->token());
+    userStore_->logout(session->token());
   }
   session->setLogin(userId, token);
   if (session->conn()->isClosed()) {
@@ -223,9 +256,9 @@ void AppServer::onToken(const std::shared_ptr<Session>& session, const json& dat
 void AppServer::onLogout(const std::shared_ptr<Session>& session) {
   int64_t userId = session->userId();
   onlineMgr_.remove(userId, session);
-  userStore_.logout(session->token());
+  userStore_->logout(session->token());
   session->logout();
-  session->reply(makeResult("auth.logout_res", 0, "ok", {}));
+  session->reply(makeResult("auth.logout_res", 0, "ok", json::object()));
 }
 
 void AppServer::onSend(const std::shared_ptr<Session>& session, const json& data) {
@@ -242,7 +275,7 @@ void AppServer::onSend(const std::shared_ptr<Session>& session, const json& data
     ack(400, "BAD_PACKET");
     return;
   }
-  if (to <= 0 || content.empty()) {
+  if (to < 0 || content.empty()) {
     ack(400, "bad params");
     return;
   }
@@ -250,7 +283,10 @@ void AppServer::onSend(const std::shared_ptr<Session>& session, const json& data
     ack(413, "MSG_TOO_LONG");
     return;
   }
-  if (!userStore_.exists(to)) {
+  // to == 0 为「自己对话框」：目标即发送者自己，必然存在，跳过 exists 校验。
+  // 服务器把消息投递回自己的所有在线会话（每端各显示一遍）。
+  const int64_t targetId = (to == 0) ? session->userId() : to;
+  if (to != 0 && !userStore_->exists(to)) {
     ack(404, "USER_NOT_FOUND");
     return;
   }
@@ -259,22 +295,30 @@ void AppServer::onSend(const std::shared_ptr<Session>& session, const json& data
     ack(0, "ok");
     return;
   }
+  // 消息发送限流（放在去重之后：重复重发不消耗配额，正常发送按配额控制）。
+  // 空 clientMsgId 不参与去重，故走更严限制，遏制无 id 刷消息。
+  const size_t sendLimit = clientMsgId.empty() ? kMaxSendNoIdPerWindow : kMaxSendPerWindow;
+  if (!msgLimiter_.allow(session->userId(), sendLimit, kSendWindow)) {
+    ack(429, "TOO_MANY_MESSAGES");
+    return;
+  }
   json recvData = {
     {"from", session->userId()},
     {"content", content},
     {"ts", static_cast<int64_t>(std::time(nullptr))},
     {"clientMsgId", clientMsgId},
+    {"chatType", chatType},
   };
-  auto targets = onlineMgr_.sessions(to);
+  ack(0, "ok");
+  auto targets = onlineMgr_.sessions(targetId);
   if (targets.empty()) {
     // 目标离线：暂存，待其登录后补发
-    offlineStore_.push(to, recvData);
+    offlineStore_.push(targetId, recvData);
   } else {
     for (auto& t : targets) {
       t->reply(makeEnvelopeText("msg.recv", recvData));
     }
   }
-  ack(0, "ok");
 }
 
 } // namespace im

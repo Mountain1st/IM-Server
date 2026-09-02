@@ -78,7 +78,44 @@ bool headerHasToken(const std::string& value, const char* token) {
   }
   return false;
 }
+
+// 从 URL/Origin 中提取 host[:port]（去掉 scheme:// 前缀与路径），并统一转小写
+std::string extractHostLower(const std::string& s) {
+  std::string t = s;
+  size_t scheme = t.find("://");
+  if (scheme != std::string::npos) t = t.substr(scheme + 3);
+  size_t p = t.find_first_of("/?#");
+  if (p != std::string::npos) t = t.substr(0, p);
+  for (auto& c : t) {
+    c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+  }
+  return t;
+}
 } // namespace
+
+std::string getRequestHeader(const std::string& request, const char* name) {
+  std::string value;
+  if (getHeader(request, name, &value)) return value;
+  return {};
+}
+
+bool originAllowed(const std::string& origin, const std::vector<std::string>& allow) {
+  std::string originHost = extractHostLower(origin);
+  if (originHost.empty()) return false;
+  for (const auto& a : allow) {
+    if (extractHostLower(a) == originHost) return true;
+  }
+  return false;
+}
+
+bool hostAllowed(const std::string& host, const std::vector<std::string>& allow) {
+  std::string h = extractHostLower(host);
+  if (h.empty()) return false;
+  for (const auto& a : allow) {
+    if (extractHostLower(a) == h) return true;
+  }
+  return false;
+}
 
 bool validateHandshake(const std::string& request, std::string* key, std::string* reason) {
   // 首行必须是 GET
