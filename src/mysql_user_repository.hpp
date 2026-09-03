@@ -22,10 +22,14 @@ public:
   bool ok() const { return client_.ok(); }
   std::string errStr() const { return client_.errStr(); }
 
-  int insertUser(const std::string& username, const std::string& salt,
-                 const std::string& passwordHash, int64_t* userId) override;
-  bool fetchUser(const std::string& username, int64_t* userId,
-                 std::string* salt, std::string* passwordHash) override;
+  int insertUser(const std::string& account, const std::string& username,
+                 const std::string& salt, const std::string& passwordHash,
+                 int64_t* userId) override;
+  int fetchUser(const std::string& account, int64_t* userId,
+                std::string* username, std::string* salt,
+                std::string* passwordHash) override;
+  int fetchUserInfo(const std::string& account, int64_t* userId,
+                    std::string* username) override;
   bool userExists(int64_t userId) override;
   bool fetchUserNameById(int64_t userId, std::string* username) override;
 
@@ -33,8 +37,8 @@ private:
   void loadIdCache();
 
   MySqlClient client_;
-  // 已知 userId -> username 缓存（启动全量加载 + 注册时追加）。
-  // userExists() 与 token 回执的 username 查询都走缓存，避免热路径打数据库。
+  // 已知 userId -> 昵称(username) 缓存（启动全量加载 + 注册时追加）。
+  // userExists()、token 回执与 msg.recv 的 fromNick 都走缓存，避免热路径打数据库。
   // 本服务不提供删号，缓存不会过期；若外部直接改库则需重启同步。
   std::unordered_map<int64_t, std::string> ids_;
 };

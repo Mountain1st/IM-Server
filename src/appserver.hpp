@@ -54,6 +54,8 @@ private:
   void onToken(const std::shared_ptr<Session>& session, const json& data);
   void onLogout(const std::shared_ptr<Session>& session);
   void onSend(const std::shared_ptr<Session>& session, const json& data);
+  // 新建对话：校验目标 userId 是否存在并返回其昵称
+  void onCreateConv(const std::shared_ptr<Session>& session, const json& data);
 
   std::shared_ptr<TcpServer> tcpServer_;
   ThreadPool workPool_;

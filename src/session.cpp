@@ -14,6 +14,8 @@ namespace {
 constexpr std::chrono::seconds kHeartbeatInterval(30);
 // 僵尸判定：超过 2 个心跳周期未收到任何数据/Pong，判为死连接
 constexpr std::chrono::seconds kZombieTimeout(60);
+// 握手截止：连接建立后须在此时限内完成 WebSocket 握手（防 Slowloris 慢速占槽）
+constexpr std::chrono::seconds kHandshakeTimeout(10);
 // 读方向排队上限：超过视为对端洪泛，断开避免内存无限增长
 constexpr size_t kMaxQueuedBytes = 8 * 1024 * 1024;
 // 单条消息（含分片累积）上限：防御恶意超大帧
@@ -65,11 +67,24 @@ void Session::start() {
   conn_->start();
 
   lastRecv_ = std::chrono::steady_clock::now();
-  // 在会话所属的 IO loop 线程注册心跳定时器
+  // 在会话所属的 IO loop 线程注册定时器：握手截止 + 心跳
   loop_->runInLoop([weakSelf, this] {
     if (!guard_) return; // 已被关闭
     auto self = weakSelf.lock();
     if (!self) return;
+    if (self->handshakeTimer_ == 0) {
+      // 周期触发，回调内判定：超时仍未握手则断开
+      self->handshakeTimer_ =
+        loop_->addTimer([weakSelf] {
+          auto s = weakSelf.lock();
+          if (!s) return;
+          if (!s->handshaked_) {
+            std::cout << "[session] fd=" << s->fd_
+                      << " 握手超时（" << kHandshakeTimeout.count() << "s），断开" << std::endl;
+            s->conn_->shutdown();
+          }
+        }, kHandshakeTimeout);
+    }
     if (self->heartbeatTimer_ == 0) {
       self->heartbeatTimer_ =
         loop_->addTimer([weakSelf] {
@@ -246,6 +261,11 @@ void Session::handleHandshake(const std::string& request) {
     << "\r\n";
   conn_->send(oss.str());
   handshaked_ = true;
+  // 握手完成，取消握手截止定时器（跨线程安全，投递到 loop 执行）
+  if (handshakeTimer_ != 0) {
+    loop_->cancelTimer(handshakeTimer_);
+    handshakeTimer_ = 0;
+  }
   std::cout << "[session] WebSocket 握手成功" << std::endl;
 }
 
@@ -338,10 +358,14 @@ void Session::reply(const std::string& text) {
 }
 
 void Session::onClose(const std::shared_ptr<Connection>&) {
-  // 取消心跳定时器
+  // 取消心跳与握手截止定时器
   if (heartbeatTimer_ != 0) {
     loop_->cancelTimer(heartbeatTimer_);
     heartbeatTimer_ = 0;
+  }
+  if (handshakeTimer_ != 0) {
+    loop_->cancelTimer(handshakeTimer_);
+    handshakeTimer_ = 0;
   }
   std::cout << "[session] fd=" << fd_ << " 断开连接" << std::endl;
   if (closedHandler_) closedHandler_();

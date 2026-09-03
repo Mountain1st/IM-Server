@@ -103,6 +103,8 @@ private:
 
   // 心跳：服务器定时发 Ping，客户端须回 Pong；连续超时判为僵尸连接并断开
   EventLoop::TimerId heartbeatTimer_ = 0;
+  // 握手截止：建立连接后须在期限内完成 WebSocket 握手，否则断开（防 Slowloris 占槽）
+  EventLoop::TimerId handshakeTimer_ = 0;
   // 追踪最后一次收到任意消息的时间（loop 线程访问）
   std::chrono::steady_clock::time_point lastRecv_{};
   std::chrono::steady_clock::time_point lastPingSent_{};

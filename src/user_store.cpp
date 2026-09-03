@@ -41,26 +41,30 @@ std::string UserStore::hashPassword(const std::string& salt, const std::string& 
 }
 
 std::string UserStore::genToken() {
+  // 直接取 random_device（Linux 下通常是 CSPRNG）的 160 位熵，避免
+  // mt19937_64 单 32 位种子导致的 token 可枚举问题。
   std::random_device rd;
-  std::mt19937_64 gen(rd());
   std::ostringstream oss;
-  // 128 位随机数，避免可预测性；不再拼用户名（无助于防碰撞）
-  oss << std::hex << gen() << gen();
-  return sha1Hex(oss.str());
+  for (int i = 0; i < 20; ++i) {
+    oss << std::hex << std::setw(2) << std::setfill('0') << (rd() & 0xFF);
+  }
+  return oss.str();
 }
 
-int UserStore::registerUser(const std::string& username, const std::string& password, int64_t* userId) {
+int UserStore::registerUser(const std::string& account, const std::string& password,
+                            const std::string& username, int64_t* userId) {
   std::lock_guard<std::mutex> lock(mutex_);
   std::string salt = genSalt();
-  return repo_->insertUser(username, salt, hashPassword(salt, password), userId);
+  return repo_->insertUser(account, username, salt, hashPassword(salt, password), userId);
 }
 
-int UserStore::login(const std::string& username, const std::string& password, int64_t* userId, std::string* token) {
+int UserStore::login(const std::string& account, const std::string& password,
+                     int64_t* userId, std::string* username, std::string* token) {
   std::lock_guard<std::mutex> lock(mutex_);
   auto now = std::chrono::steady_clock::now();
 
   // 登录限流：窗口内失败次数已达阈值则拒绝（返回 429），窗口过期后重置
-  auto guardIt = loginGuards_.find(username);
+  auto guardIt = loginGuards_.find(account);
   if (guardIt != loginGuards_.end()) {
     if (now - guardIt->second.windowStart >= kLockWindow) {
       loginGuards_.erase(guardIt);
@@ -70,19 +74,22 @@ int UserStore::login(const std::string& username, const std::string& password, i
   }
 
   int64_t id = 0;
-  std::string salt, passwordHash;
-  if (!repo_->fetchUser(username, &id, &salt, &passwordHash)) { // 用户不存在，统一按密码错误处理
-    recordFail(username, now);
+  std::string name, salt, passwordHash;
+  int frc = repo_->fetchUser(account, &id, &name, &salt, &passwordHash);
+  if (frc == 2) return 500; // 数据库错误，不能误报为密码错误
+  if (frc != 0) { // 账号不存在，统一按密码错误处理
+    recordFail(account, now);
     return 403;
   }
   if (hashPassword(salt, password) != passwordHash) {
-    recordFail(username, now);
+    recordFail(account, now);
     return 403;
   }
-  loginGuards_.erase(username); // 登录成功，清空失败记录
+  loginGuards_.erase(account); // 登录成功，清空失败记录
   *token = genToken();
   tokens_[*token] = TokenEntry{id, now + kTokenTtl};
   *userId = id;
+  *username = name;
   // 顺带清理过期 token，防止表无限膨胀
   if (tokens_.size() > kTokenCleanupThreshold) {
     for (auto t = tokens_.begin(); t != tokens_.end();) {
@@ -93,13 +100,13 @@ int UserStore::login(const std::string& username, const std::string& password, i
   return 0;
 }
 
-void UserStore::recordFail(const std::string& username, std::chrono::steady_clock::time_point now) {
-  auto& g = loginGuards_[username];
+void UserStore::recordFail(const std::string& account, std::chrono::steady_clock::time_point now) {
+  auto& g = loginGuards_[account];
   if (g.failures == 0) g.windowStart = now; // 窗口起点以首次失败计
   ++g.failures;
   // 防表无限膨胀：超限时先清理已过期条目；若仍超限，
-  // 则强淘汰窗口最早（最旧）的条目（跳过当前用户名，
-  // 防止攻击者用海量新用户名把目标账号的失败计数挤掉，绕过限流）。
+  // 则强淘汰窗口最早（最旧）的条目（跳过当前账号，
+  // 防止攻击者用海量新账号把目标账号的失败计数挤掉，绕过限流）。
   if (loginGuards_.size() > kLoginGuardLimit) {
     for (auto it = loginGuards_.begin(); it != loginGuards_.end();) {
       if (now - it->second.windowStart >= kLockWindow) it = loginGuards_.erase(it);
@@ -108,7 +115,7 @@ void UserStore::recordFail(const std::string& username, std::chrono::steady_cloc
     while (loginGuards_.size() > kLoginGuardLimit) {
       auto oldest = loginGuards_.end();
       for (auto it = loginGuards_.begin(); it != loginGuards_.end(); ++it) {
-        if (it->first == username) continue;
+        if (it->first == account) continue;
         if (oldest == loginGuards_.end() ||
             it->second.windowStart < oldest->second.windowStart) {
           oldest = it;
@@ -144,6 +151,16 @@ void UserStore::logout(const std::string& token) {
 bool UserStore::exists(int64_t userId) {
   std::lock_guard<std::mutex> lock(mutex_);
   return repo_->userExists(userId);
+}
+
+int UserStore::lookupAccount(const std::string& account, int64_t* userId, std::string* username) {
+  std::lock_guard<std::mutex> lock(mutex_);
+  return repo_->fetchUserInfo(account, userId, username);
+}
+
+bool UserStore::nickname(int64_t userId, std::string* username) {
+  std::lock_guard<std::mutex> lock(mutex_);
+  return repo_->fetchUserNameById(userId, username);
 }
 
 } // namespace im

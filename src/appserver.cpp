@@ -13,10 +13,33 @@ namespace im {
 namespace {
 // 单条消息 content 长度上限（与 docs/protocol.md 一致）
 constexpr size_t kMaxContentBytes = 64 * 1024;
+// 账号长度上限（与 DB users 表 VARCHAR(64) 一致）
+constexpr size_t kMaxAccountLen = 64;
+// 昵称长度上限（< 32 位）
+constexpr size_t kMaxUsernameLen = 32;
+// 密码：6-32 位字母数字组合（仅 [A-Za-z0-9]，且至少含一个字母与一个数字）
+constexpr size_t kMinPasswordLen = 6;
+constexpr size_t kMaxPasswordLen = 32;
 // msg.send 限流：窗口时长内每用户最多发送条数；空 clientMsgId 无法参与去重，走更严限制
 constexpr std::chrono::seconds kSendWindow(10);
 constexpr size_t kMaxSendPerWindow = 30;
 constexpr size_t kMaxSendNoIdPerWindow = 5;
+
+// 密码规则校验：6-32 位、仅字母/数字、且同时包含字母与数字
+bool validPassword(const std::string& p) {
+  if (p.size() < kMinPasswordLen || p.size() > kMaxPasswordLen) return false;
+  bool hasLetter = false, hasDigit = false;
+  for (unsigned char c : p) {
+    if (c >= '0' && c <= '9') {
+      hasDigit = true;
+    } else if ((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z')) {
+      hasLetter = true;
+    } else {
+      return false; // 含非字母数字字符
+    }
+  }
+  return hasLetter && hasDigit; // 必须字母与数字都有
+}
 
 // 构造 MySQL 用户存储；配置为空（被环境变量置空）或连接失败直接抛错退出。
 std::shared_ptr<UserRepository> makeUserRepository(const UserStoreConfig& c) {
@@ -95,7 +118,7 @@ void AppServer::onNewConnection(EventLoop* ioLoop, const TcpServer::ConnectionPt
     [self](const std::shared_ptr<Session>& s, const std::string& text) {
       json env;
       if (!parseEnvelope(text, &env)) {
-        s->reply(makeError(400, "invalid packet"));
+        s->reply(makeError(400, "无效的封包"));
         return;
       }
       self->onEnvelope(s, env);
@@ -132,7 +155,7 @@ void AppServer::onEnvelope(const std::shared_ptr<Session>& session, const json& 
     }
     // 未登录只允许 auth.register / auth.login / auth.token
     if (!session->isLoggedIn()) {
-      session->reply(makeError(401, "NOT_LOGIN"));
+      session->reply(makeError(401, "未登录"));
       return;
     }
     if (type == "auth.logout") {
@@ -143,45 +166,59 @@ void AppServer::onEnvelope(const std::shared_ptr<Session>& session, const json& 
       onSend(session, data);
       return;
     }
-    session->reply(makeError(400, "unknown type"));
+    if (type == "chat.create") {
+      onCreateConv(session, data);
+      return;
+    }
+    session->reply(makeError(400, "未知的指令类型"));
   } catch (const json::exception& e) {
     // data.value() 在字段存在但类型不符时抛 type_error.302。
     // 统一按坏包处理并回复，避免异常逃逸到工作线程导致进程崩溃。
     std::cerr << "[app] 封包字段类型异常: " << e.what() << std::endl;
-    session->reply(makeError(400, "bad packet"));
+    session->reply(makeError(400, "封包字段错误"));
   }
 }
 
 void AppServer::onRegister(const std::shared_ptr<Session>& session, const json& data) {
-  std::string username = data.value("username", "");
+  std::string account = data.value("account", "");
   std::string password = data.value("password", "");
-  if (username.empty() || password.empty()) {
-    session->reply(makeError(400, "bad params"));
+  // username 为昵称（可选，空则缺省与账号一致）
+  std::string username = data.value("username", "");
+  if (username.empty()) username = account;
+  // 校验：账号非空且不超长；密码 6-32 位字母数字组合；昵称 < 32 位
+  if (account.empty() || account.size() > kMaxAccountLen ||
+      !validPassword(password) ||
+      username.size() >= kMaxUsernameLen) {
+    session->reply(makeError(400, "参数错误"));
     return;
   }
   int64_t userId = 0;
-  int rc = userStore_->registerUser(username, password, &userId);
+  int rc = userStore_->registerUser(account, password, username, &userId);
   if (rc != 0) {
-    session->reply(makeResult("auth.register_res", rc, "USER_EXISTS", json::object()));
+    session->reply(makeResult("auth.register_res", rc, "账号已存在", json::object()));
     return;
   }
   session->reply(makeResult("auth.register_res", 0, "ok",
-      json{{"userId", userId}, {"username", username}}));
+      json{{"userId", userId}, {"account", account}, {"username", username}}));
 }
 
 void AppServer::onLogin(const std::shared_ptr<Session>& session, const json& data) {
-  std::string username = data.value("username", "");
+  std::string account = data.value("account", "");
   std::string password = data.value("password", "");
-  if (username.empty() || password.empty()) {
-    session->reply(makeError(400, "bad params"));
+  if (account.empty() || account.size() > kMaxAccountLen ||
+      password.empty() || password.size() > kMaxPasswordLen) {
+    session->reply(makeError(400, "参数错误"));
     return;
   }
   int64_t userId = 0;
+  std::string username;
   std::string token;
-  int rc = userStore_->login(username, password, &userId, &token);
+  int rc = userStore_->login(account, password, &userId, &username, &token);
   if (rc != 0) {
-    // 透传真实错误码：403 密码错误 / 429 登录限流
-    const std::string msg = (rc == 429) ? "TOO_MANY_ATTEMPTS" : "WRONG_PASSWORD";
+    // 透传真实错误码：403 密码错误 / 429 登录限流 / 500 存储异常
+    const char* msg = (rc == 429) ? "登录尝试过于频繁，请稍后再试"
+                    : (rc == 500) ? "服务器内部错误"
+                    : "账号或密码错误";
     session->reply(makeResult("auth.login_res", rc, msg, json::object()));
     return;
   }
@@ -206,7 +243,7 @@ void AppServer::onLogin(const std::shared_ptr<Session>& session, const json& dat
     return;
   }
   session->reply(makeResult("auth.login_res", 0, "ok",
-      json{{"userId", userId}, {"username", username}, {"token", token}}));
+      json{{"userId", userId}, {"account", account}, {"username", username}, {"token", token}}));
   // 登录应答之后补发离线消息
   auto msgs = offlineStore_.take(userId);
   if (!msgs.empty()) {
@@ -217,14 +254,14 @@ void AppServer::onLogin(const std::shared_ptr<Session>& session, const json& dat
 void AppServer::onToken(const std::shared_ptr<Session>& session, const json& data) {
   std::string token = data.value("token", "");
   if (token.empty()) {
-    session->reply(makeError(400, "bad params"));
+    session->reply(makeError(400, "参数错误"));
     return;
   }
   int64_t userId = 0;
   std::string username;
   int rc = userStore_->verifyToken(token, &userId, &username);
   if (rc != 0) {
-    session->reply(makeResult("auth.token_res", 401, "INVALID_TOKEN", json::object()));
+    session->reply(makeResult("auth.token_res", 401, "登录凭证无效或已过期", json::object()));
     return;
   }
   // 防重复登录：本会话若已登录其它账号，先注销旧绑定（在线表+token），
@@ -272,22 +309,22 @@ void AppServer::onSend(const std::shared_ptr<Session>& session, const json& data
   // chatType 仅支持单聊；缺省按 "single" 处理（协议 §3）
   std::string chatType = data.value("chatType", "single");
   if (chatType != "single") {
-    ack(400, "BAD_PACKET");
+    ack(400, "封包格式错误");
     return;
   }
   if (to < 0 || content.empty()) {
-    ack(400, "bad params");
+    ack(400, "参数错误");
     return;
   }
   if (content.size() > kMaxContentBytes) {
-    ack(413, "MSG_TOO_LONG");
+    ack(413, "消息内容超长（超过64KB）");
     return;
   }
   // to == 0 为「自己对话框」：目标即发送者自己，必然存在，跳过 exists 校验。
   // 服务器把消息投递回自己的所有在线会话（每端各显示一遍）。
   const int64_t targetId = (to == 0) ? session->userId() : to;
   if (to != 0 && !userStore_->exists(to)) {
-    ack(404, "USER_NOT_FOUND");
+    ack(404, "目标用户不存在");
     return;
   }
   // 幂等去重：同一发送方在窗口内重发相同 clientMsgId，直接回执成功但不再投递
@@ -299,17 +336,23 @@ void AppServer::onSend(const std::shared_ptr<Session>& session, const json& data
   // 空 clientMsgId 不参与去重，故走更严限制，遏制无 id 刷消息。
   const size_t sendLimit = clientMsgId.empty() ? kMaxSendNoIdPerWindow : kMaxSendPerWindow;
   if (!msgLimiter_.allow(session->userId(), sendLimit, kSendWindow)) {
-    ack(429, "TOO_MANY_MESSAGES");
+    ack(429, "消息发送过于频繁，请稍后再试");
     return;
   }
+  ack(0, "ok");
+  // 自己对话框（to == 0）：不回发 msg.recv，消息由客户端本地显示，避免重复。
+  if (to == 0) return;
+  // 发送方昵称（供接收方/离线消息直接展示，无需客户端另查）
+  std::string fromNick;
+  if (!userStore_->nickname(session->userId(), &fromNick)) fromNick.clear();
   json recvData = {
     {"from", session->userId()},
+    {"fromNick", fromNick},
     {"content", content},
     {"ts", static_cast<int64_t>(std::time(nullptr))},
     {"clientMsgId", clientMsgId},
     {"chatType", chatType},
   };
-  ack(0, "ok");
   auto targets = onlineMgr_.sessions(targetId);
   if (targets.empty()) {
     // 目标离线：暂存，待其登录后补发
@@ -319,6 +362,38 @@ void AppServer::onSend(const std::shared_ptr<Session>& session, const json& data
       t->reply(makeEnvelopeText("msg.recv", recvData));
     }
   }
+}
+
+void AppServer::onCreateConv(const std::shared_ptr<Session>& session, const json& data) {
+  // 自己对话框（to == 0）：逻辑保持不变，直接返回自己信息
+  int64_t to = data.value("to", (int64_t)-1);
+  if (to == 0) {
+    std::string nick;
+    if (!userStore_->nickname(session->userId(), &nick)) nick.clear();
+    session->reply(makeResult("chat.create_res", 0, "ok",
+        json{{"userId", session->userId()}, {"username", nick}}));
+    return;
+  }
+  // 按登录账号 account 查找目标用户；存在则返回其 account 与昵称
+  std::string account = data.value("account", "");
+  if (account.empty() || account.size() > kMaxAccountLen) {
+    session->reply(makeResult("chat.create_res", 400, "参数错误", json::object()));
+    return;
+  }
+  int64_t uid = 0;
+  std::string username;
+  int frc = userStore_->lookupAccount(account, &uid, &username);
+  if (frc == 2) {
+    session->reply(makeResult("chat.create_res", 500, "服务器内部错误", json::object()));
+    return;
+  }
+  if (frc != 0) {
+    // 账号不存在：明确告知客户端
+    session->reply(makeResult("chat.create_res", 404, "目标用户不存在", json::object()));
+    return;
+  }
+  session->reply(makeResult("chat.create_res", 0, "ok",
+      json{{"userId", uid}, {"account", account}, {"username", username}}));
 }
 
 } // namespace im
