@@ -1,5 +1,7 @@
 #pragma once
 
+#include "server_config.hpp"
+
 #include <chrono>
 #include <cstdint>
 #include <mutex>
@@ -12,10 +14,17 @@ namespace im {
 // 防止客户端网络重发导致同一消息被重复投递。多线程访问，内部互斥锁保护。
 class MsgDedup {
 public:
-  // 检查并记录一条 clientMsgId。
-  // 返回 true  表示该 clientMsgId 在窗口内已处理过（重复，应跳过投递）；
-  // 返回 false 表示首次见到（已记录）。
-  // clientMsgId 为空时不参与去重，恒返回 false。
+  // 只查询不记录：返回 true 表示该 clientMsgId 在窗口内已处理过（重复）。
+  // 与 remember() 分离，使调用方能按「限流 → 幂等 → 投递 → 记录」的顺序
+  // 处理，避免被限流丢弃的请求污染幂等记录（否则重试会误回成功）。
+  // clientMsgId 为空时恒返回 false（不参与去重）。
+  bool isDuplicate(int64_t userId, const std::string& clientMsgId);
+
+  // 记录一条 clientMsgId（在消息确认投递/入队之后调用）。
+  // clientMsgId 为空时不做任何事。
+  void remember(int64_t userId, const std::string& clientMsgId);
+
+  // 兼容旧语义：检查并记录（仅测试或一次性迁移使用）。
   bool checkAndRemember(int64_t userId, const std::string& clientMsgId);
 
 private:
@@ -24,9 +33,9 @@ private:
     std::chrono::steady_clock::time_point seenAt;
   };
   // 每个用户最多缓存的去重 id 数，超出时淘汰最旧，防内存膨胀
-  static constexpr size_t kMaxPerUser = 1024;
+  static constexpr size_t kMaxPerUser = config::kDedupMaxPerUser;
   // 去重窗口时长
-  static constexpr std::chrono::minutes kWindow = std::chrono::minutes(5);
+  static constexpr std::chrono::minutes kWindow = config::kDedupWindow;
 
   std::mutex mutex_;
   std::unordered_map<int64_t, std::unordered_map<std::string, Entry>> map_; // userId -> id 表

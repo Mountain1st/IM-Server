@@ -1,5 +1,9 @@
 #include "rate_limiter.hpp"
 
+#include "server_config.hpp"
+
+#include <chrono>
+
 namespace im {
 
 bool RateLimiter::allow(int64_t userId, size_t maxCalls, std::chrono::milliseconds window) {

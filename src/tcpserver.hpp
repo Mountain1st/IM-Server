@@ -8,6 +8,7 @@
 #include <memory>
 #include <mutex>
 #include <unordered_set>
+#include <vector>
 
 namespace im {
 
@@ -53,13 +54,19 @@ public:
   EventLoop* mainLoop() { return &acceptLoop_; }
 
 private:
+  struct Listener {
+    int fd = -1;
+    Channel channel{-1};
+  };
+  // 追加一个监听器并绑定/监听；成功返回 true
+  bool addListener(int family, bool ipv6Only, uint16_t port,
+                   const std::string& label);
   void handleAccept();
   void deviceNewConnection(int cfd);
 
   EventLoop acceptLoop_;  // 主 eventloop：绑定监听 fd，负责 accept
   std::unique_ptr<EventLoopThreadPool> ioPool_; // 从 eventloop 线程池：与客户端通信
-  int listenFd_;
-  Channel acceptChannel_;
+  std::vector<Listener> listeners_; // IPv4 与 IPv6 各一个监听器
   std::mutex mutex_;
   std::unordered_set<ConnectionPtr> connections_;
   size_t maxConnections_ = 0; // 0 表示不限

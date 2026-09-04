@@ -1,7 +1,9 @@
 #include "appserver.hpp"
 
 #include "connection.hpp"
+#include "metrics.hpp"
 #include "mysql_user_repository.hpp"
+#include "server_config.hpp"
 #include "session.hpp"
 
 #include <ctime>
@@ -11,19 +13,16 @@
 namespace im {
 
 namespace {
-// 单条消息 content 长度上限（与 docs/protocol.md 一致）
-constexpr size_t kMaxContentBytes = 64 * 1024;
-// 账号长度上限（与 DB users 表 VARCHAR(64) 一致）
-constexpr size_t kMaxAccountLen = 64;
-// 昵称长度上限（< 32 位）
-constexpr size_t kMaxUsernameLen = 32;
-// 密码：6-32 位字母数字组合（仅 [A-Za-z0-9]，且至少含一个字母与一个数字）
-constexpr size_t kMinPasswordLen = 6;
-constexpr size_t kMaxPasswordLen = 32;
+// 业务参数限制统一取自集中配置（server_config.hpp）
+constexpr size_t kMaxContentBytes = config::kMaxContentBytes;
+constexpr size_t kMaxAccountLen = config::kMaxAccountLen;
+constexpr size_t kMaxUsernameLen = config::kMaxUsernameLen;
+constexpr size_t kMinPasswordLen = config::kMinPasswordLen;
+constexpr size_t kMaxPasswordLen = config::kMaxPasswordLen;
 // msg.send 限流：窗口时长内每用户最多发送条数；空 clientMsgId 无法参与去重，走更严限制
-constexpr std::chrono::seconds kSendWindow(10);
-constexpr size_t kMaxSendPerWindow = 30;
-constexpr size_t kMaxSendNoIdPerWindow = 5;
+constexpr std::chrono::seconds kSendWindow(config::kSendWindow);
+constexpr size_t kMaxSendPerWindow = config::kMaxSendPerWindow;
+constexpr size_t kMaxSendNoIdPerWindow = config::kMaxSendNoIdPerWindow;
 
 // 密码规则校验：6-32 位、仅字母/数字、且同时包含字母与数字
 bool validPassword(const std::string& p) {
@@ -215,6 +214,7 @@ void AppServer::onLogin(const std::shared_ptr<Session>& session, const json& dat
   std::string token;
   int rc = userStore_->login(account, password, &userId, &username, &token);
   if (rc != 0) {
+    g_metrics.authFailures.fetch_add(1, std::memory_order_relaxed);
     // 透传真实错误码：403 密码错误 / 429 登录限流 / 500 存储异常
     const char* msg = (rc == 429) ? "登录尝试过于频繁，请稍后再试"
                     : (rc == 500) ? "服务器内部错误"
@@ -244,11 +244,18 @@ void AppServer::onLogin(const std::shared_ptr<Session>& session, const json& dat
   }
   session->reply(makeResult("auth.login_res", 0, "ok",
       json{{"userId", userId}, {"account", account}, {"username", username}, {"token", token}}));
-  // 登录应答之后补发离线消息
-  auto msgs = offlineStore_.take(userId);
+  // 登录应答之后补发离线消息（非破坏性 peek：补发中断不丢失，重登可再补发）
+  auto msgs = offlineStore_.peek(userId);
   if (!msgs.empty()) {
     session->reply(makeEnvelopeText("msg.offline", json{{"msgs", msgs}}));
   }
+}
+
+// 生成全局消息 ID：时间戳前缀 + 进程内自增序列（重启后前缀变化，避免跨进程碰撞）
+std::string AppServer::nextMessageId() {
+  uint64_t seq = msgSeq_.fetch_add(1, std::memory_order_relaxed) + 1;
+  return std::to_string(static_cast<int64_t>(std::time(nullptr))) + "-" +
+         std::to_string(seq);
 }
 
 void AppServer::onToken(const std::shared_ptr<Session>& session, const json& data) {
@@ -283,8 +290,8 @@ void AppServer::onToken(const std::shared_ptr<Session>& session, const json& dat
   }
   session->reply(makeResult("auth.token_res", 0, "ok",
       json{{"userId", userId}, {"username", username}, {"token", token}}));
-  // 重连成功后同样补发离线消息
-  auto msgs = offlineStore_.take(userId);
+  // 重连成功后同样补发离线消息（非破坏性）
+  auto msgs = offlineStore_.peek(userId);
   if (!msgs.empty()) {
     session->reply(makeEnvelopeText("msg.offline", json{{"msgs", msgs}}));
   }
@@ -320,28 +327,31 @@ void AppServer::onSend(const std::shared_ptr<Session>& session, const json& data
     ack(413, "消息内容超长（超过64KB）");
     return;
   }
-  // to == 0 为「自己对话框」：目标即发送者自己，必然存在，跳过 exists 校验。
-  // 服务器把消息投递回自己的所有在线会话（每端各显示一遍）。
-  const int64_t targetId = (to == 0) ? session->userId() : to;
+  // to 为目标用户 userId；to == 0 为「自己对话框」（协议 §4），不校验目标存在性
   if (to != 0 && !userStore_->exists(to)) {
     ack(404, "目标用户不存在");
     return;
   }
-  // 幂等去重：同一发送方在窗口内重发相同 clientMsgId，直接回执成功但不再投递
-  if (msgDedup_.checkAndRemember(session->userId(), clientMsgId)) {
+  // 幂等查询（只查不记）：窗口内已处理过 → 直接回执成功、不再投递。
+  // 放在限流之前，使合法重试不消耗发送配额。
+  if (msgDedup_.isDuplicate(session->userId(), clientMsgId)) {
     ack(0, "ok");
     return;
   }
-  // 消息发送限流（放在去重之后：重复重发不消耗配额，正常发送按配额控制）。
-  // 空 clientMsgId 不参与去重，故走更严限制，遏制无 id 刷消息。
+  // 消息发送限流：空 clientMsgId 不参与去重，走更严限制，遏制无 id 刷消息。
+  // 限流失败不记录幂等，避免被拒的请求在重试时被误判为已发送。
   const size_t sendLimit = clientMsgId.empty() ? kMaxSendNoIdPerWindow : kMaxSendPerWindow;
   if (!msgLimiter_.allow(session->userId(), sendLimit, kSendWindow)) {
+    g_metrics.rateLimited.fetch_add(1, std::memory_order_relaxed);
     ack(429, "消息发送过于频繁，请稍后再试");
     return;
   }
   ack(0, "ok");
-  // 自己对话框（to == 0）：不回发 msg.recv，消息由客户端本地显示，避免重复。
-  if (to == 0) return;
+  // 消息已确认接受（在线投递或离线入队），此时才记录幂等，供窗口内重试去重
+  msgDedup_.remember(session->userId(), clientMsgId);
+  // 自己对话框：to == 0 或目标为自己的 userId → 只回 ack 不回发 msg.recv，
+  // 消息由客户端本地显示（协议 §4 约束）。
+  if (to == 0 || to == session->userId()) return;
   // 发送方昵称（供接收方/离线消息直接展示，无需客户端另查）
   std::string fromNick;
   if (!userStore_->nickname(session->userId(), &fromNick)) fromNick.clear();
@@ -351,29 +361,23 @@ void AppServer::onSend(const std::shared_ptr<Session>& session, const json& data
     {"content", content},
     {"ts", static_cast<int64_t>(std::time(nullptr))},
     {"clientMsgId", clientMsgId},
+    {"messageId", nextMessageId()},
     {"chatType", chatType},
   };
-  auto targets = onlineMgr_.sessions(targetId);
+  auto targets = onlineMgr_.sessions(to);
   if (targets.empty()) {
     // 目标离线：暂存，待其登录后补发
-    offlineStore_.push(targetId, recvData);
+    offlineStore_.push(to, recvData);
+    g_metrics.messagesOffline.fetch_add(1, std::memory_order_relaxed);
   } else {
     for (auto& t : targets) {
       t->reply(makeEnvelopeText("msg.recv", recvData));
     }
+    g_metrics.messagesDelivered.fetch_add(targets.size(), std::memory_order_relaxed);
   }
 }
 
 void AppServer::onCreateConv(const std::shared_ptr<Session>& session, const json& data) {
-  // 自己对话框（to == 0）：逻辑保持不变，直接返回自己信息
-  int64_t to = data.value("to", (int64_t)-1);
-  if (to == 0) {
-    std::string nick;
-    if (!userStore_->nickname(session->userId(), &nick)) nick.clear();
-    session->reply(makeResult("chat.create_res", 0, "ok",
-        json{{"userId", session->userId()}, {"username", nick}}));
-    return;
-  }
   // 按登录账号 account 查找目标用户；存在则返回其 account 与昵称
   std::string account = data.value("account", "");
   if (account.empty() || account.size() > kMaxAccountLen) {
@@ -392,6 +396,8 @@ void AppServer::onCreateConv(const std::shared_ptr<Session>& session, const json
     session->reply(makeResult("chat.create_res", 404, "目标用户不存在", json::object()));
     return;
   }
+  // 自己对话框：请求的目标账号即当前登录账号时（uid == 自己），
+  // 与旧 to:0 逻辑一致——返回自己的信息（此处即 uid/account/username 均为自己）。
   session->reply(makeResult("chat.create_res", 0, "ok",
       json{{"userId", uid}, {"account", account}, {"username", username}}));
 }

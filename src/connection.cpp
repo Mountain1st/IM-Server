@@ -1,6 +1,8 @@
 #include "connection.hpp"
 
 #include "eventloop.hpp"
+#include "metrics.hpp"
+#include "server_config.hpp"
 #include "util.hpp"
 
 #include <sys/socket.h>
@@ -12,11 +14,9 @@
 namespace im {
 
 namespace {
-constexpr size_t kReadBufferSize = 64 * 1024;
-// 单次读事件累计上限：防 ET 洪泛导致 inBuffer_ 瞬时大内存分配
-constexpr size_t kMaxReadPerEvent = 1 * 1024 * 1024;
-// 写缓冲上限：超过则视为慢消费/不可达连接，主动断开避免内存无限增长
-constexpr size_t kMaxWriteBufferBytes = 8 * 1024 * 1024;
+constexpr size_t kReadBufferSize = config::kReadBufferSize;
+constexpr size_t kMaxReadPerEvent = config::kMaxReadPerEvent;
+constexpr size_t kMaxWriteBufferBytes = config::kMaxWriteBufferBytes;
 }
 
 Connection::Connection(EventLoop* loop, int fd)
@@ -40,8 +40,10 @@ void Connection::start() {
   channel_.enableReading(loop_);
 }
 
-void Connection::send(const char* data, size_t len) {
-  if (closed_.load() || queuedTooMuch_.load()) return;
+Connection::SendResult Connection::send(const char* data, size_t len) {
+  if (closed_.load() || queuedTooMuch_.load()) {
+    return closed_.load() ? SendResult::Closed : SendResult::Overflow;
+  }
   // 先原子判断是否超限。writeBufferedBytes_ 是唯一权威的字节计数，
   // 不再读取 writeChunk_（其仅由 loop 线程修改），消除跨线程数据竞争。
   size_t prev = writeBufferedBytes_.fetch_add(len, std::memory_order_relaxed);
@@ -49,9 +51,10 @@ void Connection::send(const char* data, size_t len) {
     // 超限：回滚计数并标记，避免重复触发断开
     writeBufferedBytes_.fetch_sub(len, std::memory_order_relaxed);
     queuedTooMuch_.store(true, std::memory_order_relaxed);
+    g_metrics.writeOverflows.fetch_add(1, std::memory_order_relaxed);
     std::cerr << "[conn] fd=" << fd_ << " 写缓冲超限，断开慢消费/不可达连接" << std::endl;
     shutdown();
-    return;
+    return SendResult::Overflow;
   }
   {
     std::lock_guard<std::mutex> lock(writeMutex_);
@@ -59,6 +62,7 @@ void Connection::send(const char* data, size_t len) {
   }
   auto self = shared_from_this();
   loop_->addPendingFlush(std::move(self));
+  return SendResult::Ok;
 }
 
 void Connection::flushWrite() {
@@ -103,6 +107,8 @@ void Connection::flushWrite() {
   }
   // 全部写完，撤销 EPOLLOUT 关注
   if (channel_.isWriting()) channel_.disableWriting(loop_);
+  // 优雅关闭请求已排队：写完即关（P0-3）
+  if (closingAfterFlush_) closeInLoop();
 }
 
 void Connection::handleRead() {
@@ -151,12 +157,30 @@ void Connection::shutdown() {
   loop_->runInLoop([self] { self->closeInLoop(); });
 }
 
+void Connection::shutdownAfterFlush() {
+  auto self = shared_from_this();
+  loop_->runInLoop([self] {
+    if (self->closed_.load()) return;
+    self->closingAfterFlush_ = true;
+    // 关闭 deadline：防慢客户端写缓冲迟迟无法清空导致连接占用（P0-3）
+    if (self->closeTimer_ == 0) {
+      self->closeTimer_ = self->loop_->addTimer(
+          [self] { self->closeInLoop(); }, config::kCloseFlushDeadline);
+    }
+    self->flushWrite(); // 立即尝试清空剩余缓冲
+  });
+}
+
 void Connection::forceClose() {
   closeInLoop();
 }
 
 void Connection::closeInLoop() {
   if (closed_.exchange(true)) return;
+  if (closeTimer_ != 0) {
+    loop_->cancelTimer(closeTimer_);
+    closeTimer_ = 0;
+  }
   loop_->remove(&channel_);
   if (fd_ >= 0) {
     ::close(fd_);

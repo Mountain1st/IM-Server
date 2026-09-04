@@ -1,0 +1,25 @@
+#pragma once
+
+#include <atomic>
+#include <cstdint>
+
+namespace im {
+
+// 全局原子指标（P1-4）：轻量计数器，供 /health 端点与观测使用。
+// 全部为内存原子计数，无锁、可并发自增。
+struct Metrics {
+  std::atomic<uint64_t> connectionsAccepted{0}; // 累计接受连接
+  std::atomic<uint64_t> connectionsClosed{0};   // 累计关闭连接
+  std::atomic<uint64_t> activeConnections{0};   // 当前活动连接
+  std::atomic<uint64_t> handshakeFailures{0};   // WebSocket 握手失败/拒绝
+  std::atomic<uint64_t> protocolErrors{0};      // 协议错误断开
+  std::atomic<uint64_t> authFailures{0};        // 登录失败（403/429）
+  std::atomic<uint64_t> rateLimited{0};         // msg.send 限流拒绝
+  std::atomic<uint64_t> messagesDelivered{0};   // 在线投递消息数
+  std::atomic<uint64_t> messagesOffline{0};     // 离线入队消息数
+  std::atomic<uint64_t> writeOverflows{0};      // 写缓冲超限断开
+};
+
+extern Metrics g_metrics;
+
+} // namespace im

@@ -9,6 +9,7 @@
 #include "threadpool.hpp"
 #include "user_store.hpp"
 
+#include <atomic>
 #include <cstdint>
 #include <memory>
 #include <string>
@@ -56,6 +57,8 @@ private:
   void onSend(const std::shared_ptr<Session>& session, const json& data);
   // 新建对话：校验目标 userId 是否存在并返回其昵称
   void onCreateConv(const std::shared_ptr<Session>& session, const json& data);
+  // 生成全局消息 ID（时间戳前缀 + 进程内自增序列，防重启碰撞）
+  std::string nextMessageId();
 
   std::shared_ptr<TcpServer> tcpServer_;
   ThreadPool workPool_;
@@ -65,6 +68,7 @@ private:
   OfflineStore offlineStore_;
   MsgDedup msgDedup_;
   RateLimiter msgLimiter_; // msg.send 每用户限流
+  std::atomic<uint64_t> msgSeq_{0}; // 全局消息序列（生成 messageId）
 };
 
 } // namespace im

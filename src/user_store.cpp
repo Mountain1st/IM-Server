@@ -1,5 +1,6 @@
 #include "user_store.hpp"
 
+#include "server_config.hpp"
 #include "util.hpp"
 
 #include <iomanip>
@@ -9,13 +10,13 @@
 namespace im {
 
 namespace {
-// token 有效期：7 天
-constexpr std::chrono::hours kTokenTtl(7 * 24);
+// token 有效期：7 天（取自集中配置）
+constexpr std::chrono::hours kTokenTtl(config::kTokenTtl);
 // 周期性清理过期 token 的阈值（每次 login 时顺带检查）
 constexpr size_t kTokenCleanupThreshold = 1024;
 // 登录限流：窗口内失败次数上限与窗口时长
-constexpr int kMaxLoginFailures = 5;
-constexpr std::chrono::seconds kLockWindow(60);
+constexpr int kMaxLoginFailures = config::kMaxLoginFailures;
+constexpr std::chrono::seconds kLockWindow(config::kLockWindow);
 constexpr size_t kLoginGuardLimit = 1024;
 // 密码派生参数：PBKDF2-HMAC-SHA256，10 万次迭代，输出 32 字节（256 位）
 constexpr unsigned kPbkdf2Iterations = 100000;
@@ -41,11 +42,11 @@ std::string UserStore::hashPassword(const std::string& salt, const std::string& 
 }
 
 std::string UserStore::genToken() {
-  // 直接取 random_device（Linux 下通常是 CSPRNG）的 160 位熵，避免
+  // 直接取 random_device（Linux 下通常是 CSPRNG）的 256 位熵，避免
   // mt19937_64 单 32 位种子导致的 token 可枚举问题。
   std::random_device rd;
   std::ostringstream oss;
-  for (int i = 0; i < 20; ++i) {
+  for (int i = 0; i < 32; ++i) {
     oss << std::hex << std::setw(2) << std::setfill('0') << (rd() & 0xFF);
   }
   return oss.str();
@@ -87,7 +88,8 @@ int UserStore::login(const std::string& account, const std::string& password,
   }
   loginGuards_.erase(account); // 登录成功，清空失败记录
   *token = genToken();
-  tokens_[*token] = TokenEntry{id, now + kTokenTtl};
+  // 只保存 token 的 SHA-256 摘要：进程内存被转储也不泄露可用 token（P0-5）
+  tokens_[sha256Hex(*token)] = TokenEntry{id, now + kTokenTtl};
   *userId = id;
   *username = name;
   // 顺带清理过期 token，防止表无限膨胀
@@ -130,7 +132,7 @@ void UserStore::recordFail(const std::string& account, std::chrono::steady_clock
 int UserStore::verifyToken(const std::string& token, int64_t* userId, std::string* username) {
   std::lock_guard<std::mutex> lock(mutex_);
   auto now = std::chrono::steady_clock::now();
-  auto it = tokens_.find(token);
+  auto it = tokens_.find(sha256Hex(token));
   if (it == tokens_.end() || it->second.expireAt <= now) {
     if (it != tokens_.end()) tokens_.erase(it); // 顺手清掉过期 token
     return 401; // token 无效或已过期
@@ -145,7 +147,7 @@ int UserStore::verifyToken(const std::string& token, int64_t* userId, std::strin
 
 void UserStore::logout(const std::string& token) {
   std::lock_guard<std::mutex> lock(mutex_);
-  tokens_.erase(token);
+  tokens_.erase(sha256Hex(token));
 }
 
 bool UserStore::exists(int64_t userId) {

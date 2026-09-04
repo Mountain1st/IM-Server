@@ -2,6 +2,8 @@
 
 #include "connection.hpp"
 #include "eventloop.hpp"
+#include "metrics.hpp"
+#include "server_config.hpp"
 #include "threadpool.hpp"
 
 #include <iostream>
@@ -9,17 +11,14 @@
 
 namespace im {
 
+// 心跳/超时/队列/消息限制统一取自集中配置（server_config.hpp）
 namespace {
-// 心跳间隔：每 30 秒发一个 Ping
-constexpr std::chrono::seconds kHeartbeatInterval(30);
-// 僵尸判定：超过 2 个心跳周期未收到任何数据/Pong，判为死连接
-constexpr std::chrono::seconds kZombieTimeout(60);
-// 握手截止：连接建立后须在此时限内完成 WebSocket 握手（防 Slowloris 慢速占槽）
-constexpr std::chrono::seconds kHandshakeTimeout(10);
-// 读方向排队上限：超过视为对端洪泛，断开避免内存无限增长
-constexpr size_t kMaxQueuedBytes = 8 * 1024 * 1024;
-// 单条消息（含分片累积）上限：防御恶意超大帧
-constexpr size_t kMaxMessageBytes = 2 * 1024 * 1024;
+
+constexpr std::chrono::seconds kHeartbeatInterval(config::kHeartbeatInterval);
+constexpr std::chrono::seconds kZombieTimeout(config::kZombieTimeout);
+constexpr std::chrono::seconds kHandshakeTimeout(config::kHandshakeTimeout);
+constexpr size_t kMaxQueuedBytes = config::kMaxQueuedBytes;
+constexpr size_t kMaxMessageBytes = config::kMaxMessageBytes;
 }
 
 Session::Session(EventLoop* loop, ThreadPool* pool,
@@ -182,13 +181,18 @@ void Session::onMessage(const std::shared_ptr<Connection>&, const char* data, si
     httpBuffer_.append(data, len);
     size_t end = httpBuffer_.find("\r\n\r\n");
     if (end == std::string::npos) {
-      if (httpBuffer_.size() > 8192) {
+      if (httpBuffer_.size() > config::kMaxHandshakeHeaderBytes) {
         std::cerr << "[session] 握手头过大" << std::endl;
         conn_->shutdown();
       }
       return;
     }
     std::string request = httpBuffer_.substr(0, end + 4);
+    // /health 健康检查（非 WebSocket）：返回指标 JSON 后关闭
+    if (request.rfind("GET /health", 0) == 0) {
+      serveHealth();
+      return;
+    }
     handleHandshake(request);
     if (!handshaked_) return; // 握手失败已关闭
 
@@ -209,28 +213,51 @@ void Session::onMessage(const std::shared_ptr<Connection>&, const char* data, si
 
 void Session::processFrames() {
   ws::Frame frame;
-  while (parser_.parseOne(&frame)) {
+  for (;;) {
+    ws::ParseResult pr = parser_.parseOne(&frame);
+    if (pr == ws::ParseResult::NeedMore) return;
+    if (pr == ws::ParseResult::ProtocolError) {
+      g_metrics.protocolErrors.fetch_add(1, std::memory_order_relaxed);
+      std::cerr << "[session] fd=" << fd_ << " 协议错误，断开" << std::endl;
+      conn_->shutdown();
+      return;
+    }
     handle(frame);
   }
 }
 
 void Session::rejectHandshake(const std::string& reason) {
+  g_metrics.handshakeFailures.fetch_add(1, std::memory_order_relaxed);
   std::cerr << "[session] 握手拒绝: " << reason << std::endl;
   conn_->send("HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
-  // 本函数运行在工作线程；send 只是入队。若直接 shutdown()，
-  // loop 线程会在 handlePending 里先执行 close 任务再 flush，403 字节会被丢弃。
-  // 因此投递「先冲刷、后关闭」的任务到连接所属 loop 线程。
-  auto c = conn_;
-  loop_->runInLoop([c] {
-    c->flushWrite();
-    c->forceClose();
-  });
+  // 写完 403 再关闭（优雅关闭，带 deadline 兜底），避免拒绝响应被丢弃
+  conn_->shutdownAfterFlush();
+}
+
+void Session::serveHealth() {
+  std::ostringstream oss;
+  oss << "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nConnection: close\r\n\r\n";
+  oss << "{\"status\":\"ok\""
+      << ",\"activeConnections\":" << g_metrics.activeConnections.load(std::memory_order_relaxed)
+      << ",\"connectionsAccepted\":" << g_metrics.connectionsAccepted.load(std::memory_order_relaxed)
+      << ",\"connectionsClosed\":" << g_metrics.connectionsClosed.load(std::memory_order_relaxed)
+      << ",\"handshakeFailures\":" << g_metrics.handshakeFailures.load(std::memory_order_relaxed)
+      << ",\"protocolErrors\":" << g_metrics.protocolErrors.load(std::memory_order_relaxed)
+      << ",\"authFailures\":" << g_metrics.authFailures.load(std::memory_order_relaxed)
+      << ",\"rateLimited\":" << g_metrics.rateLimited.load(std::memory_order_relaxed)
+      << ",\"messagesDelivered\":" << g_metrics.messagesDelivered.load(std::memory_order_relaxed)
+      << ",\"messagesOffline\":" << g_metrics.messagesOffline.load(std::memory_order_relaxed)
+      << ",\"writeOverflows\":" << g_metrics.writeOverflows.load(std::memory_order_relaxed)
+      << "}\r\n";
+  conn_->send(oss.str());
+  conn_->shutdownAfterFlush();
 }
 
 void Session::handleHandshake(const std::string& request) {
   std::string key;
   std::string reason;
   if (!ws::validateHandshake(request, &key, &reason)) {
+    g_metrics.handshakeFailures.fetch_add(1, std::memory_order_relaxed);
     std::cerr << "[session] 握手校验失败: " << reason << std::endl;
     conn_->shutdown();
     return;
@@ -329,9 +356,9 @@ void Session::handle(const ws::Frame& frame) {
   case ws::Opcode::Pong:
     break;
   case ws::Opcode::Close:
-    // 回 Close 帧并关闭连接
+    // 回 Close 帧后写完再关闭（优雅，P0-3）
     conn_->send(ws::buildFrame(ws::Opcode::Close, frame.payload));
-    conn_->shutdown();
+    conn_->shutdownAfterFlush();
     break;
   default:
     conn_->shutdown();
@@ -341,6 +368,12 @@ void Session::handle(const ws::Frame& frame) {
 
 void Session::handleData(ws::Opcode opcode, const std::string& payload) {
   if (opcode == ws::Opcode::Text) {
+    // RFC 6455 §8.1：文本消息必须是合法 UTF-8；非法则协议错误断开
+    if (!ws::isValidUtf8(payload)) {
+      std::cerr << "[session] fd=" << fd_ << " 文本消息非法 UTF-8，断开" << std::endl;
+      conn_->shutdown();
+      return;
+    }
     // 只记录字节数，不打印消息内容（隐私/安全脱敏）
     std::cout << "[session] fd=" << fd_ << " 收到文本消息 " << payload.size()
               << " 字节" << std::endl;

@@ -63,6 +63,8 @@ private:
   void handle(const ws::Frame& frame);
   void handleData(ws::Opcode opcode, const std::string& payload);
   void handleHandshake(const std::string& request);
+  // /health 健康检查：返回指标 JSON 后优雅关闭（P1-4）
+  void serveHealth();
   // 握手失败：回 403 响应，先冲刷响应字节再关闭连接（在连接所属 loop 线程执行）
   void rejectHandshake(const std::string& reason);
 

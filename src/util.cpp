@@ -221,6 +221,18 @@ std::string hmacSha256RawImpl(const std::string& key, const std::string& data) {
 
 } // namespace
 
+std::string sha256Hex(const std::string& input) {
+  static const char* kHex = "0123456789abcdef";
+  std::string raw = sha256Raw(input);
+  std::string out;
+  out.reserve(raw.size() * 2);
+  for (unsigned char c : raw) {
+    out.push_back(kHex[c >> 4]);
+    out.push_back(kHex[c & 0x0F]);
+  }
+  return out;
+}
+
 std::string hmacSha256Raw(const std::string& key, const std::string& data) {
   return hmacSha256RawImpl(key, data);
 }

@@ -36,11 +36,20 @@ public:
 
   // loop 线程：登记到 epoll，开始读
   void start();
+  // 发送结果：调用方可感知投递入队失败（P0-3，不再静默丢弃）
+  enum class SendResult {
+    Ok,      // 已入队，将由 loop 线程异步发送
+    Closed,  // 连接已关闭，未入队
+    Overflow // 写缓冲超限，未入队（连接已标记待断开）
+  };
   // 任意线程：追加发送数据，由 loop 线程异步 flush（线程安全）
-  void send(const char* data, size_t len);
-  void send(const std::string& data) { send(data.data(), data.size()); }
+  SendResult send(const char* data, size_t len);
+  SendResult send(const std::string& data) { return send(data.data(), data.size()); }
   // 任意线程：安排关闭（线程安全，实际 close 在 loop 线程执行）
   void shutdown();
+  // 任意线程：写完剩余写缓冲后再关闭（优雅关闭；带 deadline 兜底，
+  // 防止慢客户端/写缓冲迟迟无法清空导致连接占用）。
+  void shutdownAfterFlush();
   // 必须在本连接所属的 loop 线程调用：同步关闭（服务端停止时用于已停 loop 的连接）
   void forceClose();
   // loop 线程：发送缓冲全部落盘（由 pendingFlush 驱动）
@@ -74,6 +83,10 @@ private:
   std::atomic<size_t> writeBufferedBytes_{0};
   // 写缓冲曾超限，置位后 send() 直接返回（触发断开的线程负责调用 shutdown）
   std::atomic<bool> queuedTooMuch_{false};
+  // 优雅关闭：剩余写缓冲清空后关闭。仅 loop 线程读写（shutdownAfterFlush 与
+  // flushWrite 均在 loop 线程），故无需原子。
+  bool closingAfterFlush_ = false;
+  int closeTimer_ = 0; // 关闭 deadline 定时器 id（loop 线程）
 };
 
 } // namespace im

@@ -44,24 +44,29 @@ bool validateHandshake(const std::string& request, std::string* key, std::string
 // 生成 Sec-WebSocket-Accept
 std::string computeAccept(const std::string& key);
 
-// 解析 WebSocket 帧（单帧）。返回：
-//   ok=true  解析出一个完整帧
-//   ok=false needMore=true   数据不足，等待更多
-//   ok=false needMore=false  协议错误
+// 解析 WebSocket 帧（单帧）。返回三态结果：
+//   NeedMore       数据不足，等待更多（合法）
+//   Complete       解析出一个完整帧（frame 有效）
+//   ProtocolError  协议错误（RFC 6455 违规，应断开连接）
 struct Frame {
   bool fin = true;
   Opcode opcode = Opcode::Text;
+  bool masked = false;
   std::string payload;
 };
-struct ParseResult {
-  bool ok = false;
-  bool needMore = false;
+enum class ParseResult {
+  NeedMore,
+  Complete,
+  ProtocolError,
 };
-// 帧解析器：支持跨包累积，暂未处理分片重组（分片由上层完成）
+// 帧解析器：支持跨包累积，暂未处理分片重组（分片由上层完成）。
+// 解析时执行协议校验：RSV 位、opcode 合法性、客户端帧必须掩码、
+// 最小长度编码、单帧上限、控制帧 FIN/长度限制、Close payload 的
+// UTF-8 与 Close code 合法性。任何违规返回 ProtocolError。
 class FrameParser {
 public:
   void feed(const char* data, size_t len);
-  bool parseOne(Frame* frame); // 有完整帧返回 true
+  ParseResult parseOne(Frame* frame);
   // 限制累积缓冲上限，防恶意大帧/洪泛撑爆内存；0 表示不限制
   void setMaxBytes(size_t maxBytes) { maxBytes_ = maxBytes; }
   bool overflow() const { return overflow_; }
@@ -74,6 +79,11 @@ private:
   size_t maxBytes_ = 0;
   bool overflow_ = false;
 };
+
+// 校验字符串是否为合法 UTF-8（RFC 3629，含代理区拒绝）。
+bool isValidUtf8(const std::string& s);
+// 校验 Close code 是否合法（RFC 6455 §7.4；1000-1003、1007-1011、3000-4999）。
+bool isValidCloseCode(uint16_t code);
 
 // 构造一个服务端发送帧（服务端不发掩码）
 std::string buildFrame(Opcode opcode, const std::string& payload, bool fin = true);
