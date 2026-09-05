@@ -56,14 +56,14 @@ add_executable(imserver
     src/mysql_message_repository.cpp
     src/online_manager.cpp
     src/msg_dedup.cpp
-    src/rate_limiter.cpp
+    src/rate_limiter_store.cpp
     src/metrics.cpp
     src/appserver.cpp
 )
 target_include_directories(imserver PRIVATE src third_party ${MYSQL_INCLUDE_DIR})
 target_link_libraries(imserver PRIVATE Threads::Threads ${MYSQLCLIENT_LIB})
 if(HAVE_HIREDIS)
-    target_sources(imserver PRIVATE src/redis_token_store.cpp)
+    target_sources(imserver PRIVATE src/redis_client.cpp src/redis_token_store.cpp src/redis_rate_limiter.cpp src/redis_msg_dedup.cpp)
     target_include_directories(imserver PRIVATE ${HIREDIS_INCLUDE_DIR})
     target_link_libraries(imserver PRIVATE ${HIREDIS_LIB})
 endif()
@@ -90,7 +90,7 @@ set(UNIT_TEST_SOURCES
     src/util.cpp
     src/websocket.cpp
     src/msg_dedup.cpp
-    src/rate_limiter.cpp
+    src/rate_limiter_store.cpp
 )
 set(UNIT_TEST_INCLUDES src third_party)
 

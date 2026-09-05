@@ -4,6 +4,8 @@
 #include "metrics.hpp"
 #include "mysql_message_repository.hpp"
 #include "mysql_user_repository.hpp"
+#include "redis_msg_dedup.hpp"
+#include "redis_rate_limiter.hpp"
 #include "redis_token_store.hpp"
 #include "server_config.hpp"
 #include "session.hpp"
@@ -103,6 +105,36 @@ std::shared_ptr<TokenStore> makeTokenStore(const RedisStoreConfig& c) {
   return rs;
 }
 
+// msg.send 限流：Redis 启用则用 ZSET 滑动窗口（跨重启/多实例），否则内存
+std::unique_ptr<RateLimiterStore> makeRateLimiter(const RedisStoreConfig& c) {
+  if (!c.enabled) {
+    std::cout << "[db] 发送限流: 内存" << std::endl;
+    return std::make_unique<MemoryRateLimiter>();
+  }
+  auto rs = std::make_unique<RedisRateLimiter>(c);
+  if (!rs->ok()) {
+    throw std::runtime_error("Redis 连接失败: " + rs->errStr());
+  }
+  std::cout << "[db] 发送限流: Redis (host=" << c.redisHost << ":" << c.redisPort << ")"
+            << std::endl;
+  return rs;
+}
+
+// 消息幂等去重：Redis 启用则用 SET NX EX（跨重启/多实例），否则内存
+std::unique_ptr<MsgDedupStore> makeMsgDedup(const RedisStoreConfig& c) {
+  if (!c.enabled) {
+    std::cout << "[db] 幂等去重: 内存" << std::endl;
+    return std::make_unique<MemoryMsgDedup>();
+  }
+  auto rs = std::make_unique<RedisMsgDedup>(c);
+  if (!rs->ok()) {
+    throw std::runtime_error("Redis 连接失败: " + rs->errStr());
+  }
+  std::cout << "[db] 幂等去重: Redis (host=" << c.redisHost << ":" << c.redisPort << ")"
+            << std::endl;
+  return rs;
+}
+
 AppServer::AppServer(uint16_t port, size_t ioThreads, size_t workThreads, size_t maxConnections,
                      std::vector<std::string> allowedOrigins, UserStoreConfig userConfig,
                      RedisStoreConfig redisConfig)
@@ -111,6 +143,8 @@ AppServer::AppServer(uint16_t port, size_t ioThreads, size_t workThreads, size_t
       allowedOrigins_(std::move(allowedOrigins)),
       userStore_(std::make_unique<UserStore>(makeUserRepository(userConfig),
                                              makeTokenStore(redisConfig))),
+      msgDedup_(makeMsgDedup(redisConfig)),
+      msgLimiter_(makeRateLimiter(redisConfig)),
       msgRepo_(std::make_unique<MySqlMessageRepository>(
           userConfig.mysqlHost, userConfig.mysqlPort, userConfig.mysqlUser,
           userConfig.mysqlPassword, userConfig.mysqlDb)) {
@@ -413,21 +447,21 @@ void AppServer::onSend(const std::shared_ptr<Session>& session, const json& data
   }
   // 幂等查询（只查不记）：窗口内已处理过 → 直接回执成功、不再投递。
   // 放在限流之前，使合法重试不消耗发送配额。
-  if (msgDedup_.isDuplicate(session->userId(), clientMsgId)) {
+  if (msgDedup_->isDuplicate(session->userId(), clientMsgId)) {
     ack(0, "ok");
     return;
   }
   // 消息发送限流：空 clientMsgId 不参与去重，走更严限制，遏制无 id 刷消息。
   // 限流失败不记录幂等，避免被拒的请求在重试时被误判为已发送。
   const size_t sendLimit = clientMsgId.empty() ? kMaxSendNoIdPerWindow : kMaxSendPerWindow;
-  if (!msgLimiter_.allow(session->userId(), sendLimit, kSendWindow)) {
+  if (!msgLimiter_->allow(session->userId(), sendLimit, kSendWindow)) {
     g_metrics.rateLimited.fetch_add(1, std::memory_order_relaxed);
     ack(429, "消息发送过于频繁，请稍后再试");
     return;
   }
   // 自己对话框：只回 ack 不回发 msg.recv，不落库（消息由客户端本地显示）
   if (to == 0 || to == session->userId()) {
-    msgDedup_.remember(session->userId(), clientMsgId);
+    msgDedup_->remember(session->userId(), clientMsgId);
     ack(0, "ok");
     return;
   }
@@ -442,7 +476,7 @@ void AppServer::onSend(const std::shared_ptr<Session>& session, const json& data
     ack(500, "服务器内部错误");
     return;
   }
-  msgDedup_.remember(session->userId(), clientMsgId);
+  msgDedup_->remember(session->userId(), clientMsgId);
   ack(0, "ok");
   // 发送方昵称（供接收方/离线消息直接展示，无需客户端另查）
   std::string fromNick;

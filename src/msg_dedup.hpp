@@ -10,25 +10,34 @@
 
 namespace im {
 
-// 消息幂等去重（内存版）：按发送方 userId 缓存最近处理过的 clientMsgId，
-// 防止客户端网络重发导致同一消息被重复投递。多线程访问，内部互斥锁保护。
-class MsgDedup {
+// 消息幂等去重存储接口：按发送方 userId 缓存最近处理过的 clientMsgId，
+// 防止客户端网络重发导致同一消息被重复投递。双后端：
+// - MemoryMsgDedup（默认）
+// - RedisMsgDedup（SET NX EX，跨重启/多实例共享）
+// 实现须自身保证线程安全。
+class MsgDedupStore {
 public:
+  virtual ~MsgDedupStore() = default;
+
   // 只查询不记录：返回 true 表示该 clientMsgId 在窗口内已处理过（重复）。
-  // 与 remember() 分离，使调用方能按「限流 → 幂等 → 投递 → 记录」的顺序
+  // 与 remember() 分离，使调用方能按「限流 → 幂等查询 → 投递 → 记录」的顺序
   // 处理，避免被限流丢弃的请求污染幂等记录（否则重试会误回成功）。
   // clientMsgId 为空时恒返回 false（不参与去重）。
-  bool isDuplicate(int64_t userId, const std::string& clientMsgId);
-
-  // 记录一条 clientMsgId（在消息确认投递/入队之后调用）。
-  // clientMsgId 为空时不做任何事。
-  void remember(int64_t userId, const std::string& clientMsgId);
-
+  virtual bool isDuplicate(int64_t userId, const std::string& clientMsgId) = 0;
+  // 记录一条 clientMsgId（在消息确认投递/入队之后调用）。空 id 不做任何事。
+  virtual void remember(int64_t userId, const std::string& clientMsgId) = 0;
   // 兼容旧语义：检查并记录（仅测试或一次性迁移使用）。
-  bool checkAndRemember(int64_t userId, const std::string& clientMsgId);
+  virtual bool checkAndRemember(int64_t userId, const std::string& clientMsgId) = 0;
+};
+
+// 内存实现（默认）：userId -> clientMsgId 表，含过期清理与上限淘汰。
+class MemoryMsgDedup : public MsgDedupStore {
+public:
+  bool isDuplicate(int64_t userId, const std::string& clientMsgId) override;
+  void remember(int64_t userId, const std::string& clientMsgId) override;
+  bool checkAndRemember(int64_t userId, const std::string& clientMsgId) override;
 
 private:
-  // 内部记录：clientMsgId -> 首次见到时间
   struct Entry {
     std::chrono::steady_clock::time_point seenAt;
   };

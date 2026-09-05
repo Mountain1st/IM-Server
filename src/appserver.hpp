@@ -4,7 +4,7 @@
 #include "message_repository.hpp"
 #include "msg_dedup.hpp"
 #include "online_manager.hpp"
-#include "rate_limiter.hpp"
+#include "rate_limiter_store.hpp"
 #include "tcpserver.hpp"
 #include "threadpool.hpp"
 #include "user_store.hpp"
@@ -79,8 +79,8 @@ private:
   std::unique_ptr<UserStore> userStore_;    // MySQL 用户存储（连接失败时构造抛错）
   std::unique_ptr<MessageRepository> msgRepo_; // MySQL 消息存储（离线/历史/已读）
   OnlineManager onlineMgr_;
-  MsgDedup msgDedup_;
-  RateLimiter msgLimiter_; // msg.send 每用户限流
+  std::unique_ptr<MsgDedupStore> msgDedup_;    // 消息幂等去重（内存/Redis 双后端）
+  std::unique_ptr<RateLimiterStore> msgLimiter_; // msg.send 限流（内存/Redis 双后端）
   std::atomic<uint64_t> msgSeq_{0}; // 全局消息序列（生成 messageId）
 };
 

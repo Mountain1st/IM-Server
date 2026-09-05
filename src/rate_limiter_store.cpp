@@ -1,12 +1,11 @@
-#include "rate_limiter.hpp"
+#include "rate_limiter_store.hpp"
 
-#include "server_config.hpp"
-
-#include <chrono>
+#include <iostream>
 
 namespace im {
 
-bool RateLimiter::allow(int64_t userId, size_t maxCalls, std::chrono::milliseconds window) {
+bool MemoryRateLimiter::allow(int64_t userId, size_t maxCalls,
+                              std::chrono::milliseconds window) {
   std::lock_guard<std::mutex> lock(mutex_);
   auto now = std::chrono::steady_clock::now();
   auto& q = calls_[userId];
@@ -24,7 +23,7 @@ bool RateLimiter::allow(int64_t userId, size_t maxCalls, std::chrono::millisecon
   return true;
 }
 
-void RateLimiter::reset(int64_t userId) {
+void MemoryRateLimiter::reset(int64_t userId) {
   std::lock_guard<std::mutex> lock(mutex_);
   calls_.erase(userId);
 }
