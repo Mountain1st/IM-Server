@@ -6,6 +6,8 @@
 #include <cstdint>
 #include <string>
 #include <unordered_map>
+#include <utility>
+#include <vector>
 
 namespace im {
 
@@ -33,6 +35,12 @@ public:
   bool userExists(int64_t userId) override;
   bool fetchUserNameById(int64_t userId, std::string* username) override;
   bool fetchAccountById(int64_t userId, std::string* account) override;
+  int fetchSettings(int64_t userId, int* allowTempChat, int* searchable,
+                    int* allowAdd) override;
+  void updateSettings(int64_t userId, int allowTempChat, int searchable,
+                      int allowAdd) override;
+  void searchUsers(const std::string& keyword, int64_t excludeUserId, int limit,
+                   std::vector<std::pair<std::string, std::string>>* out) override;
 
 private:
   void loadIdCache();

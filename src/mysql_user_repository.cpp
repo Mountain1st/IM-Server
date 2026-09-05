@@ -141,4 +141,100 @@ bool MySqlUserRepository::fetchAccountById(int64_t userId, std::string* account)
   return true;
 }
 
+int MySqlUserRepository::fetchSettings(int64_t userId, int* allowTempChat, int* searchable,
+                                       int* allowAdd) {
+  if (!client_.ok()) return 2;
+  MYSQL* c = client_.handle();
+  const std::string sql = "SELECT allow_temp_chat, searchable, allow_add FROM users WHERE id = ? LIMIT 1";
+  int errNo = 0;
+  MYSQL_STMT* stmt = mysqlStmtExec(c, sql, {std::to_string(userId)}, &errNo);
+  if (!stmt) {
+    std::cerr << "[mysql] 查询设置失败 errno=" << errNo << std::endl;
+    return 2;
+  }
+  int v0 = 0, v1 = 0, v2 = 0;
+  MYSQL_BIND res[3];
+  memset(res, 0, sizeof res);
+  for (int i = 0; i < 3; ++i) {
+    res[i].buffer_type = MYSQL_TYPE_LONG;
+    res[i].buffer = (i == 0) ? &v0 : (i == 1) ? &v1 : &v2;
+  }
+  if (mysql_stmt_bind_result(stmt, res) || mysql_stmt_store_result(stmt)) {
+    std::cerr << "[mysql] 设置结果绑定失败: " << client_.errStr() << std::endl;
+    mysql_stmt_close(stmt);
+    return 2;
+  }
+  const int rc = mysql_stmt_fetch(stmt);
+  mysql_stmt_close(stmt);
+  if (rc != 0) return 1; // 用户不存在
+  if (allowTempChat) *allowTempChat = v0;
+  if (searchable) *searchable = v1;
+  if (allowAdd) *allowAdd = v2;
+  return 0;
+}
+
+void MySqlUserRepository::updateSettings(int64_t userId, int allowTempChat, int searchable,
+                                         int allowAdd) {
+  if (!client_.ok()) return;
+  // 任一 < 0 表示不修改该字段（用 COALESCE 简化）
+  const std::string sql =
+      "UPDATE users SET allow_temp_chat = CASE WHEN ? < 0 THEN allow_temp_chat ELSE ? END, "
+      "searchable = CASE WHEN ? < 0 THEN searchable ELSE ? END, "
+      "allow_add = CASE WHEN ? < 0 THEN allow_add ELSE ? END WHERE id = ?";
+  int errNo = 0;
+  MYSQL_STMT* stmt = mysqlStmtExec(client_.handle(), sql,
+      {std::to_string(allowTempChat), std::to_string(allowTempChat),
+       std::to_string(searchable), std::to_string(searchable),
+       std::to_string(allowAdd), std::to_string(allowAdd),
+       std::to_string(userId)}, &errNo);
+  if (!stmt) {
+    std::cerr << "[mysql] 更新设置失败 errno=" << errNo << std::endl;
+    return;
+  }
+  mysql_stmt_close(stmt);
+}
+
+void MySqlUserRepository::searchUsers(const std::string& keyword, int64_t excludeUserId,
+                                      int limit,
+                                      std::vector<std::pair<std::string, std::string>>* out) {
+  if (!client_.ok() || !out) return;
+  if (limit <= 0) limit = 20;
+  if (limit > 50) limit = 50;
+  const std::string like = "%" + keyword + "%";
+  int errNo = 0;
+  MYSQL_STMT* stmt = mysqlStmtExec(client_.handle(),
+      "SELECT account, username FROM users WHERE searchable = 1 AND id != ? "
+      "AND (account LIKE ? OR username LIKE ?) ORDER BY id ASC LIMIT ?",
+      {std::to_string(excludeUserId), like, like, std::to_string(limit)}, &errNo);
+  if (!stmt) {
+    std::cerr << "[mysql] 搜索用户失败 errno=" << errNo << std::endl;
+    return;
+  }
+  char acctBuf[128] = {0}, nameBuf[128] = {0};
+  unsigned long acctLen = 0, nameLen = 0;
+  bool acctNull = false, nameNull = false;
+  MYSQL_BIND res[2];
+  memset(res, 0, sizeof res);
+  res[0].buffer_type = MYSQL_TYPE_STRING;
+  res[0].buffer = acctBuf;
+  res[0].buffer_length = sizeof acctBuf;
+  res[0].length = &acctLen;
+  res[0].is_null = &acctNull;
+  res[1].buffer_type = MYSQL_TYPE_STRING;
+  res[1].buffer = nameBuf;
+  res[1].buffer_length = sizeof nameBuf;
+  res[1].length = &nameLen;
+  res[1].is_null = &nameNull;
+  if (mysql_stmt_bind_result(stmt, res) || mysql_stmt_store_result(stmt)) {
+    std::cerr << "[mysql] 搜索结果绑定失败: " << client_.errStr() << std::endl;
+    mysql_stmt_close(stmt);
+    return;
+  }
+  while (mysql_stmt_fetch(stmt) == 0) {
+    out->emplace_back(acctNull ? std::string() : std::string(acctBuf, acctLen),
+                      nameNull ? std::string() : std::string(nameBuf, nameLen));
+  }
+  mysql_stmt_close(stmt);
+}
+
 } // namespace im

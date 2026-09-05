@@ -158,4 +158,20 @@ bool UserStore::accountOf(int64_t userId, std::string* account) {
   return repo_->fetchAccountById(userId, account);
 }
 
+int UserStore::fetchSettings(int64_t userId, int* allowTempChat, int* searchable, int* allowAdd) {
+  std::lock_guard<std::mutex> lock(mutex_);
+  return repo_->fetchSettings(userId, allowTempChat, searchable, allowAdd);
+}
+
+void UserStore::updateSettings(int64_t userId, int allowTempChat, int searchable, int allowAdd) {
+  std::lock_guard<std::mutex> lock(mutex_);
+  repo_->updateSettings(userId, allowTempChat, searchable, allowAdd);
+}
+
+void UserStore::searchUsers(const std::string& keyword, int64_t excludeUserId, int limit,
+                            std::vector<std::pair<std::string, std::string>>* out) {
+  std::lock_guard<std::mutex> lock(mutex_);
+  repo_->searchUsers(keyword, excludeUserId, limit, out);
+}
+
 } // namespace im

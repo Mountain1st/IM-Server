@@ -9,6 +9,8 @@
 #include <mutex>
 #include <string>
 #include <unordered_map>
+#include <utility>
+#include <vector>
 
 namespace im {
 
@@ -52,6 +54,11 @@ public:
   bool nickname(int64_t userId, std::string* username);
   // 查询用户登录账号（S2C 消息 from 用 account）。不存在返回 false。
   bool accountOf(int64_t userId, std::string* account);
+  // 隐私设置转发（见 UserRepository）
+  int fetchSettings(int64_t userId, int* allowTempChat, int* searchable, int* allowAdd);
+  void updateSettings(int64_t userId, int allowTempChat, int searchable, int allowAdd);
+  void searchUsers(const std::string& keyword, int64_t excludeUserId, int limit,
+                   std::vector<std::pair<std::string, std::string>>* out);
 
 private:
   // 随机盐 + 密码哈希（PBKDF2-HMAC-SHA256 慢哈希，见 user_store.cpp）
