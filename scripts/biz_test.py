@@ -558,6 +558,17 @@ def main():
     r = json.loads(e.recv())
     check("contact recv ok", r["type"] == "msg.recv" and r["data"]["from"] == D)
 
+    # 已是联系人：再次 request → 409
+    d.send(env("contact.request", {"account": E}))
+    r = json.loads(d.recv())
+    check("contact request already contact 409", r["type"] == "contact.request_res"
+          and r["data"]["code"] == 409)
+    # 不存在目标：request → 404
+    d.send(env("contact.request", {"account": NOBODY}))
+    r = json.loads(d.recv())
+    check("contact request missing 404", r["type"] == "contact.request_res"
+          and r["data"]["code"] == 404)
+
     # 拒绝流程：F 请求 D，D 拒绝
     f.send(env("contact.request", {"account": D}))
     json.loads(f.recv())
