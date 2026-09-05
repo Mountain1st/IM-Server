@@ -104,16 +104,21 @@ int ContactRepository::addRequest(int64_t from, int64_t to) {
   std::lock_guard<std::mutex> lock(mutex_);
   if (!client_.ok()) return 2;
   int errNo = 0;
+  // 仅当已有行处于 rejected(2) 时重置为 pending(0)（允许重新发起）；
+  // pending/accepted 保持原状（409 已存在/已是联系人由上层处理）。
   MYSQL_STMT* stmt = mysqlStmtExec(client_.handle(),
-      "INSERT INTO friend_requests (from_user, to_user, status) VALUES (?, ?, 0)",
+      "INSERT INTO friend_requests (from_user, to_user, status) VALUES (?, ?, 0) "
+      "ON DUPLICATE KEY UPDATE status = IF(status = 2, 0, status)",
       {std::to_string(from), std::to_string(to)}, &errNo);
   if (!stmt) {
-    if (errNo == 1062) return 1; // 唯一键冲突：已有请求
     std::cerr << "[mysql] 添加好友请求失败 errno=" << errNo << std::endl;
     return 2;
   }
+  // affected_rows 语义：1=新插入成功；0=冲突且未变化（pending/accepted→409）；
+  // 2=冲突但被重置为 pending（原 rejected→成功）。
+  const int affected = static_cast<int>(mysql_stmt_affected_rows(stmt));
   mysql_stmt_close(stmt);
-  return 0;
+  return affected == 1 || affected == 2 ? 0 : 1;
 }
 
 int ContactRepository::acceptRequest(int64_t to, int64_t from) {
