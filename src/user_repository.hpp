@@ -31,6 +31,9 @@ public:
   virtual bool userExists(int64_t userId) = 0;
   // 按用户 id 查询昵称（token 回执、消息 fromNick）。找到返回 true 并写出昵称。
   virtual bool fetchUserNameById(int64_t userId, std::string* username) = 0;
+  // 按用户 id 查询登录账号（S2C 消息 from 用 account，userId 对客户端不透明）。
+  // 找到返回 true 并写出 account。
+  virtual bool fetchAccountById(int64_t userId, std::string* account) = 0;
 };
 
 } // namespace im

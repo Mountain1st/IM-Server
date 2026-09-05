@@ -153,4 +153,9 @@ bool UserStore::nickname(int64_t userId, std::string* username) {
   return repo_->fetchUserNameById(userId, username);
 }
 
+bool UserStore::accountOf(int64_t userId, std::string* account) {
+  std::lock_guard<std::mutex> lock(mutex_);
+  return repo_->fetchAccountById(userId, account);
+}
+
 } // namespace im

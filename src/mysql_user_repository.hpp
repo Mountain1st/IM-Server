@@ -32,6 +32,7 @@ public:
                     std::string* username) override;
   bool userExists(int64_t userId) override;
   bool fetchUserNameById(int64_t userId, std::string* username) override;
+  bool fetchAccountById(int64_t userId, std::string* account) override;
 
 private:
   void loadIdCache();
@@ -41,6 +42,9 @@ private:
   // userExists()、token 回执与 msg.recv 的 fromNick 都走缓存，避免热路径打数据库。
   // 本服务不提供删号，缓存不会过期；若外部直接改库则需重启同步。
   std::unordered_map<int64_t, std::string> ids_;
+  // 已知 userId -> 登录账号(account) 缓存（启动全量加载 + 注册时追加）。
+  // msg.recv/msg.offline/chat.history_res 的 from 返回 account，需要反查。
+  std::unordered_map<int64_t, std::string> idAccounts_;
 };
 
 } // namespace im

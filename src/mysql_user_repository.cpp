@@ -20,7 +20,7 @@ MySqlUserRepository::MySqlUserRepository(const std::string& host, unsigned port,
 void MySqlUserRepository::loadIdCache() {
   if (!client_.ok()) return;
   MYSQL* c = client_.handle();
-  if (mysql_query(c, "SELECT id, username FROM users")) {
+  if (mysql_query(c, "SELECT id, account, username FROM users")) {
     std::cerr << "[mysql] 加载用户 id 缓存失败: " << client_.errStr() << std::endl;
     return;
   }
@@ -28,7 +28,11 @@ void MySqlUserRepository::loadIdCache() {
   if (!res) return;
   MYSQL_ROW row;
   while ((row = mysql_fetch_row(res))) {
-    if (row[0]) ids_.emplace(static_cast<int64_t>(std::strtoll(row[0], nullptr, 10)), row[1] ? row[1] : std::string());
+    if (row[0]) {
+      const int64_t id = static_cast<int64_t>(std::strtoll(row[0], nullptr, 10));
+      ids_.emplace(id, row[2] ? row[2] : std::string());
+      idAccounts_.emplace(id, row[1] ? row[1] : std::string());
+    }
   }
   mysql_free_result(res);
   std::cout << "[mysql] 已加载 " << ids_.size() << " 个用户 id 到缓存" << std::endl;
@@ -51,6 +55,7 @@ int MySqlUserRepository::insertUser(const std::string& account, const std::strin
   *userId = static_cast<int64_t>(mysql_stmt_insert_id(stmt));
   mysql_stmt_close(stmt);
   ids_.emplace(*userId, username);
+  idAccounts_.emplace(*userId, account);
   return 0;
 }
 
@@ -126,6 +131,13 @@ bool MySqlUserRepository::fetchUserNameById(int64_t userId, std::string* usernam
   auto it = ids_.find(userId);
   if (it == ids_.end()) return false;
   *username = it->second;
+  return true;
+}
+
+bool MySqlUserRepository::fetchAccountById(int64_t userId, std::string* account) {
+  auto it = idAccounts_.find(userId);
+  if (it == idAccounts_.end()) return false;
+  *account = it->second;
   return true;
 }
 

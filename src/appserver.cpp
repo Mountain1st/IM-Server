@@ -10,6 +10,7 @@
 #include "server_config.hpp"
 #include "session.hpp"
 
+#include <algorithm>
 #include <ctime>
 #include <iostream>
 #include <stdexcept>
@@ -71,6 +72,46 @@ std::shared_ptr<UserRepository> makeUserRepository(const UserStoreConfig& c) {
   std::cout << "[db] 用户存储: MySQL (host=" << c.mysqlHost << ":" << c.mysqlPort
             << ", db=" << c.mysqlDb << ")" << std::endl;
   return repo;
+}
+
+// 解析消息收发目标字段（msg.send 的 to / chat.history 的 to / msg.read 的 from）。
+// 协议 v1.7：字段为登录账号 account（10-11 位数字，客户端传数字或字符串均可）；
+// 兼容旧协议客户端传 userId 数字（非 10-11 位）。
+// 返回值：0=自己对话框（字段为 "0"/0 或解析出的 userId 即发送者自身）；
+//        >0=目标 userId；-1=参数错误（400）；-2=目标不存在（404）；-3=存储异常（500）。
+int64_t resolveTarget(UserStore* store, const json& data, const char* key) {
+  if (!data.contains(key)) return -1;
+  const json& v = data[key];
+  std::string s;
+  if (v.is_string()) {
+    s = v.get<std::string>();
+  } else if (v.is_number_integer()) {
+    s = std::to_string(v.get<int64_t>());
+  } else {
+    return -1;
+  }
+  if (s.empty() || s == "0") return 0; // 自己对话框（to:0 / from:0）
+  const bool digits = std::all_of(s.begin(), s.end(),
+                                  [](char c) { return c >= '0' && c <= '9'; });
+  // 非 10-11 位数字：视为旧协议 userId 数字（如 121），按 userId 校验
+  if (!digits || s.size() < kMinAccountLen || s.size() > kMaxAccountLen) {
+    int64_t uid = 0;
+    try {
+      uid = std::stoll(s);
+    } catch (...) {
+      return -1;
+    }
+    if (uid <= 0) return -1;
+    if (!store->exists(uid)) return -2;
+    return uid;
+  }
+  // 10-11 位数字：按登录账号 account 解析
+  int64_t uid = 0;
+  std::string nick;
+  const int frc = store->lookupAccount(s, &uid, &nick);
+  if (frc == 2) return -3;
+  if (frc != 0) return -2;
+  return uid;
 }
 } // namespace
 
@@ -361,8 +402,10 @@ void AppServer::pushOfflineMessages(int64_t userId,
   for (const auto& m : stored) {
     std::string fromNick;
     userStore_->nickname(m.fromUser, &fromNick);
+    std::string fromAccount;
+    if (!userStore_->accountOf(m.fromUser, &fromAccount)) fromAccount.clear();
     arr.push_back(json{
-      {"from", m.fromUser},
+      {"from", fromAccount},
       {"fromNick", fromNick},
       {"content", m.content},
       {"ts", m.ts},
@@ -419,7 +462,6 @@ void AppServer::onLogout(const std::shared_ptr<Session>& session) {
 }
 
 void AppServer::onSend(const std::shared_ptr<Session>& session, const json& data) {
-  int64_t to = data.value("to", (int64_t)0);
   std::string content = data.value("content", "");
   std::string clientMsgId = data.value("clientMsgId", "");
   auto ack = [&](int code, const std::string& msg) {
@@ -432,7 +474,7 @@ void AppServer::onSend(const std::shared_ptr<Session>& session, const json& data
     ack(400, "封包格式错误");
     return;
   }
-  if (to < 0 || content.empty()) {
+  if (content.empty()) {
     ack(400, "参数错误");
     return;
   }
@@ -440,9 +482,18 @@ void AppServer::onSend(const std::shared_ptr<Session>& session, const json& data
     ack(413, "消息内容超长（超过64KB）");
     return;
   }
-  // to 为目标用户 userId；to == 0 为「自己对话框」（协议 §4），不校验目标存在性
-  if (to != 0 && !userStore_->exists(to)) {
+  // to 为目标登录账号 account（协议 v1.7；兼容旧 userId 数字与 0=自己对话框）
+  const int64_t to = resolveTarget(userStore_.get(), data, "to");
+  if (to == -1) {
+    ack(400, "参数错误");
+    return;
+  }
+  if (to == -2) {
     ack(404, "目标用户不存在");
+    return;
+  }
+  if (to == -3) {
+    ack(500, "服务器内部错误");
     return;
   }
   // 幂等查询（只查不记）：窗口内已处理过 → 直接回执成功、不再投递。
@@ -459,7 +510,7 @@ void AppServer::onSend(const std::shared_ptr<Session>& session, const json& data
     ack(429, "消息发送过于频繁，请稍后再试");
     return;
   }
-  // 自己对话框：只回 ack 不回发 msg.recv，不落库（消息由客户端本地显示）
+  // 自己对话框（to==0 或 to==自己账号）：只回 ack 不回发 msg.recv，不落库
   if (to == 0 || to == session->userId()) {
     msgDedup_->remember(session->userId(), clientMsgId);
     ack(0, "ok");
@@ -478,11 +529,14 @@ void AppServer::onSend(const std::shared_ptr<Session>& session, const json& data
   }
   msgDedup_->remember(session->userId(), clientMsgId);
   ack(0, "ok");
-  // 发送方昵称（供接收方/离线消息直接展示，无需客户端另查）
+  // 发送方昵称与账号（供接收方/离线消息直接展示，无需客户端另查；
+  // from 为登录账号 account，userId 对客户端不透明）
   std::string fromNick;
   if (!userStore_->nickname(session->userId(), &fromNick)) fromNick.clear();
+  std::string fromAccount;
+  if (!userStore_->accountOf(session->userId(), &fromAccount)) fromAccount.clear();
   json recvData = {
-    {"from", session->userId()},
+    {"from", fromAccount},
     {"fromNick", fromNick},
     {"content", content},
     {"ts", now},
@@ -514,10 +568,25 @@ void AppServer::onOfflineAck(const std::shared_ptr<Session>& session, const json
 }
 
 void AppServer::onHistory(const std::shared_ptr<Session>& session, const json& data) {
-  // 拉取与目标用户的单聊历史（按 ts 倒序，最新在前）
-  int64_t to = data.value("to", (int64_t)0);
-  if (to <= 0 || !userStore_->exists(to)) {
+  // 拉取与目标用户的单聊历史（按 ts 倒序，最新在前）。
+  // to 为目标登录账号 account（协议 v1.7；兼容旧 userId 数字与 0=自己对话框）。
+  const int64_t to = resolveTarget(userStore_.get(), data, "to");
+  if (to == -1) {
+    session->reply(makeResult("chat.history_res", 400, "参数错误", json::object()));
+    return;
+  }
+  if (to == -2) {
     session->reply(makeResult("chat.history_res", 404, "目标用户不存在", json::object()));
+    return;
+  }
+  if (to == -3) {
+    session->reply(makeResult("chat.history_res", 500, "服务器内部错误", json::object()));
+    return;
+  }
+  // 自己对话框：无历史消息（自己对话框消息不落库），返回空列表
+  if (to == 0 || to == session->userId()) {
+    session->reply(makeResult("chat.history_res", 0, "ok",
+        json{{"msgs", json::array()}}));
     return;
   }
   int limit = data.value("limit", 50);
@@ -526,8 +595,10 @@ void AppServer::onHistory(const std::shared_ptr<Session>& session, const json& d
   for (const auto& m : stored) {
     std::string fromNick;
     userStore_->nickname(m.fromUser, &fromNick);
+    std::string fromAccount;
+    if (!userStore_->accountOf(m.fromUser, &fromAccount)) fromAccount.clear();
     arr.push_back(json{
-      {"from", m.fromUser},
+      {"from", fromAccount},
       {"fromNick", fromNick},
       {"content", m.content},
       {"ts", m.ts},
@@ -540,10 +611,16 @@ void AppServer::onHistory(const std::shared_ptr<Session>& session, const json& d
 }
 
 void AppServer::onRead(const std::shared_ptr<Session>& session, const json& data) {
-  // 已读回执：把与某用户的、截至 ts 的未读消息标记为已读
-  int64_t from = data.value("from", (int64_t)0);
-  if (from <= 0) {
+  // 已读回执：把与某用户、截至 ts 的未读消息标记为已读。
+  // from 为目标登录账号 account（协议 v1.7；兼容旧 userId 数字与 0=自己）。
+  const int64_t from = resolveTarget(userStore_.get(), data, "from");
+  if (from == -1 || from == -2 || from == -3) {
     session->reply(makeResult("msg.read_res", 400, "参数错误", json::object()));
+    return;
+  }
+  // 自己对话框：无对端消息，直接成功
+  if (from == 0 || from == session->userId()) {
+    session->reply(makeResult("msg.read_res", 0, "ok", json::object()));
     return;
   }
   int64_t ts = data.value("ts", static_cast<int64_t>(std::time(nullptr)));

@@ -50,6 +50,8 @@ public:
   int lookupAccount(const std::string& account, int64_t* userId, std::string* username);
   // 查询用户昵称（msg.recv 的 fromNick）。不存在返回 false。
   bool nickname(int64_t userId, std::string* username);
+  // 查询用户登录账号（S2C 消息 from 用 account）。不存在返回 false。
+  bool accountOf(int64_t userId, std::string* account);
 
 private:
   // 随机盐 + 密码哈希（PBKDF2-HMAC-SHA256 慢哈希，见 user_store.cpp）
