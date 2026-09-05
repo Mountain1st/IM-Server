@@ -176,7 +176,7 @@ int MySqlUserRepository::fetchSettings(int64_t userId, int* allowTempChat, int* 
 void MySqlUserRepository::updateSettings(int64_t userId, int allowTempChat, int searchable,
                                          int allowAdd) {
   if (!client_.ok()) return;
-  // 任一 < 0 表示不修改该字段（用 COALESCE 简化）
+  // 任一字段 < 0 表示不修改该字段（用 CASE WHEN 保底当前值）
   const std::string sql =
       "UPDATE users SET allow_temp_chat = CASE WHEN ? < 0 THEN allow_temp_chat ELSE ? END, "
       "searchable = CASE WHEN ? < 0 THEN searchable ELSE ? END, "
@@ -210,7 +210,7 @@ void MySqlUserRepository::searchUsers(const std::string& keyword, int64_t exclud
     std::cerr << "[mysql] 搜索用户失败 errno=" << errNo << std::endl;
     return;
   }
-  char acctBuf[128] = {0}, nameBuf[128] = {0};
+  char acctBuf[256] = {0}, nameBuf[256] = {0};
   unsigned long acctLen = 0, nameLen = 0;
   bool acctNull = false, nameNull = false;
   MYSQL_BIND res[2];
