@@ -17,7 +17,10 @@ CREATE TABLE IF NOT EXISTS users (
   username      VARCHAR(64)  NOT NULL,
   salt          CHAR(32)     NOT NULL,           -- 16 字节随机盐的 hex
   password_hash CHAR(64)     NOT NULL,           -- PBKDF2-HMAC-SHA256 32 字节 hex
-  created_at    TIMESTAMP    NOT NULL DEFAULT CURRENT_TIMESTAMP
+  created_at    TIMESTAMP    NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  allow_temp_chat TINYINT    NOT NULL DEFAULT 1, -- 允许非联系人临时对话
+  searchable      TINYINT    NOT NULL DEFAULT 1, -- 可被搜索（user.search）
+  allow_add       TINYINT    NOT NULL DEFAULT 1  -- 可被添加（contact.request）
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 -- 消息表：单聊消息的权威存储（在线投递 + 离线补发 + 历史查询）。
