@@ -87,12 +87,21 @@ int main(int argc, char* argv[]) {
   if (const char* v = std::getenv("IM_MYSQL_USER")) userConfig.mysqlUser = v;
   if (const char* v = std::getenv("IM_MYSQL_PASSWORD")) userConfig.mysqlPassword = v;
 
+  // Redis 存储（token 等）：IM_REDIS_ENABLED=1 时启用；
+  // 其余由 IM_REDIS_HOST/PORT/PASSWORD/DB 覆盖（本环境 Redis 容器端口 6380）。
+  im::RedisStoreConfig redisConfig;
+  if (const char* v = std::getenv("IM_REDIS_ENABLED")) redisConfig.enabled = (std::string(v) == "1" || std::string(v) == "true");
+  if (const char* v = std::getenv("IM_REDIS_HOST")) redisConfig.redisHost = v;
+  if (const char* v = std::getenv("IM_REDIS_PORT")) redisConfig.redisPort = static_cast<unsigned>(std::atoi(v));
+  if (const char* v = std::getenv("IM_REDIS_PASSWORD")) redisConfig.redisPassword = v;
+  if (const char* v = std::getenv("IM_REDIS_DB")) redisConfig.redisDb = std::atoi(v);
+
   // 业务层：内部启动工作线程并通知 TcpServer（其负责主从 eventloop）。
   // 用户存储为 MySQL：配置缺失或连接失败时抛异常，这里捕获并明确报错退出。
   std::shared_ptr<im::AppServer> server;
   try {
     server = std::make_shared<im::AppServer>(
-        port, ioThreads, workThreads, maxConnections, allowedOrigins, userConfig);
+        port, ioThreads, workThreads, maxConnections, allowedOrigins, userConfig, redisConfig);
   } catch (const std::exception& e) {
     std::cerr << "[server] 启动失败: " << e.what() << std::endl;
     return 1;

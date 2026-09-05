@@ -2,7 +2,9 @@
 
 #include "connection.hpp"
 #include "metrics.hpp"
+#include "mysql_message_repository.hpp"
 #include "mysql_user_repository.hpp"
+#include "redis_token_store.hpp"
 #include "server_config.hpp"
 #include "session.hpp"
 
@@ -15,7 +17,9 @@ namespace im {
 namespace {
 // 业务参数限制统一取自集中配置（server_config.hpp）
 constexpr size_t kMaxContentBytes = config::kMaxContentBytes;
+constexpr size_t kMinAccountLen = config::kMinAccountLen;
 constexpr size_t kMaxAccountLen = config::kMaxAccountLen;
+constexpr size_t kLoginAccountMaxLen = config::kLoginAccountMaxLen;
 constexpr size_t kMaxUsernameLen = config::kMaxUsernameLen;
 constexpr size_t kMinPasswordLen = config::kMinPasswordLen;
 constexpr size_t kMaxPasswordLen = config::kMaxPasswordLen;
@@ -23,6 +27,17 @@ constexpr size_t kMaxPasswordLen = config::kMaxPasswordLen;
 constexpr std::chrono::seconds kSendWindow(config::kSendWindow);
 constexpr size_t kMaxSendPerWindow = config::kMaxSendPerWindow;
 constexpr size_t kMaxSendNoIdPerWindow = config::kMaxSendNoIdPerWindow;
+
+// 账号格式：10-11 位纯数字（如手机号）。
+// 注册与新建对话（chat.create）均按此校验，不合规回 400；
+// 登录不校验格式（错误统一按 403 处理，兼容遗留账号，不泄露账号存在性）。
+bool validAccount(const std::string& a) {
+  if (a.size() < kMinAccountLen || a.size() > kMaxAccountLen) return false;
+  for (char c : a) {
+    if (c < '0' || c > '9') return false;
+  }
+  return true;
+}
 
 // 密码规则校验：6-32 位、仅字母/数字、且同时包含字母与数字
 bool validPassword(const std::string& p) {
@@ -70,10 +85,41 @@ AppServer::AppServer(uint16_t port, size_t ioThreads, size_t workThreads, size_t
 
 AppServer::AppServer(uint16_t port, size_t ioThreads, size_t workThreads, size_t maxConnections,
                      std::vector<std::string> allowedOrigins, UserStoreConfig userConfig)
+    : AppServer(port, ioThreads, workThreads, maxConnections, std::move(allowedOrigins),
+                userConfig, RedisStoreConfig{}) {}
+
+// 构造 token 存储：Redis 启用则用 Redis（连接失败抛错），否则内存
+std::shared_ptr<TokenStore> makeTokenStore(const RedisStoreConfig& c) {
+  if (!c.enabled) {
+    std::cout << "[db] token 存储: 内存" << std::endl;
+    return std::make_shared<MemoryTokenStore>();
+  }
+  auto rs = std::make_shared<RedisTokenStore>(c);
+  if (!rs->ok()) {
+    throw std::runtime_error("Redis 连接失败: " + rs->errStr());
+  }
+  std::cout << "[db] token 存储: Redis (host=" << c.redisHost << ":" << c.redisPort
+            << ", db=" << c.redisDb << ")" << std::endl;
+  return rs;
+}
+
+AppServer::AppServer(uint16_t port, size_t ioThreads, size_t workThreads, size_t maxConnections,
+                     std::vector<std::string> allowedOrigins, UserStoreConfig userConfig,
+                     RedisStoreConfig redisConfig)
     : tcpServer_(std::make_shared<TcpServer>(port, ioThreads, maxConnections)),
       workPool_(workThreads),
       allowedOrigins_(std::move(allowedOrigins)),
-      userStore_(std::make_unique<UserStore>(makeUserRepository(userConfig))) {}
+      userStore_(std::make_unique<UserStore>(makeUserRepository(userConfig),
+                                             makeTokenStore(redisConfig))),
+      msgRepo_(std::make_unique<MySqlMessageRepository>(
+          userConfig.mysqlHost, userConfig.mysqlPort, userConfig.mysqlUser,
+          userConfig.mysqlPassword, userConfig.mysqlDb)) {
+  if (!msgRepo_->ok()) {
+    throw std::runtime_error("消息存储连接失败");
+  }
+  std::cout << "[db] 消息存储: MySQL (host=" << userConfig.mysqlHost << ":" << userConfig.mysqlPort
+            << ", db=" << userConfig.mysqlDb << ")" << std::endl;
+}
 
 AppServer::~AppServer() = default;
 
@@ -169,6 +215,18 @@ void AppServer::onEnvelope(const std::shared_ptr<Session>& session, const json& 
       onCreateConv(session, data);
       return;
     }
+    if (type == "msg.offline_ack") {
+      onOfflineAck(session, data);
+      return;
+    }
+    if (type == "chat.history") {
+      onHistory(session, data);
+      return;
+    }
+    if (type == "msg.read") {
+      onRead(session, data);
+      return;
+    }
     session->reply(makeError(400, "未知的指令类型"));
   } catch (const json::exception& e) {
     // data.value() 在字段存在但类型不符时抛 type_error.302。
@@ -184,10 +242,13 @@ void AppServer::onRegister(const std::shared_ptr<Session>& session, const json& 
   // username 为昵称（可选，空则缺省与账号一致）
   std::string username = data.value("username", "");
   if (username.empty()) username = account;
-  // 校验：账号非空且不超长；密码 6-32 位字母数字组合；昵称 < 32 位
-  if (account.empty() || account.size() > kMaxAccountLen ||
-      !validPassword(password) ||
-      username.size() >= kMaxUsernameLen) {
+  // 校验：账号须为 10-11 位数字；密码 6-32 位字母数字组合；昵称 < 32 位。
+  // 账号格式不合规给专用消息（客户端可直接展示原因）
+  if (!validAccount(account)) {
+    session->reply(makeError(400, "账号须为10-11位数字"));
+    return;
+  }
+  if (!validPassword(password) || username.size() >= kMaxUsernameLen) {
     session->reply(makeError(400, "参数错误"));
     return;
   }
@@ -204,7 +265,9 @@ void AppServer::onRegister(const std::shared_ptr<Session>& session, const json& 
 void AppServer::onLogin(const std::shared_ptr<Session>& session, const json& data) {
   std::string account = data.value("account", "");
   std::string password = data.value("password", "");
-  if (account.empty() || account.size() > kMaxAccountLen ||
+  // 登录：输入仅做宽松上限校验（防滥用），格式不校验——
+  // 账号不存在与密码错误统一回 403，不泄露账号存在性
+  if (account.empty() || account.size() > kLoginAccountMaxLen ||
       password.empty() || password.size() > kMaxPasswordLen) {
     session->reply(makeError(400, "参数错误"));
     return;
@@ -244,11 +307,8 @@ void AppServer::onLogin(const std::shared_ptr<Session>& session, const json& dat
   }
   session->reply(makeResult("auth.login_res", 0, "ok",
       json{{"userId", userId}, {"account", account}, {"username", username}, {"token", token}}));
-  // 登录应答之后补发离线消息（非破坏性 peek：补发中断不丢失，重登可再补发）
-  auto msgs = offlineStore_.peek(userId);
-  if (!msgs.empty()) {
-    session->reply(makeEnvelopeText("msg.offline", json{{"msgs", msgs}}));
-  }
+  // 登录应答之后补发离线消息（非破坏性：补发中断不丢失，确认前重登可再补发）
+  pushOfflineMessages(userId, session);
 }
 
 // 生成全局消息 ID：时间戳前缀 + 进程内自增序列（重启后前缀变化，避免跨进程碰撞）
@@ -256,6 +316,28 @@ std::string AppServer::nextMessageId() {
   uint64_t seq = msgSeq_.fetch_add(1, std::memory_order_relaxed) + 1;
   return std::to_string(static_cast<int64_t>(std::time(nullptr))) + "-" +
          std::to_string(seq);
+}
+
+void AppServer::pushOfflineMessages(int64_t userId,
+                                    const std::shared_ptr<Session>& session) {
+  // 从消息存储读取该用户的离线消息（status=offline_pending），按 ts 升序
+  auto stored = msgRepo_->fetchOffline(userId);
+  if (stored.empty()) return;
+  json arr = json::array();
+  for (const auto& m : stored) {
+    std::string fromNick;
+    userStore_->nickname(m.fromUser, &fromNick);
+    arr.push_back(json{
+      {"from", m.fromUser},
+      {"fromNick", fromNick},
+      {"content", m.content},
+      {"ts", m.ts},
+      {"clientMsgId", m.clientMsgId},
+      {"messageId", m.messageId},
+      {"chatType", m.chatType},
+    });
+  }
+  session->reply(makeEnvelopeText("msg.offline", json{{"msgs", arr}}));
 }
 
 void AppServer::onToken(const std::shared_ptr<Session>& session, const json& data) {
@@ -291,10 +373,7 @@ void AppServer::onToken(const std::shared_ptr<Session>& session, const json& dat
   session->reply(makeResult("auth.token_res", 0, "ok",
       json{{"userId", userId}, {"username", username}, {"token", token}}));
   // 重连成功后同样补发离线消息（非破坏性）
-  auto msgs = offlineStore_.peek(userId);
-  if (!msgs.empty()) {
-    session->reply(makeEnvelopeText("msg.offline", json{{"msgs", msgs}}));
-  }
+  pushOfflineMessages(userId, session);
 }
 
 void AppServer::onLogout(const std::shared_ptr<Session>& session) {
@@ -346,12 +425,25 @@ void AppServer::onSend(const std::shared_ptr<Session>& session, const json& data
     ack(429, "消息发送过于频繁，请稍后再试");
     return;
   }
-  ack(0, "ok");
-  // 消息已确认接受（在线投递或离线入队），此时才记录幂等，供窗口内重试去重
+  // 自己对话框：只回 ack 不回发 msg.recv，不落库（消息由客户端本地显示）
+  if (to == 0 || to == session->userId()) {
+    msgDedup_.remember(session->userId(), clientMsgId);
+    ack(0, "ok");
+    return;
+  }
+  // 目标在线与否决定消息初始状态：在线=delivered，离线=offline_pending
+  const int64_t now = static_cast<int64_t>(std::time(nullptr));
+  const std::string messageId = nextMessageId();
+  const bool targetOnline = !onlineMgr_.sessions(to).empty();
+  const int status = targetOnline ? kMsgDelivered : kMsgOfflinePending;
+  // 先持久化成功再确认（避免"内存入队伪装成持久化"）
+  if (!msgRepo_->saveMessage(messageId, session->userId(), to, content, now,
+                             clientMsgId, chatType, status)) {
+    ack(500, "服务器内部错误");
+    return;
+  }
   msgDedup_.remember(session->userId(), clientMsgId);
-  // 自己对话框：to == 0 或目标为自己的 userId → 只回 ack 不回发 msg.recv，
-  // 消息由客户端本地显示（协议 §4 约束）。
-  if (to == 0 || to == session->userId()) return;
+  ack(0, "ok");
   // 发送方昵称（供接收方/离线消息直接展示，无需客户端另查）
   std::string fromNick;
   if (!userStore_->nickname(session->userId(), &fromNick)) fromNick.clear();
@@ -359,29 +451,78 @@ void AppServer::onSend(const std::shared_ptr<Session>& session, const json& data
     {"from", session->userId()},
     {"fromNick", fromNick},
     {"content", content},
-    {"ts", static_cast<int64_t>(std::time(nullptr))},
+    {"ts", now},
     {"clientMsgId", clientMsgId},
-    {"messageId", nextMessageId()},
+    {"messageId", messageId},
     {"chatType", chatType},
   };
-  auto targets = onlineMgr_.sessions(to);
-  if (targets.empty()) {
-    // 目标离线：暂存，待其登录后补发
-    offlineStore_.push(to, recvData);
-    g_metrics.messagesOffline.fetch_add(1, std::memory_order_relaxed);
-  } else {
-    for (auto& t : targets) {
+  if (targetOnline) {
+    for (auto& t : onlineMgr_.sessions(to)) {
       t->reply(makeEnvelopeText("msg.recv", recvData));
     }
-    g_metrics.messagesDelivered.fetch_add(targets.size(), std::memory_order_relaxed);
+    g_metrics.messagesDelivered.fetch_add(1, std::memory_order_relaxed);
+  } else {
+    // 目标离线：已持久化为 offline_pending，待其登录后补发
+    g_metrics.messagesOffline.fetch_add(1, std::memory_order_relaxed);
   }
 }
 
+void AppServer::onOfflineAck(const std::shared_ptr<Session>& session, const json& data) {
+  // 客户端确认已收到 msg.offline 中的消息，服务端标记为已投递
+  std::vector<std::string> messageIds;
+  if (data.contains("messageIds") && data["messageIds"].is_array()) {
+    for (const auto& v : data["messageIds"]) {
+      if (v.is_string()) messageIds.push_back(v.get<std::string>());
+    }
+  }
+  msgRepo_->markDelivered(session->userId(), messageIds);
+  session->reply(makeResult("msg.offline_ack_res", 0, "ok", json::object()));
+}
+
+void AppServer::onHistory(const std::shared_ptr<Session>& session, const json& data) {
+  // 拉取与目标用户的单聊历史（按 ts 倒序，最新在前）
+  int64_t to = data.value("to", (int64_t)0);
+  if (to <= 0 || !userStore_->exists(to)) {
+    session->reply(makeResult("chat.history_res", 404, "目标用户不存在", json::object()));
+    return;
+  }
+  int limit = data.value("limit", 50);
+  auto stored = msgRepo_->fetchHistory(session->userId(), to, limit);
+  json arr = json::array();
+  for (const auto& m : stored) {
+    std::string fromNick;
+    userStore_->nickname(m.fromUser, &fromNick);
+    arr.push_back(json{
+      {"from", m.fromUser},
+      {"fromNick", fromNick},
+      {"content", m.content},
+      {"ts", m.ts},
+      {"clientMsgId", m.clientMsgId},
+      {"messageId", m.messageId},
+      {"chatType", m.chatType},
+    });
+  }
+  session->reply(makeResult("chat.history_res", 0, "ok", json{{"msgs", arr}}));
+}
+
+void AppServer::onRead(const std::shared_ptr<Session>& session, const json& data) {
+  // 已读回执：把与某用户的、截至 ts 的未读消息标记为已读
+  int64_t from = data.value("from", (int64_t)0);
+  if (from <= 0) {
+    session->reply(makeResult("msg.read_res", 400, "参数错误", json::object()));
+    return;
+  }
+  int64_t ts = data.value("ts", static_cast<int64_t>(std::time(nullptr)));
+  msgRepo_->markRead(session->userId(), from, ts);
+  session->reply(makeResult("msg.read_res", 0, "ok", json::object()));
+}
+
 void AppServer::onCreateConv(const std::shared_ptr<Session>& session, const json& data) {
-  // 按登录账号 account 查找目标用户；存在则返回其 account 与昵称
+  // 按登录账号 account 查找目标用户；存在则返回其 account 与昵称。
+  // 账号须为 10-11 位数字：格式不合规直接 400（如输入 "0" 不再误报 404）
   std::string account = data.value("account", "");
-  if (account.empty() || account.size() > kMaxAccountLen) {
-    session->reply(makeResult("chat.create_res", 400, "参数错误", json::object()));
+  if (!validAccount(account)) {
+    session->reply(makeResult("chat.create_res", 400, "账号须为10-11位数字", json::object()));
     return;
   }
   int64_t uid = 0;

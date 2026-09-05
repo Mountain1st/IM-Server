@@ -8,42 +8,6 @@ namespace im {
 
 namespace {
 constexpr unsigned kErrDupEntry = 1062; // MySQL ER_DUP_ENTRY
-
-// 用准备好的语句执行参数化 SQL（INSERT/SELECT 通用）。成功返回 stmt（由调用方读取结果后关闭），失败返回 nullptr。
-MYSQL_STMT* stmtExec(MYSQL* c, const std::string& sql,
-                     const std::vector<std::string>& params, int* errNo) {
-  MYSQL_STMT* stmt = mysql_stmt_init(c);
-  if (!stmt) {
-    *errNo = mysql_errno(c);
-    return nullptr;
-  }
-  if (mysql_stmt_prepare(stmt, sql.c_str(), sql.size())) {
-    *errNo = mysql_stmt_errno(stmt);
-    mysql_stmt_close(stmt);
-    return nullptr;
-  }
-  std::vector<MYSQL_BIND> binds(params.size());
-  std::vector<unsigned long> lens(params.size());
-  for (size_t i = 0; i < params.size(); ++i) {
-    memset(&binds[i], 0, sizeof binds[i]);
-    lens[i] = static_cast<unsigned long>(params[i].size());
-    binds[i].buffer_type = MYSQL_TYPE_STRING;
-    binds[i].buffer = const_cast<char*>(params[i].data());
-    binds[i].buffer_length = lens[i];
-    binds[i].length = &lens[i];
-  }
-  if (!params.empty() && mysql_stmt_bind_param(stmt, binds.data())) {
-    *errNo = mysql_stmt_errno(stmt);
-    mysql_stmt_close(stmt);
-    return nullptr;
-  }
-  if (mysql_stmt_execute(stmt)) {
-    *errNo = mysql_stmt_errno(stmt);
-    mysql_stmt_close(stmt);
-    return nullptr;
-  }
-  return stmt;
-}
 } // namespace
 
 MySqlUserRepository::MySqlUserRepository(const std::string& host, unsigned port,
@@ -77,7 +41,7 @@ int MySqlUserRepository::insertUser(const std::string& account, const std::strin
   int errNo = 0;
   const std::string sql =
       "INSERT INTO users (account, username, salt, password_hash) VALUES (?, ?, ?, ?)";
-  MYSQL_STMT* stmt = stmtExec(client_.handle(), sql,
+  MYSQL_STMT* stmt = mysqlStmtExec(client_.handle(), sql,
                               {account, username, salt, passwordHash}, &errNo);
   if (!stmt) {
     if (errNo == static_cast<int>(kErrDupEntry)) return 409;
@@ -98,7 +62,7 @@ int MySqlUserRepository::fetchUser(const std::string& account, int64_t* userId,
   const std::string sql =
       "SELECT id, username, salt, password_hash FROM users WHERE account = ? LIMIT 1";
   int errNo = 0;
-  MYSQL_STMT* stmt = stmtExec(c, sql, {account}, &errNo);
+  MYSQL_STMT* stmt = mysqlStmtExec(c, sql, {account}, &errNo);
   if (!stmt) {
     std::cerr << "[mysql] SELECT 准备/执行失败 errno=" << errNo << std::endl;
     return 2; // 数据库错误

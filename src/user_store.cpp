@@ -12,8 +12,6 @@ namespace im {
 namespace {
 // token 有效期：7 天（取自集中配置）
 constexpr std::chrono::hours kTokenTtl(config::kTokenTtl);
-// 周期性清理过期 token 的阈值（每次 login 时顺带检查）
-constexpr size_t kTokenCleanupThreshold = 1024;
 // 登录限流：窗口内失败次数上限与窗口时长
 constexpr int kMaxLoginFailures = config::kMaxLoginFailures;
 constexpr std::chrono::seconds kLockWindow(config::kLockWindow);
@@ -23,8 +21,9 @@ constexpr unsigned kPbkdf2Iterations = 100000;
 constexpr size_t kPbkdf2DkLen = 32;
 }
 
-UserStore::UserStore(std::shared_ptr<UserRepository> repo)
-  : repo_(std::move(repo)) {}
+UserStore::UserStore(std::shared_ptr<UserRepository> repo,
+                     std::shared_ptr<TokenStore> tokenStore)
+  : repo_(std::move(repo)), tokenStore_(std::move(tokenStore)) {}
 
 std::string UserStore::genSalt() {
   std::random_device rd;
@@ -88,17 +87,10 @@ int UserStore::login(const std::string& account, const std::string& password,
   }
   loginGuards_.erase(account); // 登录成功，清空失败记录
   *token = genToken();
-  // 只保存 token 的 SHA-256 摘要：进程内存被转储也不泄露可用 token（P0-5）
-  tokens_[sha256Hex(*token)] = TokenEntry{id, now + kTokenTtl};
+  // 只保存 token 的 SHA-256 摘要：内存/Redis 均不落明文 token（P0-5）
+  tokenStore_->put(sha256Hex(*token), id, kTokenTtl);
   *userId = id;
   *username = name;
-  // 顺带清理过期 token，防止表无限膨胀
-  if (tokens_.size() > kTokenCleanupThreshold) {
-    for (auto t = tokens_.begin(); t != tokens_.end();) {
-      if (t->second.expireAt <= now) t = tokens_.erase(t);
-      else ++t;
-    }
-  }
   return 0;
 }
 
@@ -131,23 +123,19 @@ void UserStore::recordFail(const std::string& account, std::chrono::steady_clock
 
 int UserStore::verifyToken(const std::string& token, int64_t* userId, std::string* username) {
   std::lock_guard<std::mutex> lock(mutex_);
-  auto now = std::chrono::steady_clock::now();
-  auto it = tokens_.find(sha256Hex(token));
-  if (it == tokens_.end() || it->second.expireAt <= now) {
-    if (it != tokens_.end()) tokens_.erase(it); // 顺手清掉过期 token
+  // token 摘要校验委托给 TokenStore（内存/Redis），过期自动失效
+  if (tokenStore_->get(sha256Hex(token), userId) != 0) {
     return 401; // token 无效或已过期
   }
-  int64_t uid = it->second.userId;
   std::string name;
-  if (!repo_->fetchUserNameById(uid, &name)) return 401; // 用户已不存在
+  if (!repo_->fetchUserNameById(*userId, &name)) return 401; // 用户已不存在
   *username = name;
-  *userId = uid;
   return 0;
 }
 
 void UserStore::logout(const std::string& token) {
   std::lock_guard<std::mutex> lock(mutex_);
-  tokens_.erase(sha256Hex(token));
+  tokenStore_->remove(sha256Hex(token));
 }
 
 bool UserStore::exists(int64_t userId) {

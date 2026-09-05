@@ -1,5 +1,6 @@
 #pragma once
 
+#include "token_store.hpp"
 #include "user_repository.hpp"
 
 #include <chrono>
@@ -23,13 +24,15 @@ struct UserStoreConfig {
 
 // 账号存储：负责注册、登录鉴权、token 发放/校验/登出、登录失败限流。
 // 用户模型：userId(id) 为唯一标识（消息收发目标），account 为登录账号，
-// username 为昵称。密码哈希（PBKDF2）与 token/限流逻辑在本类内存中实现；
-// 用户的增查持久化委托给 UserRepository（MySQL）。
+// username 为昵称。密码哈希（PBKDF2）与登录限流在本类内存中实现；
+// 用户的增查持久化委托给 UserRepository（MySQL）；
+// token 的存储委托给 TokenStore（内存默认，Redis 可选）。
 // 多个工作线程会并发访问，内部统一用互斥锁保护。
 class UserStore {
 public:
-  // 必须注入存储后端（MySQL）；连接失败由上层在启动前报错退出。
-  explicit UserStore(std::shared_ptr<UserRepository> repo);
+  // 必须注入存储后端（MySQL + token 存储）；连接失败由上层在启动前报错退出。
+  explicit UserStore(std::shared_ptr<UserRepository> repo,
+                     std::shared_ptr<TokenStore> tokenStore);
 
   // 注册新账号。成功返回 0 并写出新用户 id；账号已存在返回 409。
   int registerUser(const std::string& account, const std::string& password,
@@ -59,16 +62,12 @@ private:
 
   std::mutex mutex_;
   std::shared_ptr<UserRepository> repo_;
-  struct TokenEntry {
-    int64_t userId;
-    std::chrono::steady_clock::time_point expireAt;
-  };
+  std::shared_ptr<TokenStore> tokenStore_; // token 存储（内存默认 / Redis 可选）
   // 登录失败限流记录：窗口内失败达到阈值则暂时拒绝登录（防密码爆破）
   struct LoginGuard {
     int failures = 0;
     std::chrono::steady_clock::time_point windowStart;
   };
-  std::unordered_map<std::string, TokenEntry> tokens_;         // token -> 用户+过期时间
   std::unordered_map<std::string, LoginGuard> loginGuards_;    // account -> 失败记录
 };
 

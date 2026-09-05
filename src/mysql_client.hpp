@@ -3,6 +3,7 @@
 #include <mysql/mysql.h>
 
 #include <string>
+#include <vector>
 
 namespace im {
 
@@ -27,5 +28,11 @@ private:
   MYSQL* conn_ = nullptr;
   bool ok_ = false;
 };
+
+// 用准备好的语句执行参数化 SQL（INSERT/SELECT/UPDATE 通用）。
+// 成功返回 stmt（由调用方读取结果后关闭），失败返回 nullptr 并写出 errno。
+// 调用方须已持有连接访问锁（单连接非线程安全）。
+MYSQL_STMT* mysqlStmtExec(MYSQL* c, const std::string& sql,
+                          const std::vector<std::string>& params, int* errNo);
 
 } // namespace im

@@ -39,8 +39,13 @@ inline constexpr std::chrono::seconds kCloseFlushDeadline(5);
 // ---- 业务（指令参数） ----
 // 消息内容长度上限（64KB）
 inline constexpr size_t kMaxContentBytes = 64 * 1024;
-// 登录账号长度上限
-inline constexpr size_t kMaxAccountLen = 64;
+// 登录账号格式：10-11 位纯数字（如手机号）。
+// register 与 chat.create 均按此校验，不合规回 400；
+// auth.login 不校验格式（错误统一按 403 处理，兼容遗留短账号）。
+inline constexpr size_t kMinAccountLen = 10;
+inline constexpr size_t kMaxAccountLen = 11;
+// 登录输入的宽松长度上限（仅防滥用，不做格式校验）
+inline constexpr size_t kLoginAccountMaxLen = 64;
 // 昵称长度上限（<32）
 inline constexpr size_t kMaxUsernameLen = 32;
 // 密码长度范围

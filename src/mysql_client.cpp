@@ -1,5 +1,6 @@
 #include "mysql_client.hpp"
 
+#include <cstring>
 #include <iostream>
 
 namespace im {
@@ -31,6 +32,41 @@ unsigned MySqlClient::errNo() const {
 
 std::string MySqlClient::errStr() const {
   return conn_ ? mysql_error(conn_) : "no mysql connection";
+}
+
+MYSQL_STMT* mysqlStmtExec(MYSQL* c, const std::string& sql,
+                          const std::vector<std::string>& params, int* errNo) {
+  MYSQL_STMT* stmt = mysql_stmt_init(c);
+  if (!stmt) {
+    *errNo = mysql_errno(c);
+    return nullptr;
+  }
+  if (mysql_stmt_prepare(stmt, sql.c_str(), sql.size())) {
+    *errNo = mysql_stmt_errno(stmt);
+    mysql_stmt_close(stmt);
+    return nullptr;
+  }
+  std::vector<MYSQL_BIND> binds(params.size());
+  std::vector<unsigned long> lens(params.size());
+  for (size_t i = 0; i < params.size(); ++i) {
+    memset(&binds[i], 0, sizeof binds[i]);
+    lens[i] = static_cast<unsigned long>(params[i].size());
+    binds[i].buffer_type = MYSQL_TYPE_STRING;
+    binds[i].buffer = const_cast<char*>(params[i].data());
+    binds[i].buffer_length = lens[i];
+    binds[i].length = &lens[i];
+  }
+  if (!params.empty() && mysql_stmt_bind_param(stmt, binds.data())) {
+    *errNo = mysql_stmt_errno(stmt);
+    mysql_stmt_close(stmt);
+    return nullptr;
+  }
+  if (mysql_stmt_execute(stmt)) {
+    *errNo = mysql_stmt_errno(stmt);
+    mysql_stmt_close(stmt);
+    return nullptr;
+  }
+  return stmt;
 }
 
 } // namespace im
