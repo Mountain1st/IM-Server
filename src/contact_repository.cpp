@@ -142,6 +142,12 @@ int ContactRepository::acceptRequest(int64_t to, int64_t from) {
   const int affected = static_cast<int>(mysql_stmt_affected_rows(stmt));
   mysql_stmt_close(stmt);
   if (affected <= 0) return 1; // 无 pending 请求
+  // 反向请求一并置为 accepted：互相添加场景下，双方既已成为联系人，
+  // 反向待处理请求不再有意义，避免残留（如 B 接受 A 后 A 列表仍显示 B 的请求）。
+  MYSQL_STMT* srev = mysqlStmtExec(client_.handle(),
+      "UPDATE friend_requests SET status = 1 WHERE from_user = ? AND to_user = ? AND status = 0",
+      {std::to_string(to), std::to_string(from)}, &errNo);
+  if (srev) mysql_stmt_close(srev);
   // 建立联系人关系（双向）
   MYSQL_STMT* s2 = mysqlStmtExec(client_.handle(),
       "INSERT IGNORE INTO contacts (user_id, contact_id) VALUES (?, ?), (?, ?)",

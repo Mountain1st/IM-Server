@@ -93,7 +93,7 @@
 | `msg.read` | `{ "from": "<account>", "ts": 1720000000(可选) }` | 已读回执（`from` 为对方登录账号，v1.7；兼容旧协议传数字 `userId`）：把与 `from` 用户截至 `ts` 的未读消息标记为已读；回 `msg.read_res` |
 | `user.search` | `{ "keyword": "...", "limit": 20(可选) }` | 按账号/昵称模糊搜索（v1.8，受目标 `searchable` 控制，排除自己），回 `user.search_res` |
 | `contact.request` | `{ "account": "<对方账号>" }` | 发送好友请求（v1.8），回 `contact.request_res`；成功在线推送对方 `contact.request` 事件、离线登录补发 |
-| `contact.accept` | `{ "account": "<对方账号>" }` | 同意好友请求（v1.8），双方成为联系人，回 `contact.accept_res`；成功推送对方 `contact.added` 事件 |
+| `contact.accept` | `{ "account": "<对方账号>" }` | 同意好友请求（v1.8），双方成为联系人，回 `contact.accept_res`；成功推送对方 `contact.added` 事件；**若对方也向你发过待处理请求（互相添加），该反向请求一并自动关闭** |
 | `contact.reject` | `{ "account": "<对方账号>" }` | 拒绝好友请求（v1.8），回 `contact.reject_res` |
 | `contact.list` | `{}` | 拉取我的联系人列表（v1.8），回 `contact.list_res` |
 | `contact.requests` | `{}` | 拉取收到的待处理好友请求（v1.8），回 `contact.requests_res` |

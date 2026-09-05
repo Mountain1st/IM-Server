@@ -216,6 +216,7 @@
 { "type": "contact.accept_res", "data": { "code": 0, "msg": "ok", "data": {} } }
 ```
 - 同意后双方成为联系人；请求方在线会收到 `contact.added`（`{account, username}`）推送
+- **互相添加**：若同时存在对方发给你的待处理请求，同意你收到的请求后，该反向请求也一并关闭，双方 `contact.requests` 不再有对方残留
 - 错误码：`404 不存在该待处理请求`（需先 `contact.requests` 确认存在）
 
 ### 5.13 拒绝好友请求 `contact.reject`（v1.8）

@@ -606,6 +606,27 @@ def main():
           and r["data"]["code"] == 0)
     json.loads(d.recv())  # 消费 contact.request 推送
 
+    # 互相请求：D 也请求 E（此时 E→D 的 pending 已存在，D→E 从 rejected 重置）
+    d.send(env("contact.request", {"account": E}))
+    r = json.loads(d.recv())
+    check("mutual request ok", r["type"] == "contact.request_res"
+          and r["data"]["code"] == 0)
+    json.loads(e.recv())  # e 收到 D 的请求推送
+    # E 接受 D 的请求 → 双方成为联系人；反向（E→D）待处理请求应一并关闭
+    e.send(env("contact.accept", {"account": D}))
+    r = json.loads(e.recv())
+    check("mutual accept ok", r["type"] == "contact.accept_res"
+          and r["data"]["code"] == 0)
+    json.loads(d.recv())  # d 收到 contact.added
+    d.send(env("contact.requests", {}))
+    r = json.loads(d.recv())
+    check("mutual accept cleans reverse pending", r["data"]["code"] == 0
+          and all(x["account"] != E for x in r["data"]["data"]["requests"]))
+    e.send(env("contact.requests", {}))
+    r = json.loads(e.recv())
+    check("mutual accept cleans forward pending", r["data"]["code"] == 0
+          and all(x["account"] != D for x in r["data"]["data"]["requests"]))
+
     d.close(); e.close(); f.close()
 
     # ---- v1.8 隐私开关 ----
