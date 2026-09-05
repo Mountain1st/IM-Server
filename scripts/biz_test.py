@@ -599,6 +599,13 @@ def main():
     check("contact deleted both sides", r["data"]["code"] == 0
           and all(x["account"] != D for x in r["data"]["data"]["contacts"]))
 
+    # 删除后重新添加：E 重新请求 D 应成功（旧 accepted 行不再拦截）
+    e.send(env("contact.request", {"account": D}))
+    r = json.loads(e.recv())
+    check("contact re-request after delete ok", r["type"] == "contact.request_res"
+          and r["data"]["code"] == 0)
+    json.loads(d.recv())  # 消费 contact.request 推送
+
     d.close(); e.close(); f.close()
 
     # ---- v1.8 隐私开关 ----
