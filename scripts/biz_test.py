@@ -580,6 +580,12 @@ def main():
     r = json.loads(f.recv())
     check("rejected not in contacts", r["data"]["code"] == 0
           and all(x["account"] != D for x in r["data"]["data"]["contacts"]))
+    # 拒绝后请求关闭：F 重新请求 D 应成功（不再被旧 rejected 行拦截）
+    f.send(env("contact.request", {"account": D}))
+    r = json.loads(f.recv())
+    check("contact request after reject ok", r["type"] == "contact.request_res"
+          and r["data"]["code"] == 0)
+    json.loads(d.recv())  # 消费 contact.request 推送
 
     # 删除联系人：D 删除 E，双向解除（E 在线，先收到 contact.deleted 推送）
     d.send(env("contact.delete", {"account": E}))
