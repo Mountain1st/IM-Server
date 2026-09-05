@@ -544,7 +544,23 @@ void AppServer::onSend(const std::shared_ptr<Session>& session, const json& data
     ack(500, "服务器内部错误");
     return;
   }
-  // 权限校验：自己对话框 / 联系人 / 目标开启临时对话
+  // 幂等查询（只查不记）：窗口内已处理过 → 直接回执成功、不再投递。
+  // 放在限流之前，使合法重试不消耗发送配额；且不受权限状态影响（重发恒回 ack 0）。
+  if (msgDedup_->isDuplicate(session->userId(), clientMsgId)) {
+    ack(0, "ok");
+    return;
+  }
+  // 消息发送限流：空 clientMsgId 不参与去重，走更严限制，遏制无 id 刷消息。
+  // 限流失败不记录幂等，避免被拒的请求在重试时被误判为已发送。
+  const size_t sendLimit = clientMsgId.empty() ? kMaxSendNoIdPerWindow : kMaxSendPerWindow;
+  if (!msgLimiter_->allow(session->userId(), sendLimit, kSendWindow)) {
+    g_metrics.rateLimited.fetch_add(1, std::memory_order_relaxed);
+    ack(429, "消息发送过于频繁，请稍后再试");
+    return;
+  }
+  // 权限校验：自己对话框 / 联系人 / 目标开启临时对话。
+  // 位于限流之后、自己对话框落库之前：被限流拒绝不触发权限校验；
+  // 自己对话框（to==自己）跳过权限，直接落库。
   if (to != session->userId()) {
     int allowTemp = 0;
     const bool isContact = contactRepo_->isContact(session->userId(), to);
@@ -559,20 +575,6 @@ void AppServer::onSend(const std::shared_ptr<Session>& session, const json& data
         return;
       }
     }
-  }
-  // 幂等查询（只查不记）：窗口内已处理过 → 直接回执成功、不再投递。
-  // 放在限流之前，使合法重试不消耗发送配额。
-  if (msgDedup_->isDuplicate(session->userId(), clientMsgId)) {
-    ack(0, "ok");
-    return;
-  }
-  // 消息发送限流：空 clientMsgId 不参与去重，走更严限制，遏制无 id 刷消息。
-  // 限流失败不记录幂等，避免被拒的请求在重试时被误判为已发送。
-  const size_t sendLimit = clientMsgId.empty() ? kMaxSendNoIdPerWindow : kMaxSendPerWindow;
-  if (!msgLimiter_->allow(session->userId(), sendLimit, kSendWindow)) {
-    g_metrics.rateLimited.fetch_add(1, std::memory_order_relaxed);
-    ack(429, "消息发送过于频繁，请稍后再试");
-    return;
   }
   // 自己对话框（to==自己账号）：落库持久化，只回 ack 不回显 msg.recv（发送方即自己）
   if (to == session->userId()) {

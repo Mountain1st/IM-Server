@@ -69,6 +69,13 @@ bool ContactRepository::deleteContactPair(int64_t a, int64_t b) {
     return false;
   }
   mysql_stmt_close(stmt);
+  // 解除关系同时将双向好友请求置为 rejected，允许后续重新发起添加
+  MYSQL_STMT* req = mysqlStmtExec(client_.handle(),
+      "UPDATE friend_requests SET status = 2 WHERE (from_user = ? AND to_user = ?) "
+      "OR (from_user = ? AND to_user = ?)",
+      {std::to_string(a), std::to_string(b), std::to_string(b), std::to_string(a)}, &errNo);
+  if (req) mysql_stmt_close(req);
+  else std::cerr << "[mysql] 删除联系人时关闭好友请求失败 errno=" << errNo << std::endl;
   contacts_.erase(std::to_string(a) + "|" + std::to_string(b));
   contacts_.erase(std::to_string(b) + "|" + std::to_string(a));
   return true;
