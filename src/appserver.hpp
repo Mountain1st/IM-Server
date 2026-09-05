@@ -1,5 +1,6 @@
 #pragma once
 
+#include "contact_repository.hpp"
 #include "message.hpp"
 #include "message_repository.hpp"
 #include "msg_dedup.hpp"
@@ -68,6 +69,17 @@ private:
   void onHistory(const std::shared_ptr<Session>& session, const json& data);
   // 已读回执：记录与某用户的消息已读
   void onRead(const std::shared_ptr<Session>& session, const json& data);
+  void onSearch(const std::shared_ptr<Session>& session, const json& data);
+  void onContactRequest(const std::shared_ptr<Session>& session, const json& data);
+  void onContactAccept(const std::shared_ptr<Session>& session, const json& data);
+  void onContactReject(const std::shared_ptr<Session>& session, const json& data);
+  void onContactList(const std::shared_ptr<Session>& session, const json& data);
+  void onContactRequests(const std::shared_ptr<Session>& session, const json& data);
+  void onContactDelete(const std::shared_ptr<Session>& session, const json& data);
+  void onSettingsGet(const std::shared_ptr<Session>& session, const json& data);
+  void onSettingsSet(const std::shared_ptr<Session>& session, const json& data);
+  // 推送 pending 好友请求（登录/重连后补发）
+  void pushPendingRequests(int64_t userId, const std::shared_ptr<Session>& session);
   // 生成全局消息 ID（时间戳前缀 + 进程内自增序列，防重启碰撞）
   std::string nextMessageId();
   // 登录/重连后补发离线消息（从消息存储读取，非破坏性）
@@ -78,6 +90,7 @@ private:
   std::vector<std::string> allowedOrigins_; // 握手 Origin/Host 允许列表；空=不校验
   std::unique_ptr<UserStore> userStore_;    // MySQL 用户存储（连接失败时构造抛错）
   std::unique_ptr<MessageRepository> msgRepo_; // MySQL 消息存储（离线/历史/已读）
+  std::unique_ptr<ContactRepository> contactRepo_; // 联系人/请求/设置存储
   OnlineManager onlineMgr_;
   std::unique_ptr<MsgDedupStore> msgDedup_;    // 消息幂等去重（内存/Redis 双后端）
   std::unique_ptr<RateLimiterStore> msgLimiter_; // msg.send 限流（内存/Redis 双后端）

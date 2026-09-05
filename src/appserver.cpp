@@ -188,12 +188,20 @@ AppServer::AppServer(uint16_t port, size_t ioThreads, size_t workThreads, size_t
       msgLimiter_(makeRateLimiter(redisConfig)),
       msgRepo_(std::make_unique<MySqlMessageRepository>(
           userConfig.mysqlHost, userConfig.mysqlPort, userConfig.mysqlUser,
+          userConfig.mysqlPassword, userConfig.mysqlDb)),
+      contactRepo_(std::make_unique<ContactRepository>(
+          userConfig.mysqlHost, userConfig.mysqlPort, userConfig.mysqlUser,
           userConfig.mysqlPassword, userConfig.mysqlDb)) {
   if (!msgRepo_->ok()) {
     throw std::runtime_error("消息存储连接失败");
   }
   std::cout << "[db] 消息存储: MySQL (host=" << userConfig.mysqlHost << ":" << userConfig.mysqlPort
             << ", db=" << userConfig.mysqlDb << ")" << std::endl;
+  if (!contactRepo_->ok()) {
+    throw std::runtime_error("联系人存储连接失败");
+  }
+  std::cout << "[db] 联系人存储: MySQL (host=" << userConfig.mysqlHost << ":"
+            << userConfig.mysqlPort << ", db=" << userConfig.mysqlDb << ")" << std::endl;
 }
 
 AppServer::~AppServer() = default;
@@ -302,6 +310,42 @@ void AppServer::onEnvelope(const std::shared_ptr<Session>& session, const json& 
       onRead(session, data);
       return;
     }
+    if (type == "user.search") {
+      onSearch(session, data);
+      return;
+    }
+    if (type == "contact.request") {
+      onContactRequest(session, data);
+      return;
+    }
+    if (type == "contact.accept") {
+      onContactAccept(session, data);
+      return;
+    }
+    if (type == "contact.reject") {
+      onContactReject(session, data);
+      return;
+    }
+    if (type == "contact.list") {
+      onContactList(session, data);
+      return;
+    }
+    if (type == "contact.requests") {
+      onContactRequests(session, data);
+      return;
+    }
+    if (type == "contact.delete") {
+      onContactDelete(session, data);
+      return;
+    }
+    if (type == "settings.get") {
+      onSettingsGet(session, data);
+      return;
+    }
+    if (type == "settings.set") {
+      onSettingsSet(session, data);
+      return;
+    }
     session->reply(makeError(400, "未知的指令类型"));
   } catch (const json::exception& e) {
     // data.value() 在字段存在但类型不符时抛 type_error.302。
@@ -384,6 +428,8 @@ void AppServer::onLogin(const std::shared_ptr<Session>& session, const json& dat
       json{{"userId", userId}, {"account", account}, {"username", username}, {"token", token}}));
   // 登录应答之后补发离线消息（非破坏性：补发中断不丢失，确认前重登可再补发）
   pushOfflineMessages(userId, session);
+  // 补发待处理的好友请求（登录后客户端才能收到 contact.request 推送）
+  pushPendingRequests(userId, session);
 }
 
 // 生成全局消息 ID：时间戳前缀 + 进程内自增序列（重启后前缀变化，避免跨进程碰撞）
@@ -451,6 +497,8 @@ void AppServer::onToken(const std::shared_ptr<Session>& session, const json& dat
       json{{"userId", userId}, {"username", username}, {"token", token}}));
   // 重连成功后同样补发离线消息（非破坏性）
   pushOfflineMessages(userId, session);
+  // 重连补发待处理的好友请求
+  pushPendingRequests(userId, session);
 }
 
 void AppServer::onLogout(const std::shared_ptr<Session>& session) {
@@ -496,6 +544,22 @@ void AppServer::onSend(const std::shared_ptr<Session>& session, const json& data
     ack(500, "服务器内部错误");
     return;
   }
+  // 权限校验：自己对话框 / 联系人 / 目标开启临时对话
+  if (to != session->userId()) {
+    int allowTemp = 0;
+    const bool isContact = contactRepo_->isContact(session->userId(), to);
+    if (!isContact) {
+      const int frc = userStore_->fetchSettings(to, &allowTemp, nullptr, nullptr);
+      if (frc != 0) { // 目标不存在或 DB 错误（resolveTarget 已查过，此处兜底）
+        ack(500, "服务器内部错误");
+        return;
+      }
+      if (allowTemp != 1) {
+        ack(403, "对方未开启临时对话，请先添加联系人");
+        return;
+      }
+    }
+  }
   // 幂等查询（只查不记）：窗口内已处理过 → 直接回执成功、不再投递。
   // 放在限流之前，使合法重试不消耗发送配额。
   if (msgDedup_->isDuplicate(session->userId(), clientMsgId)) {
@@ -510,8 +574,15 @@ void AppServer::onSend(const std::shared_ptr<Session>& session, const json& data
     ack(429, "消息发送过于频繁，请稍后再试");
     return;
   }
-  // 自己对话框（to==0 或 to==自己账号）：只回 ack 不回发 msg.recv，不落库
-  if (to == 0 || to == session->userId()) {
+  // 自己对话框（to==自己账号）：落库持久化，只回 ack 不回显 msg.recv（发送方即自己）
+  if (to == session->userId()) {
+    const int64_t now = static_cast<int64_t>(std::time(nullptr));
+    const std::string messageId = nextMessageId();
+    if (!msgRepo_->saveMessage(messageId, session->userId(), to, content, now,
+                               clientMsgId, chatType, kMsgDelivered)) {
+      ack(500, "服务器内部错误");
+      return;
+    }
     msgDedup_->remember(session->userId(), clientMsgId);
     ack(0, "ok");
     return;
@@ -583,12 +654,6 @@ void AppServer::onHistory(const std::shared_ptr<Session>& session, const json& d
     session->reply(makeResult("chat.history_res", 500, "服务器内部错误", json::object()));
     return;
   }
-  // 自己对话框：无历史消息（自己对话框消息不落库），返回空列表
-  if (to == 0 || to == session->userId()) {
-    session->reply(makeResult("chat.history_res", 0, "ok",
-        json{{"msgs", json::array()}}));
-    return;
-  }
   int limit = data.value("limit", 50);
   auto stored = msgRepo_->fetchHistory(session->userId(), to, limit);
   json arr = json::array();
@@ -626,6 +691,208 @@ void AppServer::onRead(const std::shared_ptr<Session>& session, const json& data
   int64_t ts = data.value("ts", static_cast<int64_t>(std::time(nullptr)));
   msgRepo_->markRead(session->userId(), from, ts);
   session->reply(makeResult("msg.read_res", 0, "ok", json::object()));
+}
+
+void AppServer::onSearch(const std::shared_ptr<Session>& session, const json& data) {
+  std::string keyword = data.value("keyword", "");
+  if (keyword.empty()) {
+    session->reply(makeResult("user.search_res", 400, "参数错误", json::object()));
+    return;
+  }
+  int limit = data.value("limit", 20);
+  std::vector<std::pair<std::string, std::string>> users;
+  userStore_->searchUsers(keyword, session->userId(), limit, &users);
+  json arr = json::array();
+  for (const auto& u : users) {
+    int64_t uid = 0;
+    std::string nick;
+    userStore_->lookupAccount(u.first, &uid, &nick);
+    arr.push_back(json{{"account", u.first}, {"username", u.second},
+                       {"isContact", contactRepo_->isContact(session->userId(), uid)}});
+  }
+  session->reply(makeResult("user.search_res", 0, "ok", json{{"users", arr}}));
+}
+
+void AppServer::onContactRequest(const std::shared_ptr<Session>& session, const json& data) {
+  const std::string account = data.value("account", "");
+  const int64_t to = resolveTarget(userStore_.get(), data, "account");
+  if (to == -1) {
+    session->reply(makeResult("contact.request_res", 400, "参数错误", json::object()));
+    return;
+  }
+  if (to == -2) {
+    session->reply(makeResult("contact.request_res", 404, "目标用户不存在", json::object()));
+    return;
+  }
+  if (to == -3) {
+    session->reply(makeResult("contact.request_res", 500, "服务器内部错误", json::object()));
+    return;
+  }
+  const int64_t self = session->userId();
+  if (to == self) {
+    session->reply(makeResult("contact.request_res", 400, "不能添加自己为联系人", json::object()));
+    return;
+  }
+  if (contactRepo_->isContact(self, to)) {
+    session->reply(makeResult("contact.request_res", 409, "对方已是你的联系人", json::object()));
+    return;
+  }
+  int allowAdd = 0;
+  const int frc = userStore_->fetchSettings(to, nullptr, nullptr, &allowAdd);
+  if (frc != 0) {
+    session->reply(makeResult("contact.request_res", 500, "服务器内部错误", json::object()));
+    return;
+  }
+  if (allowAdd != 1) {
+    session->reply(makeResult("contact.request_res", 403, "对方未开启添加，请使用其他方式联系", json::object()));
+    return;
+  }
+  const int rc = contactRepo_->addRequest(self, to);
+  if (rc == 1) {
+    session->reply(makeResult("contact.request_res", 409, "已存在待处理的请求", json::object()));
+    return;
+  }
+  if (rc == 2) {
+    session->reply(makeResult("contact.request_res", 500, "服务器内部错误", json::object()));
+    return;
+  }
+  session->reply(makeResult("contact.request_res", 0, "ok", json::object()));
+  // 推送给被发起人（在线）；离线由登录后补发（pushPendingRequests）
+  std::string fromNick, fromAccount;
+  userStore_->nickname(self, &fromNick);
+  userStore_->accountOf(self, &fromAccount);
+  json ev = {{"from", fromAccount}, {"fromNick", fromNick},
+             {"ts", static_cast<int64_t>(std::time(nullptr))}};
+  for (auto& t : onlineMgr_.sessions(to)) {
+    t->reply(makeEnvelopeText("contact.request", ev));
+  }
+}
+
+void AppServer::onContactAccept(const std::shared_ptr<Session>& session, const json& data) {
+  const int64_t from = resolveTarget(userStore_.get(), data, "account");
+  if (from == -1 || from == -2 || from == -3) {
+    session->reply(makeResult("contact.accept_res", 400, "参数错误", json::object()));
+    return;
+  }
+  const int rc = contactRepo_->acceptRequest(session->userId(), from);
+  if (rc == 1) {
+    session->reply(makeResult("contact.accept_res", 404, "不存在该待处理请求", json::object()));
+    return;
+  }
+  if (rc == 2) {
+    session->reply(makeResult("contact.accept_res", 500, "服务器内部错误", json::object()));
+    return;
+  }
+  session->reply(makeResult("contact.accept_res", 0, "ok", json::object()));
+  // 通知请求方：成为联系人
+  std::string account, username;
+  userStore_->accountOf(session->userId(), &account);
+  userStore_->nickname(session->userId(), &username);
+  json ev = {{"account", account}, {"username", username}};
+  for (auto& t : onlineMgr_.sessions(from)) {
+    t->reply(makeEnvelopeText("contact.added", ev));
+  }
+}
+
+void AppServer::onContactReject(const std::shared_ptr<Session>& session, const json& data) {
+  const int64_t from = resolveTarget(userStore_.get(), data, "account");
+  if (from == -1 || from == -2 || from == -3) {
+    session->reply(makeResult("contact.reject_res", 400, "参数错误", json::object()));
+    return;
+  }
+  const int rc = contactRepo_->rejectRequest(session->userId(), from);
+  if (rc == 1) {
+    session->reply(makeResult("contact.reject_res", 404, "不存在该待处理请求", json::object()));
+    return;
+  }
+  if (rc == 2) {
+    session->reply(makeResult("contact.reject_res", 500, "服务器内部错误", json::object()));
+    return;
+  }
+  session->reply(makeResult("contact.reject_res", 0, "ok", json::object()));
+}
+
+void AppServer::onContactList(const std::shared_ptr<Session>& session, const json& data) {
+  const auto ids = contactRepo_->listContactIds(session->userId());
+  json arr = json::array();
+  for (const int64_t id : ids) {
+    std::string account, username;
+    userStore_->accountOf(id, &account);
+    userStore_->nickname(id, &username);
+    arr.push_back(json{{"account", account}, {"username", username}});
+  }
+  session->reply(makeResult("contact.list_res", 0, "ok", json{{"contacts", arr}}));
+}
+
+void AppServer::onContactRequests(const std::shared_ptr<Session>& session, const json& data) {
+  const auto reqs = contactRepo_->listPendingRequests(session->userId());
+  json arr = json::array();
+  for (const auto& r : reqs) {
+    std::string account, username;
+    userStore_->accountOf(r.fromUser, &account);
+    userStore_->nickname(r.fromUser, &username);
+    arr.push_back(json{{"account", account}, {"username", username}, {"ts", r.ts}});
+  }
+  session->reply(makeResult("contact.requests_res", 0, "ok", json{{"requests", arr}}));
+}
+
+void AppServer::onContactDelete(const std::shared_ptr<Session>& session, const json& data) {
+  const int64_t other = resolveTarget(userStore_.get(), data, "account");
+  if (other == -1 || other == -2 || other == -3) {
+    session->reply(makeResult("contact.delete_res", 400, "参数错误", json::object()));
+    return;
+  }
+  if (other == session->userId()) {
+    session->reply(makeResult("contact.delete_res", 400, "参数错误", json::object()));
+    return;
+  }
+  if (!contactRepo_->isContact(session->userId(), other)) {
+    session->reply(makeResult("contact.delete_res", 404, "对方不是你的联系人", json::object()));
+    return;
+  }
+  contactRepo_->deleteContactPair(session->userId(), other);
+  session->reply(makeResult("contact.delete_res", 0, "ok", json::object()));
+  // 通知对方（在线）
+  std::string account;
+  userStore_->accountOf(session->userId(), &account);
+  json ev = {{"account", account}};
+  for (auto& t : onlineMgr_.sessions(other)) {
+    t->reply(makeEnvelopeText("contact.deleted", ev));
+  }
+}
+
+void AppServer::onSettingsGet(const std::shared_ptr<Session>& session, const json& data) {
+  int allowTemp = 0, searchable = 0, allowAdd = 0;
+  const int rc = userStore_->fetchSettings(session->userId(), &allowTemp, &searchable, &allowAdd);
+  if (rc != 0) {
+    session->reply(makeResult("settings.get_res", 500, "服务器内部错误", json::object()));
+    return;
+  }
+  session->reply(makeResult("settings.get_res", 0, "ok",
+      json{{"allowTempChat", allowTemp == 1},
+           {"searchable", searchable == 1},
+           {"allowAdd", allowAdd == 1}}));
+}
+
+void AppServer::onSettingsSet(const std::shared_ptr<Session>& session, const json& data) {
+  const int allowTemp = data.contains("allowTempChat") ? (data["allowTempChat"].get<bool>() ? 1 : 0) : -1;
+  const int searchable = data.contains("searchable") ? (data["searchable"].get<bool>() ? 1 : 0) : -1;
+  const int allowAdd = data.contains("allowAdd") ? (data["allowAdd"].get<bool>() ? 1 : 0) : -1;
+  userStore_->updateSettings(session->userId(), allowTemp, searchable, allowAdd);
+  session->reply(makeResult("settings.set_res", 0, "ok", json::object()));
+}
+
+void AppServer::pushPendingRequests(int64_t userId,
+                                    const std::shared_ptr<Session>& session) {
+  const auto reqs = contactRepo_->listPendingRequests(userId);
+  if (reqs.empty()) return;
+  for (const auto& r : reqs) {
+    std::string account, username;
+    userStore_->accountOf(r.fromUser, &account);
+    userStore_->nickname(r.fromUser, &username);
+    json ev = {{"from", account}, {"fromNick", username}, {"ts", r.ts}};
+    session->reply(makeEnvelopeText("contact.request", ev));
+  }
 }
 
 void AppServer::onCreateConv(const std::shared_ptr<Session>& session, const json& data) {

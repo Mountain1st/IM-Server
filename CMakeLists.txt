@@ -54,6 +54,7 @@ add_executable(imserver
     src/mysql_client.cpp
     src/mysql_user_repository.cpp
     src/mysql_message_repository.cpp
+    src/contact_repository.cpp
     src/online_manager.cpp
     src/msg_dedup.cpp
     src/rate_limiter_store.cpp
