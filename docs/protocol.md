@@ -86,11 +86,11 @@
 | `auth.login` | `{ "account": "...", "password": "..." }` | 用登录账号登录，成功回 `auth.login_res`（携带 token） |
 | `auth.token` | `{ "token": "..." }` | 免密重连：用上次登录的 token 恢复登录态，成功回 `auth.token_res` |
 | `auth.logout` | `{}` | 主动登出，回 `auth.logout_res` |
-| `msg.send` | `{ "to": "<account>", "content": "...", "clientMsgId": "uuid", "chatType": "single" }` | 发送单聊消息（`to` 为目标登录账号，v1.7；兼容旧协议传 `userId`/`0`），回 `msg.ack`；消息持久化到 MySQL |
+| `msg.send` | `{ "to": "<account>", "content": "...", "clientMsgId": "uuid", "chatType": "single" }` | 发送单聊消息（`to` 为目标登录账号，v1.7；兼容旧协议传数字 `userId`），回 `msg.ack`；消息持久化到 MySQL |
 | `chat.create` | `{ "account": "登录账号" }` | 新建对话：按 account 查找目标用户，存在回其 account 与昵称；不存在回 404 |
 | `msg.offline_ack` | `{ "messageIds": ["...", ...] }` | 客户端确认已收到 `msg.offline` 中的消息，服务端标记为已投递（确认后不再补发）；回 `msg.offline_ack_res` |
-| `chat.history` | `{ "to": "<account>", "limit": 50(可选) }` | 拉取与目标用户的单聊历史（`to` 为目标登录账号，v1.7；兼容 `userId`/`0`=自己对话框），按 ts 倒序，最新在前，默认 50 条，上限 200；回 `chat.history_res` |
-| `msg.read` | `{ "from": "<account>", "ts": 1720000000(可选) }` | 已读回执（`from` 为对方登录账号，v1.7；兼容 `userId`/`0`）：把与 `from` 用户截至 `ts` 的未读消息标记为已读；回 `msg.read_res` |
+| `chat.history` | `{ "to": "<account>", "limit": 50(可选) }` | 拉取与目标用户的单聊历史（`to` 为目标登录账号，v1.7；兼容旧协议传数字 `userId`），按 ts 倒序，最新在前，默认 50 条，上限 200；回 `chat.history_res` |
+| `msg.read` | `{ "from": "<account>", "ts": 1720000000(可选) }` | 已读回执（`from` 为对方登录账号，v1.7；兼容旧协议传数字 `userId`）：把与 `from` 用户截至 `ts` 的未读消息标记为已读；回 `msg.read_res` |
 | `user.search` | `{ "keyword": "...", "limit": 20(可选) }` | 按账号/昵称模糊搜索（v1.8，受目标 `searchable` 控制，排除自己），回 `user.search_res` |
 | `contact.request` | `{ "account": "<对方账号>" }` | 发送好友请求（v1.8），回 `contact.request_res`；成功在线推送对方 `contact.request` 事件、离线登录补发 |
 | `contact.accept` | `{ "account": "<对方账号>" }` | 同意好友请求（v1.8），双方成为联系人，回 `contact.accept_res`；成功推送对方 `contact.added` 事件 |
