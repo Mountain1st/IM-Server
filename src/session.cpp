@@ -340,11 +340,11 @@ void Session::handle(const ws::Frame& frame) {
     }
     fragmentBuffer_ += frame.payload;
     if (fragmentBuffer_.size() > kMaxMessageBytes) {
-    LOG_E("[session] fd=" << fd_ << " 分片累积超限");
-    conn_->shutdown();
-    return;
-  }
-  if (frame.fin) {
+      LOG_E("[session] fd=" << fd_ << " 分片累积超限");
+      conn_->shutdown();
+      return;
+    }
+    if (frame.fin) {
       handleData(fragmentOpcode_, fragmentBuffer_);
       fragmenting_ = false;
       fragmentBuffer_.clear();
