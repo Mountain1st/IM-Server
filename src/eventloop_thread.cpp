@@ -1,5 +1,6 @@
 #include "eventloop_thread.hpp"
 
+#include "log.hpp"
 #include "util.hpp"
 
 #include <iostream>
@@ -25,7 +26,7 @@ EventLoop* EventLoopThread::startLoop() {
 void EventLoopThread::threadFunc() {
   // 阻塞停止信号：保证 SIGINT/SIGTERM 只会投递到主线程
   blockStopSignals();
-  std::cout << "[io] IO 线程创建, id=" << std::this_thread::get_id() << std::endl;
+  LOG_I("[io] IO 线程创建, id=" << std::this_thread::get_id());
   EventLoop loop;
   {
     std::lock_guard<std::mutex> lock(mutex_);

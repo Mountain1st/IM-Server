@@ -1,5 +1,7 @@
 #include "mysql_client.hpp"
 
+#include "log.hpp"
+
 #include <cstring>
 #include <iostream>
 
@@ -9,13 +11,13 @@ MySqlClient::MySqlClient(const std::string& host, unsigned port, const std::stri
                          const std::string& password, const std::string& db) {
   conn_ = mysql_init(nullptr);
   if (!conn_) {
-    std::cerr << "[mysql] mysql_init 失败" << std::endl;
+    LOG_E("[mysql] mysql_init 失败");
     return;
   }
   mysql_options(conn_, MYSQL_SET_CHARSET_NAME, "utf8mb4");
   if (!mysql_real_connect(conn_, host.c_str(), user.c_str(), password.c_str(),
                           db.c_str(), port, nullptr, 0)) {
-    std::cerr << "[mysql] 连接失败: " << mysql_error(conn_) << std::endl;
+    LOG_E("[mysql] 连接失败: " << mysql_error(conn_));
     ok_ = false;
     return;
   }

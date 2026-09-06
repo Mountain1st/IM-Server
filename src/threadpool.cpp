@@ -1,5 +1,6 @@
 #include "threadpool.hpp"
 
+#include "log.hpp"
 #include "util.hpp"
 
 #include <iostream>
@@ -25,7 +26,7 @@ ThreadPool::~ThreadPool() {
 void ThreadPool::start() {
   for (size_t i = 0; i < threads_; ++i) {
     workers_.emplace_back([this] { workerLoop(); });
-    std::cout << "[pool] 工作线程-" << (i + 1) << " 创建完成 (共 " << threads_ << ")" << std::endl;
+    LOG_I("[pool] 工作线程-" << (i + 1) << " 创建完成 (共 " << threads_ << ")");
   }
 }
 

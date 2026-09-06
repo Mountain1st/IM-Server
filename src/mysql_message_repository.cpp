@@ -1,5 +1,7 @@
 #include "mysql_message_repository.hpp"
 
+#include "log.hpp"
+
 #include <cstdlib>
 #include <cstring>
 #include <ctime>
@@ -49,7 +51,7 @@ bool MySqlMessageRepository::saveMessage(const std::string& messageId, int64_t f
        std::to_string(ts), clientMsgId, chatType, std::to_string(status)},
       &errNo);
   if (!stmt) {
-    std::cerr << "[mysql] 保存消息失败 errno=" << errNo << std::endl;
+    LOG_E("[mysql] 保存消息失败 errno=" << errNo);
     return false;
   }
   mysql_stmt_close(stmt);
@@ -66,7 +68,7 @@ std::vector<StoredMessage> MySqlMessageRepository::fetchOffline(int64_t toUser) 
       " AND status = " + std::to_string(kMsgOfflinePending) +
       " ORDER BY ts ASC, id ASC";
   if (mysql_query(client_.handle(), sql.c_str())) {
-    std::cerr << "[mysql] 查询离线消息失败: " << client_.errStr() << std::endl;
+    LOG_E("[mysql] 查询离线消息失败: " << client_.errStr());
     return out;
   }
   MYSQL_RES* res = mysql_store_result(client_.handle());
@@ -95,7 +97,7 @@ void MySqlMessageRepository::markDelivered(int64_t toUser,
          std::to_string(toUser), mid, std::to_string(kMsgOfflinePending)},
         &errNo);
     if (stmt) mysql_stmt_close(stmt);
-    else std::cerr << "[mysql] 标记已投递失败 errno=" << errNo << std::endl;
+    else LOG_E("[mysql] 标记已投递失败 errno=" << errNo);
   }
 }
 
@@ -114,7 +116,7 @@ std::vector<StoredMessage> MySqlMessageRepository::fetchHistory(int64_t userA,
       std::to_string(userB) + " AND to_user = " + std::to_string(userA) +
       ") ORDER BY ts DESC, id DESC LIMIT " + std::to_string(limit);
   if (mysql_query(client_.handle(), sql.c_str())) {
-    std::cerr << "[mysql] 查询历史失败: " << client_.errStr() << std::endl;
+    LOG_E("[mysql] 查询历史失败: " << client_.errStr());
     return out;
   }
   MYSQL_RES* res = mysql_store_result(client_.handle());
@@ -139,7 +141,7 @@ void MySqlMessageRepository::markRead(int64_t toUser, int64_t fromUser, int64_t 
        std::to_string(fromUser), std::to_string(kMsgRead), std::to_string(readTs)},
       &errNo);
   if (stmt) mysql_stmt_close(stmt);
-  else std::cerr << "[mysql] 标记已读失败 errno=" << errNo << std::endl;
+  else LOG_E("[mysql] 标记已读失败 errno=" << errNo);
 }
 
 } // namespace im

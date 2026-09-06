@@ -1,5 +1,7 @@
 #include "mysql_user_repository.hpp"
 
+#include "log.hpp"
+
 #include <cstring>
 #include <iostream>
 #include <vector>
@@ -21,7 +23,7 @@ void MySqlUserRepository::loadIdCache() {
   if (!client_.ok()) return;
   MYSQL* c = client_.handle();
   if (mysql_query(c, "SELECT id, account, username FROM users")) {
-    std::cerr << "[mysql] 加载用户 id 缓存失败: " << client_.errStr() << std::endl;
+    LOG_E("[mysql] 加载用户 id 缓存失败: " << client_.errStr());
     return;
   }
   MYSQL_RES* res = mysql_store_result(c);
@@ -35,7 +37,7 @@ void MySqlUserRepository::loadIdCache() {
     }
   }
   mysql_free_result(res);
-  std::cout << "[mysql] 已加载 " << ids_.size() << " 个用户 id 到缓存" << std::endl;
+  LOG_I("[mysql] 已加载 " << ids_.size() << " 个用户 id 到缓存");
 }
 
 int MySqlUserRepository::insertUser(const std::string& account, const std::string& username,
@@ -49,7 +51,7 @@ int MySqlUserRepository::insertUser(const std::string& account, const std::strin
                               {account, username, salt, passwordHash}, &errNo);
   if (!stmt) {
     if (errNo == static_cast<int>(kErrDupEntry)) return 409;
-    std::cerr << "[mysql] INSERT 失败 errno=" << errNo << std::endl;
+    LOG_E("[mysql] INSERT 失败 errno=" << errNo);
     return 500;
   }
   *userId = static_cast<int64_t>(mysql_stmt_insert_id(stmt));
@@ -69,7 +71,7 @@ int MySqlUserRepository::fetchUser(const std::string& account, int64_t* userId,
   int errNo = 0;
   MYSQL_STMT* stmt = mysqlStmtExec(c, sql, {account}, &errNo);
   if (!stmt) {
-    std::cerr << "[mysql] SELECT 准备/执行失败 errno=" << errNo << std::endl;
+    LOG_E("[mysql] SELECT 准备/执行失败 errno=" << errNo);
     return 2; // 数据库错误
   }
 
@@ -100,7 +102,7 @@ int MySqlUserRepository::fetchUser(const std::string& account, int64_t* userId,
   res[3].is_null = &hashNull;
 
   if (mysql_stmt_bind_result(stmt, res) || mysql_stmt_store_result(stmt)) {
-    std::cerr << "[mysql] SELECT 结果绑定失败: " << client_.errStr() << std::endl;
+    LOG_E("[mysql] SELECT 结果绑定失败: " << client_.errStr());
     mysql_stmt_close(stmt);
     return 2; // 数据库错误
   }
@@ -149,7 +151,7 @@ int MySqlUserRepository::fetchSettings(int64_t userId, int* allowTempChat, int* 
   int errNo = 0;
   MYSQL_STMT* stmt = mysqlStmtExec(c, sql, {std::to_string(userId)}, &errNo);
   if (!stmt) {
-    std::cerr << "[mysql] 查询设置失败 errno=" << errNo << std::endl;
+    LOG_E("[mysql] 查询设置失败 errno=" << errNo);
     return 2;
   }
   int v0 = 0, v1 = 0, v2 = 0;
@@ -160,7 +162,7 @@ int MySqlUserRepository::fetchSettings(int64_t userId, int* allowTempChat, int* 
     res[i].buffer = (i == 0) ? &v0 : (i == 1) ? &v1 : &v2;
   }
   if (mysql_stmt_bind_result(stmt, res) || mysql_stmt_store_result(stmt)) {
-    std::cerr << "[mysql] 设置结果绑定失败: " << client_.errStr() << std::endl;
+    LOG_E("[mysql] 设置结果绑定失败: " << client_.errStr());
     mysql_stmt_close(stmt);
     return 2;
   }
@@ -188,7 +190,7 @@ void MySqlUserRepository::updateSettings(int64_t userId, int allowTempChat, int 
        std::to_string(allowAdd), std::to_string(allowAdd),
        std::to_string(userId)}, &errNo);
   if (!stmt) {
-    std::cerr << "[mysql] 更新设置失败 errno=" << errNo << std::endl;
+    LOG_E("[mysql] 更新设置失败 errno=" << errNo);
     return;
   }
   mysql_stmt_close(stmt);
@@ -207,7 +209,7 @@ void MySqlUserRepository::searchUsers(const std::string& keyword, int64_t exclud
       "AND (account LIKE ? OR username LIKE ?) ORDER BY id ASC LIMIT ?",
       {std::to_string(excludeUserId), like, like, std::to_string(limit)}, &errNo);
   if (!stmt) {
-    std::cerr << "[mysql] 搜索用户失败 errno=" << errNo << std::endl;
+    LOG_E("[mysql] 搜索用户失败 errno=" << errNo);
     return;
   }
   char acctBuf[256] = {0}, nameBuf[256] = {0};
@@ -226,7 +228,7 @@ void MySqlUserRepository::searchUsers(const std::string& keyword, int64_t exclud
   res[1].length = &nameLen;
   res[1].is_null = &nameNull;
   if (mysql_stmt_bind_result(stmt, res) || mysql_stmt_store_result(stmt)) {
-    std::cerr << "[mysql] 搜索结果绑定失败: " << client_.errStr() << std::endl;
+    LOG_E("[mysql] 搜索结果绑定失败: " << client_.errStr());
     mysql_stmt_close(stmt);
     return;
   }

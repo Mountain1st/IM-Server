@@ -1,5 +1,7 @@
 #include "contact_repository.hpp"
 
+#include "log.hpp"
+
 #include <cstdlib>
 #include <cstring>
 #include <ctime>
@@ -18,7 +20,7 @@ void ContactRepository::loadContactsCache() {
   if (!client_.ok()) return;
   MYSQL* c = client_.handle();
   if (mysql_query(c, "SELECT user_id, contact_id FROM contacts")) {
-    std::cerr << "[mysql] 加载联系人缓存失败: " << client_.errStr() << std::endl;
+    LOG_E("[mysql] 加载联系人缓存失败: " << client_.errStr());
     return;
   }
   MYSQL_RES* res = mysql_store_result(c);
@@ -30,7 +32,7 @@ void ContactRepository::loadContactsCache() {
     }
   }
   mysql_free_result(res);
-  std::cout << "[mysql] 已加载 " << contacts_.size() << " 条联系人关系到缓存" << std::endl;
+  LOG_I("[mysql] 已加载 " << contacts_.size() << " 条联系人关系到缓存");
 }
 
 bool ContactRepository::isContact(int64_t a, int64_t b) {
@@ -47,7 +49,7 @@ bool ContactRepository::addContactPair(int64_t a, int64_t b) {
   MYSQL_STMT* stmt = mysqlStmtExec(client_.handle(), sql,
       {std::to_string(a), std::to_string(b), std::to_string(b), std::to_string(a)}, &errNo);
   if (!stmt) {
-    std::cerr << "[mysql] 添加联系人失败 errno=" << errNo << std::endl;
+    LOG_E("[mysql] 添加联系人失败 errno=" << errNo);
     return false;
   }
   mysql_stmt_close(stmt);
@@ -64,7 +66,7 @@ void ContactRepository::addSelfContact(int64_t userId) {
       "INSERT IGNORE INTO contacts (user_id, contact_id) VALUES (?, ?)",
       {std::to_string(userId), std::to_string(userId)}, &errNo);
   if (!stmt) {
-    std::cerr << "[mysql] 添加自己联系人失败 errno=" << errNo << std::endl;
+    LOG_E("[mysql] 添加自己联系人失败 errno=" << errNo);
     return;
   }
   mysql_stmt_close(stmt);
@@ -80,7 +82,7 @@ bool ContactRepository::deleteContactPair(int64_t a, int64_t b) {
       "OR (user_id = ? AND contact_id = ?)",
       {std::to_string(a), std::to_string(b), std::to_string(b), std::to_string(a)}, &errNo);
   if (!stmt) {
-    std::cerr << "[mysql] 删除联系人失败 errno=" << errNo << std::endl;
+    LOG_E("[mysql] 删除联系人失败 errno=" << errNo);
     return false;
   }
   mysql_stmt_close(stmt);
@@ -90,7 +92,7 @@ bool ContactRepository::deleteContactPair(int64_t a, int64_t b) {
       "OR (from_user = ? AND to_user = ?)",
       {std::to_string(a), std::to_string(b), std::to_string(b), std::to_string(a)}, &errNo);
   if (req) mysql_stmt_close(req);
-  else std::cerr << "[mysql] 删除联系人时关闭好友请求失败 errno=" << errNo << std::endl;
+  else LOG_E("[mysql] 删除联系人时关闭好友请求失败 errno=" << errNo);
   contacts_.erase(std::to_string(a) + "|" + std::to_string(b));
   contacts_.erase(std::to_string(b) + "|" + std::to_string(a));
   return true;
@@ -104,7 +106,7 @@ std::vector<int64_t> ContactRepository::listContactIds(int64_t userId) {
   MYSQL_STMT* stmt = mysqlStmtExec(client_.handle(),
       "SELECT contact_id FROM contacts WHERE user_id = ?", {std::to_string(userId)}, &errNo);
   if (!stmt) {
-    std::cerr << "[mysql] 查询联系人列表失败 errno=" << errNo << std::endl;
+    LOG_E("[mysql] 查询联系人列表失败 errno=" << errNo);
     return out;
   }
   int64_t cid = 0;
@@ -113,7 +115,7 @@ std::vector<int64_t> ContactRepository::listContactIds(int64_t userId) {
   res[0].buffer_type = MYSQL_TYPE_LONGLONG;
   res[0].buffer = &cid;
   if (mysql_stmt_bind_result(stmt, res) || mysql_stmt_store_result(stmt)) {
-    std::cerr << "[mysql] 联系人列表结果绑定失败: " << client_.errStr() << std::endl;
+    LOG_E("[mysql] 联系人列表结果绑定失败: " << client_.errStr());
     mysql_stmt_close(stmt);
     return out;
   }
@@ -133,7 +135,7 @@ int ContactRepository::addRequest(int64_t from, int64_t to) {
       "ON DUPLICATE KEY UPDATE status = IF(status = 2, 0, status)",
       {std::to_string(from), std::to_string(to)}, &errNo);
   if (!stmt) {
-    std::cerr << "[mysql] 添加好友请求失败 errno=" << errNo << std::endl;
+    LOG_E("[mysql] 添加好友请求失败 errno=" << errNo);
     return 2;
   }
   // affected_rows 语义：1=新插入成功；0=冲突且未变化（pending/accepted→409）；
@@ -151,7 +153,7 @@ int ContactRepository::acceptRequest(int64_t to, int64_t from) {
       "UPDATE friend_requests SET status = 1 WHERE from_user = ? AND to_user = ? AND status = 0",
       {std::to_string(from), std::to_string(to)}, &errNo);
   if (!stmt) {
-    std::cerr << "[mysql] 接受好友请求失败 errno=" << errNo << std::endl;
+    LOG_E("[mysql] 接受好友请求失败 errno=" << errNo);
     return 2;
   }
   const int affected = static_cast<int>(mysql_stmt_affected_rows(stmt));
@@ -169,7 +171,7 @@ int ContactRepository::acceptRequest(int64_t to, int64_t from) {
       {std::to_string(to), std::to_string(from), std::to_string(from), std::to_string(to)},
       &errNo);
   if (!s2) {
-    std::cerr << "[mysql] 接受请求后建联系人失败 errno=" << errNo << std::endl;
+    LOG_E("[mysql] 接受请求后建联系人失败 errno=" << errNo);
     return 2;
   }
   mysql_stmt_close(s2);
@@ -186,7 +188,7 @@ int ContactRepository::rejectRequest(int64_t to, int64_t from) {
       "UPDATE friend_requests SET status = 2 WHERE from_user = ? AND to_user = ? AND status = 0",
       {std::to_string(from), std::to_string(to)}, &errNo);
   if (!stmt) {
-    std::cerr << "[mysql] 拒绝好友请求失败 errno=" << errNo << std::endl;
+    LOG_E("[mysql] 拒绝好友请求失败 errno=" << errNo);
     return 2;
   }
   const int affected = static_cast<int>(mysql_stmt_affected_rows(stmt));
@@ -202,7 +204,7 @@ std::vector<ContactRepository::PendingRequest> ContactRepository::listPendingReq
       "SELECT from_user, UNIX_TIMESTAMP(created_at) FROM friend_requests WHERE to_user = " +
       std::to_string(to) + " AND status = 0 ORDER BY id ASC";
   if (mysql_query(client_.handle(), sql.c_str())) {
-    std::cerr << "[mysql] 查询好友请求失败: " << client_.errStr() << std::endl;
+    LOG_E("[mysql] 查询好友请求失败: " << client_.errStr());
     return out;
   }
   MYSQL_RES* res = mysql_store_result(client_.handle());
