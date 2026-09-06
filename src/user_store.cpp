@@ -160,12 +160,28 @@ bool UserStore::accountOf(int64_t userId, std::string* account) {
 
 int UserStore::fetchSettings(int64_t userId, int* allowTempChat, int* searchable, int* allowAdd) {
   std::lock_guard<std::mutex> lock(mutex_);
-  return repo_->fetchSettings(userId, allowTempChat, searchable, allowAdd);
+  auto it = settingsCache_.find(userId);
+  if (it != settingsCache_.end()) {
+    if (allowTempChat) *allowTempChat = it->second.allowTempChat;
+    if (searchable) *searchable = it->second.searchable;
+    if (allowAdd) *allowAdd = it->second.allowAdd;
+    return 0;
+  }
+  Settings s;
+  const int rc = repo_->fetchSettings(userId, &s.allowTempChat, &s.searchable, &s.allowAdd);
+  if (rc != 0) return rc;
+  settingsCache_[userId] = s;
+  if (allowTempChat) *allowTempChat = s.allowTempChat;
+  if (searchable) *searchable = s.searchable;
+  if (allowAdd) *allowAdd = s.allowAdd;
+  return 0;
 }
 
-void UserStore::updateSettings(int64_t userId, int allowTempChat, int searchable, int allowAdd) {
+int UserStore::updateSettings(int64_t userId, int allowTempChat, int searchable, int allowAdd) {
   std::lock_guard<std::mutex> lock(mutex_);
-  repo_->updateSettings(userId, allowTempChat, searchable, allowAdd);
+  const int rc = repo_->updateSettings(userId, allowTempChat, searchable, allowAdd);
+  if (rc == 0) settingsCache_.erase(userId);
+  return rc;
 }
 
 void UserStore::searchUsers(const std::string& keyword, int64_t excludeUserId, int limit,

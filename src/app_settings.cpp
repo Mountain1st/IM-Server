@@ -22,7 +22,11 @@ void AppServer::onSettingsSet(const std::shared_ptr<Session>& session, const jso
   const int allowTemp = data.contains("allowTempChat") ? (data["allowTempChat"].get<bool>() ? 1 : 0) : -1;
   const int searchable = data.contains("searchable") ? (data["searchable"].get<bool>() ? 1 : 0) : -1;
   const int allowAdd = data.contains("allowAdd") ? (data["allowAdd"].get<bool>() ? 1 : 0) : -1;
-  userStore_->updateSettings(session->userId(), allowTemp, searchable, allowAdd);
+  const int rc = userStore_->updateSettings(session->userId(), allowTemp, searchable, allowAdd);
+  if (rc != 0) {
+    session->reply(makeResult("settings.set_res", 500, "服务器内部错误", json::object()));
+    return;
+  }
   session->reply(makeResult("settings.set_res", 0, "ok", json::object()));
 }
 

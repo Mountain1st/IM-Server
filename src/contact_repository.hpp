@@ -34,6 +34,8 @@ public:
   int addRequest(int64_t from, int64_t to);
   // 返回：0=成功接受（标记 accepted + 建立联系人关系）；1=无 pending 请求；2=数据库错误。
   int acceptRequest(int64_t to, int64_t from);
+  // 查询某对好友请求的创建时间（Unix 秒）。找到 pending/任意状态行返回 true。
+  bool requestTime(int64_t from, int64_t to, int64_t* ts);
   // 返回：0=成功拒绝；1=无 pending 请求；2=数据库错误。
   int rejectRequest(int64_t to, int64_t from);
   // 收到的 pending 请求列表（from_user, created_at 秒）

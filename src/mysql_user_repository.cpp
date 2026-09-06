@@ -176,9 +176,9 @@ int MySqlUserRepository::fetchSettings(int64_t userId, int* allowTempChat, int* 
   return 0;
 }
 
-void MySqlUserRepository::updateSettings(int64_t userId, int allowTempChat, int searchable,
-                                         int allowAdd) {
-  if (!client_.ok()) return;
+int MySqlUserRepository::updateSettings(int64_t userId, int allowTempChat, int searchable,
+                                        int allowAdd) {
+  if (!client_.ok()) return 2;
   // 任一字段 < 0 表示不修改该字段（用 CASE WHEN 保底当前值）
   const std::string sql =
       "UPDATE users SET allow_temp_chat = CASE WHEN ? < 0 THEN allow_temp_chat ELSE ? END, "
@@ -192,9 +192,10 @@ void MySqlUserRepository::updateSettings(int64_t userId, int allowTempChat, int 
        std::to_string(userId)}, &errNo);
   if (!stmt) {
     LOG_E("[mysql] 更新设置失败 errno=" << errNo);
-    return;
+    return 2;
   }
   mysql_stmt_close(stmt);
+  return 0;
 }
 
 void MySqlUserRepository::searchUsers(const std::string& keyword, int64_t excludeUserId,

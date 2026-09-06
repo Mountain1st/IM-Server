@@ -56,7 +56,7 @@ public:
   bool accountOf(int64_t userId, std::string* account);
   // 隐私设置转发（见 UserRepository）
   int fetchSettings(int64_t userId, int* allowTempChat, int* searchable, int* allowAdd);
-  void updateSettings(int64_t userId, int allowTempChat, int searchable, int allowAdd);
+  int updateSettings(int64_t userId, int allowTempChat, int searchable, int allowAdd);
   void searchUsers(const std::string& keyword, int64_t excludeUserId, int limit,
                    std::vector<std::pair<std::string, std::string>>* out);
 
@@ -78,6 +78,12 @@ private:
     std::chrono::steady_clock::time_point windowStart;
   };
   std::unordered_map<std::string, LoginGuard> loginGuards_;    // account -> 失败记录
+  struct Settings {
+    int allowTempChat = 1;
+    int searchable = 1;
+    int allowAdd = 1;
+  };
+  std::unordered_map<int64_t, Settings> settingsCache_;  // userId -> 设置缓存
 };
 
 } // namespace im

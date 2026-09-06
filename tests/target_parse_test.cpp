@@ -44,7 +44,7 @@ class FakeUserRepo : public UserRepository {
   bool fetchUserNameById(int64_t, std::string*) override { return false; }
   bool fetchAccountById(int64_t, std::string*) override { return false; }
   int fetchSettings(int64_t, int*, int*, int*) override { return 1; }
-  void updateSettings(int64_t, int, int, int) override {}
+  int updateSettings(int64_t, int, int, int) override { return 0; }
   void searchUsers(const std::string&, int64_t, int,
                    std::vector<std::pair<std::string, std::string>>*) override {}
 };

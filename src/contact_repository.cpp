@@ -220,4 +220,33 @@ std::vector<ContactRepository::PendingRequest> ContactRepository::listPendingReq
   return out;
 }
 
+bool ContactRepository::requestTime(int64_t from, int64_t to, int64_t* ts) {
+  std::lock_guard<std::mutex> lock(mutex_);
+  if (!client_.ok() || ts == nullptr) return false;
+  int errNo = 0;
+  MYSQL_STMT* stmt = mysqlStmtExec(client_.handle(),
+      "SELECT UNIX_TIMESTAMP(created_at) FROM friend_requests "
+      "WHERE from_user = ? AND to_user = ? LIMIT 1",
+      {std::to_string(from), std::to_string(to)}, &errNo);
+  if (!stmt) {
+    LOG_E("[mysql] 查询好友请求时间失败 errno=" << errNo);
+    return false;
+  }
+  int64_t v = 0;
+  MYSQL_BIND res[1];
+  memset(res, 0, sizeof res);
+  res[0].buffer_type = MYSQL_TYPE_LONGLONG;
+  res[0].buffer = &v;
+  if (mysql_stmt_bind_result(stmt, res) || mysql_stmt_store_result(stmt)) {
+    LOG_E("[mysql] 请求时间结果绑定失败: " << client_.errStr());
+    mysql_stmt_close(stmt);
+    return false;
+  }
+  const int rc = mysql_stmt_fetch(stmt);
+  mysql_stmt_close(stmt);
+  if (rc != 0) return false;
+  *ts = v;
+  return true;
+}
+
 } // namespace im

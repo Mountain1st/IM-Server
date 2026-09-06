@@ -41,8 +41,8 @@ public:
   virtual int fetchSettings(int64_t userId, int* allowTempChat, int* searchable,
                             int* allowAdd) = 0;
   // 更新用户隐私设置（任一字段 < 0 表示不修改）。
-  virtual void updateSettings(int64_t userId, int allowTempChat, int searchable,
-                              int allowAdd) = 0;
+  virtual int updateSettings(int64_t userId, int allowTempChat, int searchable,
+                             int allowAdd) = 0;
   // 模糊搜索用户（account 或 username 匹配 keyword），排除 excludeUserId。
   // 仅返回 searchable=1 的用户。结果追加到 out（each: account, username）。
   virtual void searchUsers(const std::string& keyword, int64_t excludeUserId,

@@ -74,8 +74,9 @@ void AppServer::onContactRequest(const std::shared_ptr<Session>& session, const 
   std::string fromNick, fromAccount;
   userStore_->nickname(self, &fromNick);
   userStore_->accountOf(self, &fromAccount);
-  json ev = {{"from", fromAccount}, {"fromNick", fromNick},
-             {"ts", static_cast<int64_t>(std::time(nullptr))}};
+  int64_t reqTs = static_cast<int64_t>(std::time(nullptr));
+  contactRepo_->requestTime(self, to, &reqTs);  // 失败则回退本地时间
+  json ev = {{"from", fromAccount}, {"fromNick", fromNick}, {"ts", reqTs}};
   for (auto& t : onlineMgr_.sessions(to)) {
     t->reply(makeEnvelopeText("contact.request", ev));
   }
