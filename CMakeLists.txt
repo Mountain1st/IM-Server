@@ -96,6 +96,8 @@ set(UNIT_TEST_SOURCES
     src/websocket.cpp
     src/msg_dedup.cpp
     src/rate_limiter_store.cpp
+    src/user_store.cpp
+    src/token_store.cpp
 )
 set(UNIT_TEST_INCLUDES src third_party)
 
@@ -111,3 +113,4 @@ im_add_unit_test(ws_handshake_test tests/websocket_handshake_test.cpp)
 im_add_unit_test(msg_dedup_test tests/msg_dedup_test.cpp)
 im_add_unit_test(rate_limiter_test tests/rate_limiter_test.cpp)
 im_add_unit_test(log_test tests/log_test.cpp)
+im_add_unit_test(target_parse_test tests/target_parse_test.cpp)
