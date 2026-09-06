@@ -22,10 +22,11 @@ RUN cmake -S . -B build -DCMAKE_BUILD_TYPE=Release \
 # ---- 运行阶段 ----
 FROM ubuntu:24.04
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    libmysqlclient24 \
-    libhiredis1 \
+    libmysqlclient21 \
+    libhiredis1.1.0 \
     curl \
     && rm -rf /var/lib/apt/lists/* \
+    && (userdel -r ubuntu 2>/dev/null || true) \
     && useradd -m -u 1000 im
 WORKDIR /app
 COPY --from=builder /src/build/imserver ./imserver

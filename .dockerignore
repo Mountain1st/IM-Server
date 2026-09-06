@@ -7,7 +7,5 @@ build-*/
 .vscode/
 docs/
 scripts/
-tests/
-client/
 db/
 *.md
