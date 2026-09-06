@@ -60,6 +60,10 @@ add_executable(imserver
     src/rate_limiter_store.cpp
     src/metrics.cpp
     src/appserver.cpp
+    src/app_auth.cpp
+    src/app_message.cpp
+    src/app_contact.cpp
+    src/app_settings.cpp
 )
 target_include_directories(imserver PRIVATE src third_party ${MYSQL_INCLUDE_DIR})
 target_link_libraries(imserver PRIVATE Threads::Threads ${MYSQLCLIENT_LIB})
