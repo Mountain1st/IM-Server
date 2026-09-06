@@ -4,6 +4,7 @@
 > 传输层为 WebSocket 文本帧（UTF-8 编码的 JSON 字符串）。
 
 **版本变更（v0.1 → v1.8）**
+- v1.8.1 **联系人列表恒含"自己"**：`contact.list` 返回中恒有一条 `account=自己账号、username=自己昵称` 的联系人，排第一位；新用户注册时自动建立（写入 contacts 表），存量用户可用 `db/migrate_self_contact.sql` 一次性补齐；登录不重复写入
 - v1.8 **联系人体系与隐私设置**：新增 `user.search`（按账号/昵称模糊搜索，受 `searchable` 控制）；`contact.request/accept/reject/list/requests/delete`（好友请求状态机，同意后双方成为联系人；`contact.request` 在线推送、离线登录补发）；`settings.get/set` 三开关（`allowTempChat` 允许非联系人临时对话、`searchable` 可被搜索、`allowAdd` 可被添加）；`msg.send` 权限：自己对话框/联系人/目标开启临时对话才可发送，否则 `403 对方未开启临时对话`；**自己对话框统一为 `to==自己 account`（删除 `to:0` 特例），消息落库、历史可查**
 - v1.7 **消息收发目标一律用 `account`（登录账号）**：`msg.send` 的 `to`、`chat.history` 的 `to`、`msg.read` 的 `from` 均改为按登录账号定位目标（兼容旧协议传数字 `userId` 与 `0`=自己对话框）；`msg.recv`/`msg.offline`/`chat.history_res` 的 `from` 改为返回发送方 `account`（**`userId` 对客户端不透明**）；`chat.history` 与 `msg.read` 支持**自己对话框**（`to`/`from` 为 `0` 或自己的 `account`：历史返回空列表、已读直接成功，不再误报 `404 目标用户不存在`）
 - v1.6 账号规则收紧：**`account` 必须为 10-11 位纯数字**（如手机号）。`auth.register` 与 `chat.create` 按此校验，不合规返回 `400 账号须为10-11位数字`（如输入 `0` 不再误报 `404 目标用户不存在`）；`auth.login` 不做格式校验（错误统一 403，兼容遗留账号、不泄露账号存在性）
@@ -95,7 +96,7 @@
 | `contact.request` | `{ "account": "<对方账号>" }` | 发送好友请求（v1.8），回 `contact.request_res`；成功在线推送对方 `contact.request` 事件、离线登录补发 |
 | `contact.accept` | `{ "account": "<对方账号>" }` | 同意好友请求（v1.8），双方成为联系人，回 `contact.accept_res`；成功推送对方 `contact.added` 事件；**若对方也向你发过待处理请求（互相添加），该反向请求一并自动关闭** |
 | `contact.reject` | `{ "account": "<对方账号>" }` | 拒绝好友请求（v1.8），回 `contact.reject_res` |
-| `contact.list` | `{}` | 拉取我的联系人列表（v1.8），回 `contact.list_res` |
+| `contact.list` | `{}` | 拉取我的联系人列表（v1.8），回 `contact.list_res`；**恒含一条自己的联系人（account=自己、username=自己昵称，排第一位）**（v1.8.1） |
 | `contact.requests` | `{}` | 拉取收到的待处理好友请求（v1.8），回 `contact.requests_res` |
 | `contact.delete` | `{ "account": "<对方账号>" }` | 删除联系人（v1.8），回 `contact.delete_res`；成功推送对方 `contact.deleted` 事件 |
 | `settings.get` | `{}` | 查询我的隐私设置三开关（v1.8），回 `settings.get_res` |

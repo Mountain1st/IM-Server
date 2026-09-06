@@ -240,6 +240,7 @@
 { "type": "contact.list_res", "data": { "code": 0, "msg": "ok", "data": { "contacts": [ { "account": "13900139000", "username": "小波" } ] } } }
 ```
 - 用于客户端启动时拉取联系人，作为会话列表/发起对话的入口
+- **返回恒含自己的条目（排第一位）**：`account=自己的账号、username=自己的昵称`（v1.8.1）；注册时自动建立，登录不重复写入
 
 ### 5.15 待处理请求列表 `contact.requests`（v1.8）
 
