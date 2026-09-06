@@ -627,6 +627,25 @@ def main():
     check("mutual accept cleans forward pending", r["data"]["code"] == 0
           and all(x["account"] != D for x in r["data"]["data"]["requests"]))
 
+    # ---- v1.8.1 自己联系人 ----
+    # 注册用户 contact.list 恒含"自己"且排第一位
+    selfc = WS(); register(selfc, base + "50", "pw1234", nick="小己")
+    login(selfc, base + "50", "pw1234")
+    selfc.send(env("contact.list", {}))
+    r = json.loads(selfc.recv())
+    contacts = r["data"]["data"]["contacts"]
+    check("contact list contains self", r["data"]["code"] == 0
+          and any(x["account"] == base + "50" for x in contacts))
+    check("contact self first", contacts and contacts[0]["account"] == base + "50"
+          and contacts[0]["username"] == "小己")
+    # 登录不重复插入：再登一次（换连接），contact.list 仍只有一条自己
+    selfc2 = WS(); login(selfc2, base + "50", "pw1234")
+    selfc2.send(env("contact.list", {}))
+    r = json.loads(selfc2.recv())
+    cnt = sum(1 for x in r["data"]["data"]["contacts"] if x["account"] == base + "50")
+    check("self contact not duplicated on login", r["data"]["code"] == 0 and cnt == 1)
+    selfc.close(); selfc2.close()
+
     d.close(); e.close(); f.close()
 
     # ---- v1.8 隐私开关 ----
@@ -662,7 +681,7 @@ def main():
 
     # 清理本次注册的测试账号及其关联消息（精确账号列表，不误删真实用户）
     import subprocess
-    used = [A, B, C, SINK, SPAM, SINK2, SPAM2, D, E, F, G, H]
+    used = [A, B, C, SINK, SPAM, SINK2, SPAM2, D, E, F, G, H, base + "50"]
     inlist = ",".join("'%s'" % x for x in used)
     subprocess.run(["bash", "-c",
         "MYSQL_PWD=520010 mysql -u IMS_jack -h 127.0.0.1 -e \""
