@@ -1,0 +1,10 @@
+build/
+build-mysql/
+build-*/
+server.log
+*.log
+test_client
+imclient
+imserver
+scripts/__pycache__/
+__pycache__/

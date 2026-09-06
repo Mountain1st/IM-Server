@@ -1,0 +1,13 @@
+# 构建上下文排除项：避免把无关/大文件打入镜像
+build/
+build-*/
+*.log
+.git/
+.gitignore
+.vscode/
+docs/
+scripts/
+tests/
+client/
+db/
+*.md

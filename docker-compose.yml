@@ -1,0 +1,61 @@
+# IM 服务器容器编排：imserver + mysql + redis（redis 预留，接入后启用）
+# 用法: docker compose up -d --build
+# 数据卷 mysql_data 持久化消息/用户；imserver 等待 MySQL 健康后启动。
+
+services:
+  mysql:
+    image: mysql:8.4
+    environment:
+      MYSQL_ROOT_PASSWORD: root_520010
+      MYSQL_DATABASE: IMS_reactor_db
+      MYSQL_USER: IMS_jack
+      MYSQL_PASSWORD: "520010"
+    command:
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_unicode_ci
+    volumes:
+      - mysql_data:/var/lib/mysql
+      # 首次初始化时自动建表（幂等，schema.sql 含 CREATE TABLE IF NOT EXISTS）
+      - ./db/schema.sql:/docker-entrypoint-initdb.d/01-schema.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "mysqladmin ping -h localhost -uroot -proot_520010 --silent"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 20s
+
+  redis:
+    image: redis:8-alpine
+    # 预留：Redis 接入（token/presence/限流/幂等）后由 imserver 通过服务名连接
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - redis_data:/data
+
+  imserver:
+    build: .
+    ports:
+      - "9191:9191"
+    environment:
+      IM_MYSQL_HOST: mysql
+      IM_MYSQL_PORT: "3306"
+      IM_MYSQL_USER: IMS_jack
+      IM_MYSQL_PASSWORD: "520010"
+      IM_MYSQL_DB: IMS_reactor_db
+      # Redis：token 等存储落到 Redis（容器内通过服务名 redis 访问 6379）
+      IM_REDIS_ENABLED: "1"
+      IM_REDIS_HOST: redis
+      IM_REDIS_PORT: "6379"
+    depends_on:
+      mysql:
+        condition: service_healthy
+      redis:
+        condition: service_started
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:9191/health >/dev/null || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  mysql_data:
+  redis_data:
