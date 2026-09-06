@@ -28,7 +28,6 @@ void AppServer::onSearch(const std::shared_ptr<Session>& session, const json& da
 }
 
 void AppServer::onContactRequest(const std::shared_ptr<Session>& session, const json& data) {
-  const std::string account = data.value("account", "");
   const int64_t to = resolveTarget(userStore_.get(), data, "account");
   if (to == -1) {
     session->reply(makeResult("contact.request_res", 400, "参数错误", json::object()));

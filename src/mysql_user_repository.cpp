@@ -168,7 +168,8 @@ int MySqlUserRepository::fetchSettings(int64_t userId, int* allowTempChat, int* 
   }
   const int rc = mysql_stmt_fetch(stmt);
   mysql_stmt_close(stmt);
-  if (rc != 0) return 1; // 用户不存在
+  if (rc == MYSQL_NO_DATA) return 1;  // 用户不存在
+  if (rc != 0) return 2;              // 数据库错误
   if (allowTempChat) *allowTempChat = v0;
   if (searchable) *searchable = v1;
   if (allowAdd) *allowAdd = v2;
@@ -202,11 +203,19 @@ void MySqlUserRepository::searchUsers(const std::string& keyword, int64_t exclud
   if (!client_.ok() || !out) return;
   if (limit <= 0) limit = 20;
   if (limit > 50) limit = 50;
-  const std::string like = "%" + keyword + "%";
+  std::string kw = keyword;
+  if (kw.size() > 64) kw.resize(64);  // 复用 kLoginAccountMaxLen 上限
+  std::string esc;
+  esc.reserve(kw.size() + 8);
+  for (char c : kw) {
+    if (c == '%' || c == '_' || c == '\\') esc.push_back('\\');
+    esc.push_back(c);
+  }
+  const std::string like = "%" + esc + "%";
   int errNo = 0;
   MYSQL_STMT* stmt = mysqlStmtExec(client_.handle(),
       "SELECT account, username FROM users WHERE searchable = 1 AND id != ? "
-      "AND (account LIKE ? OR username LIKE ?) ORDER BY id ASC LIMIT ?",
+      "AND (account LIKE ? ESCAPE '\\\\' OR username LIKE ? ESCAPE '\\\\') ORDER BY id ASC LIMIT ?",
       {std::to_string(excludeUserId), like, like, std::to_string(limit)}, &errNo);
   if (!stmt) {
     LOG_E("[mysql] 搜索用户失败 errno=" << errNo);
