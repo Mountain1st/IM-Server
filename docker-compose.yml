@@ -1,7 +1,7 @@
 # IM 服务器容器编排：imserver + mysql + redis（redis 预留，接入后启用）
 # 用法: docker compose up -d --build
 # 数据卷 mysql_data 持久化消息/用户；imserver 等待 MySQL 健康后启动。
-# 角色：内部署全栈（mysql + redis + imserver）；本地开发仅 infra 请用 compose.yaml.
+# 角色：内部署全栈（mysql + redis + imserver）；本地开发仅 infra 请用 compose.yaml。
 
 services:
   mysql:
