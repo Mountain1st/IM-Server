@@ -1,6 +1,10 @@
+# 本地开发环境：仅 infra（mysql + redis），imserver 本地原生运行直连 127.0.0.1。
+# 账号库名与 docker-compose.yml（内部署）保持一致：IMS_jack / IMS_reactor_db。
+# 用法: docker compose -f compose.yaml up -d
+# 注意：mysql 8.0→8.4 升级需重建卷：docker compose -f compose.yaml down -v && docker compose -f compose.yaml up -d
 services:
   redis:
-    image: redis:7
+    image: redis:8-alpine
     container_name: ims-redis
     restart: unless-stopped
     ports:
@@ -9,13 +13,13 @@ services:
       - redis-data:/data
 
   mysql:
-    image: mysql:8.0
+    image: mysql:8.4
     container_name: ims-mysql
     restart: unless-stopped
     environment:
       MYSQL_ROOT_PASSWORD: 520010
-      MYSQL_DATABASE: IM_reactor_db
-      MYSQL_USER: IM_jack
+      MYSQL_DATABASE: IMS_reactor_db
+      MYSQL_USER: IMS_jack
       MYSQL_PASSWORD: 520010
     ports:
       - "127.0.0.1:3306:3306"
