@@ -25,6 +25,7 @@ public:
   // ---- 联系人 ----
   bool isContact(int64_t a, int64_t b);                      // a 与 b 是否为联系人（走缓存）
   bool addContactPair(int64_t a, int64_t b);                 // 双向插入（幂等：已存在不报错）
+  void addSelfContact(int64_t userId);                       // 自己联系人（INSERT IGNORE (uid,uid)）
   bool deleteContactPair(int64_t a, int64_t b);              // 双向删除
   std::vector<int64_t> listContactIds(int64_t userId);       // 我的联系人 userId 列表
 

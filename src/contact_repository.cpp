@@ -56,6 +56,21 @@ bool ContactRepository::addContactPair(int64_t a, int64_t b) {
   return true;
 }
 
+void ContactRepository::addSelfContact(int64_t userId) {
+  std::lock_guard<std::mutex> lock(mutex_);
+  if (!client_.ok()) return;
+  int errNo = 0;
+  MYSQL_STMT* stmt = mysqlStmtExec(client_.handle(),
+      "INSERT IGNORE INTO contacts (user_id, contact_id) VALUES (?, ?)",
+      {std::to_string(userId), std::to_string(userId)}, &errNo);
+  if (!stmt) {
+    std::cerr << "[mysql] 添加自己联系人失败 errno=" << errNo << std::endl;
+    return;
+  }
+  mysql_stmt_close(stmt);
+  contacts_.emplace(std::to_string(userId) + "|" + std::to_string(userId));
+}
+
 bool ContactRepository::deleteContactPair(int64_t a, int64_t b) {
   std::lock_guard<std::mutex> lock(mutex_);
   if (!client_.ok()) return false;
