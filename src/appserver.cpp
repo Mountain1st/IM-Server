@@ -379,6 +379,8 @@ void AppServer::onRegister(const std::shared_ptr<Session>& session, const json& 
   }
   session->reply(makeResult("auth.register_res", 0, "ok",
       json{{"userId", userId}, {"account", account}, {"username", username}}));
+  // 新用户注册即拥有"自己"联系人（联系人列表恒含自己）
+  contactRepo_->addSelfContact(userId);
 }
 
 void AppServer::onLogin(const std::shared_ptr<Session>& session, const json& data) {
@@ -817,13 +819,23 @@ void AppServer::onContactReject(const std::shared_ptr<Session>& session, const j
 void AppServer::onContactList(const std::shared_ptr<Session>& session, const json& data) {
   const auto ids = contactRepo_->listContactIds(session->userId());
   json arr = json::array();
+  const int64_t self = session->userId();
+  // "自己"联系人恒排第一位（contact_id == 自己 userId）
   for (const int64_t id : ids) {
+    if (id == self) continue;
     std::string account, username;
     userStore_->accountOf(id, &account);
     userStore_->nickname(id, &username);
     arr.push_back(json{{"account", account}, {"username", username}});
   }
-  session->reply(makeResult("contact.list_res", 0, "ok", json{{"contacts", arr}}));
+  std::string selfAccount, selfNick;
+  userStore_->accountOf(self, &selfAccount);
+  userStore_->nickname(self, &selfNick);
+  json selfEntry = json{{"account", selfAccount}, {"username", selfNick}};
+  json out = json::array();
+  out.push_back(selfEntry);
+  for (const auto& e : arr) out.push_back(e);
+  session->reply(makeResult("contact.list_res", 0, "ok", json{{"contacts", out}}));
 }
 
 void AppServer::onContactRequests(const std::shared_ptr<Session>& session, const json& data) {
