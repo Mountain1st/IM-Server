@@ -1,6 +1,7 @@
 #include "connection.hpp"
 
 #include "eventloop.hpp"
+#include "log.hpp"
 #include "metrics.hpp"
 #include "server_config.hpp"
 #include "util.hpp"
@@ -52,7 +53,7 @@ Connection::SendResult Connection::send(const char* data, size_t len) {
     writeBufferedBytes_.fetch_sub(len, std::memory_order_relaxed);
     queuedTooMuch_.store(true, std::memory_order_relaxed);
     g_metrics.writeOverflows.fetch_add(1, std::memory_order_relaxed);
-    std::cerr << "[conn] fd=" << fd_ << " 写缓冲超限，断开慢消费/不可达连接" << std::endl;
+    LOG_E("[conn] fd=" << fd_ << " 写缓冲超限，断开慢消费/不可达连接");
     shutdown();
     return SendResult::Overflow;
   }
@@ -97,7 +98,7 @@ void Connection::flushWrite() {
         return;
       }
       if (errno == EINTR) continue;
-      std::cerr << "[conn] fd=" << fd_ << " send 错误: " << std::strerror(errno) << std::endl;
+      LOG_E("[conn] fd=" << fd_ << " send 错误: " << std::strerror(errno));
       closeInLoop();
       return;
     } else {
@@ -124,8 +125,8 @@ void Connection::handleRead() {
       // 先计入 inBuffer_ 再交付上层，若不加限制会导致瞬时大内存分配。
       // 超过上限视为恶意洪泛，直接断开。
       if (total > kMaxReadPerEvent) {
-        std::cerr << "[conn] fd=" << fd_ << " 单次读事件超过 "
-                  << kMaxReadPerEvent << " 字节，断开洪泛连接" << std::endl;
+        LOG_E("[conn] fd=" << fd_ << " 单次读事件超过 "
+              << kMaxReadPerEvent << " 字节，断开洪泛连接");
         closeInLoop();
         return;
       }
@@ -148,7 +149,7 @@ void Connection::handleRead() {
 
 void Connection::handleError() {
   if (closed_.load()) return;
-  std::cerr << "[conn] fd=" << fd_ << " 异常/对端断开" << std::endl;
+  LOG_E("[conn] fd=" << fd_ << " 异常/对端断开");
   closeInLoop();
 }
 

@@ -2,6 +2,7 @@
 
 #include "channel.hpp"
 #include "connection.hpp"
+#include "log.hpp"
 
 #include <sys/epoll.h>
 #include <sys/eventfd.h>
@@ -26,12 +27,12 @@ EventLoop::EventLoop() {
   instanceId_ = s_instances_.fetch_add(1, std::memory_order_relaxed);
   epfd_ = ::epoll_create1(EPOLL_CLOEXEC);
   if (epfd_ == -1) {
-    std::cerr << "[eventloop] epoll_create1 失败: " << std::strerror(errno) << std::endl;
+    LOG_E("[eventloop] epoll_create1 失败: " << std::strerror(errno));
     ::exit(1);
   }
   wakeupFd_ = ::eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
   if (wakeupFd_ == -1) {
-    std::cerr << "[eventloop] eventfd 失败: " << std::strerror(errno) << std::endl;
+    LOG_E("[eventloop] eventfd 失败: " << std::strerror(errno));
     ::exit(1);
   }
   wakeupChannel_ = std::make_unique<Channel>(wakeupFd_);
@@ -44,7 +45,7 @@ EventLoop::EventLoop() {
 
   timerFd_ = ::timerfd_create(CLOCK_MONOTONIC, TFD_NONBLOCK | TFD_CLOEXEC);
   if (timerFd_ == -1) {
-    std::cerr << "[eventloop] timerfd_create 失败: " << std::strerror(errno) << std::endl;
+    LOG_E("[eventloop] timerfd_create 失败: " << std::strerror(errno));
     ::exit(1);
   }
   // 固定 100ms 小周期重复触发，handleTimer 里按各定时器的 next 判定到期。
@@ -81,7 +82,7 @@ void EventLoop::run() {
               static_cast<int>(events.size()), -1);
     if (n == -1) {
       if (errno == EINTR) continue;
-      std::cerr << "[eventloop] epoll_wait 失败: " << std::strerror(errno) << std::endl;
+      LOG_E("[eventloop] epoll_wait 失败: " << std::strerror(errno));
       break;
     }
     for (int i = 0; i < n; ++i) {

@@ -1,6 +1,7 @@
 #include "appserver.hpp"
 
 #include "connection.hpp"
+#include "log.hpp"
 #include "metrics.hpp"
 #include "mysql_message_repository.hpp"
 #include "mysql_user_repository.hpp"
@@ -69,8 +70,8 @@ std::shared_ptr<UserRepository> makeUserRepository(const UserStoreConfig& c) {
   if (!repo->ok()) {
     throw std::runtime_error("MySQL 连接失败: " + repo->errStr());
   }
-  std::cout << "[db] 用户存储: MySQL (host=" << c.mysqlHost << ":" << c.mysqlPort
-            << ", db=" << c.mysqlDb << ")" << std::endl;
+  LOG_I("[db] 用户存储: MySQL (host=" << c.mysqlHost << ":" << c.mysqlPort
+        << ", db=" << c.mysqlDb << ")");
   return repo;
 }
 
@@ -134,45 +135,43 @@ AppServer::AppServer(uint16_t port, size_t ioThreads, size_t workThreads, size_t
 // 构造 token 存储：Redis 启用则用 Redis（连接失败抛错），否则内存
 std::shared_ptr<TokenStore> makeTokenStore(const RedisStoreConfig& c) {
   if (!c.enabled) {
-    std::cout << "[db] token 存储: 内存" << std::endl;
+    LOG_I("[db] token 存储: 内存");
     return std::make_shared<MemoryTokenStore>();
   }
   auto rs = std::make_shared<RedisTokenStore>(c);
   if (!rs->ok()) {
     throw std::runtime_error("Redis 连接失败: " + rs->errStr());
   }
-  std::cout << "[db] token 存储: Redis (host=" << c.redisHost << ":" << c.redisPort
-            << ", db=" << c.redisDb << ")" << std::endl;
+  LOG_I("[db] token 存储: Redis (host=" << c.redisHost << ":" << c.redisPort
+        << ", db=" << c.redisDb << ")");
   return rs;
 }
 
 // msg.send 限流：Redis 启用则用 ZSET 滑动窗口（跨重启/多实例），否则内存
 std::unique_ptr<RateLimiterStore> makeRateLimiter(const RedisStoreConfig& c) {
   if (!c.enabled) {
-    std::cout << "[db] 发送限流: 内存" << std::endl;
+    LOG_I("[db] 发送限流: 内存");
     return std::make_unique<MemoryRateLimiter>();
   }
   auto rs = std::make_unique<RedisRateLimiter>(c);
   if (!rs->ok()) {
     throw std::runtime_error("Redis 连接失败: " + rs->errStr());
   }
-  std::cout << "[db] 发送限流: Redis (host=" << c.redisHost << ":" << c.redisPort << ")"
-            << std::endl;
+  LOG_I("[db] 发送限流: Redis (host=" << c.redisHost << ":" << c.redisPort << ")");
   return rs;
 }
 
 // 消息幂等去重：Redis 启用则用 SET NX EX（跨重启/多实例），否则内存
 std::unique_ptr<MsgDedupStore> makeMsgDedup(const RedisStoreConfig& c) {
   if (!c.enabled) {
-    std::cout << "[db] 幂等去重: 内存" << std::endl;
+    LOG_I("[db] 幂等去重: 内存");
     return std::make_unique<MemoryMsgDedup>();
   }
   auto rs = std::make_unique<RedisMsgDedup>(c);
   if (!rs->ok()) {
     throw std::runtime_error("Redis 连接失败: " + rs->errStr());
   }
-  std::cout << "[db] 幂等去重: Redis (host=" << c.redisHost << ":" << c.redisPort << ")"
-            << std::endl;
+  LOG_I("[db] 幂等去重: Redis (host=" << c.redisHost << ":" << c.redisPort << ")");
   return rs;
 }
 
@@ -195,13 +194,13 @@ AppServer::AppServer(uint16_t port, size_t ioThreads, size_t workThreads, size_t
   if (!msgRepo_->ok()) {
     throw std::runtime_error("消息存储连接失败");
   }
-  std::cout << "[db] 消息存储: MySQL (host=" << userConfig.mysqlHost << ":" << userConfig.mysqlPort
-            << ", db=" << userConfig.mysqlDb << ")" << std::endl;
+  LOG_I("[db] 消息存储: MySQL (host=" << userConfig.mysqlHost << ":" << userConfig.mysqlPort
+        << ", db=" << userConfig.mysqlDb << ")");
   if (!contactRepo_->ok()) {
     throw std::runtime_error("联系人存储连接失败");
   }
-  std::cout << "[db] 联系人存储: MySQL (host=" << userConfig.mysqlHost << ":"
-            << userConfig.mysqlPort << ", db=" << userConfig.mysqlDb << ")" << std::endl;
+  LOG_I("[db] 联系人存储: MySQL (host=" << userConfig.mysqlHost << ":"
+        << userConfig.mysqlPort << ", db=" << userConfig.mysqlDb << ")");
 }
 
 AppServer::~AppServer() = default;
@@ -253,13 +252,13 @@ void AppServer::onNewConnection(EventLoop* ioLoop, const TcpServer::ConnectionPt
     });
   // 在连接所属的从 loop 线程上启动
   ioLoop->runInLoop([session] { session->start(); });
-  std::cout << "[app] 新会话 fd=" << conn->fd() << " 已创建" << std::endl;
+  LOG_I("[app] 新会话 fd=" << conn->fd() << " 已创建");
 }
 
 void AppServer::onSessionClosed(const std::shared_ptr<Session>& session) {
   if (session->isLoggedIn()) {
     onlineMgr_.remove(session->userId(), session);
-    std::cout << "[app] 用户 " << session->userId() << " 会话关闭" << std::endl;
+    LOG_I("[app] 用户 " << session->userId() << " 会话关闭");
   }
   tcpServer_->removeConnection(session->conn());
 }
@@ -350,7 +349,7 @@ void AppServer::onEnvelope(const std::shared_ptr<Session>& session, const json& 
   } catch (const json::exception& e) {
     // data.value() 在字段存在但类型不符时抛 type_error.302。
     // 统一按坏包处理并回复，避免异常逃逸到工作线程导致进程崩溃。
-    std::cerr << "[app] 封包字段类型异常: " << e.what() << std::endl;
+    LOG_E("[app] 封包字段类型异常: " << e.what());
     session->reply(makeError(400, "封包字段错误"));
   }
 }
@@ -417,13 +416,13 @@ void AppServer::onLogin(const std::shared_ptr<Session>& session, const json& dat
   // 注意 isClosed() 检查与 add 之间存在窗口，add 后需二次复查：
   // 若期间连接被关闭，立即撤销在线表登记，避免残留已死会话条目。
   if (session->conn()->isClosed()) {
-    std::cerr << "[app] 登录时连接已关闭，userId=" << userId << std::endl;
+    LOG_E("[app] 登录时连接已关闭，userId=" << userId);
     return;
   }
   onlineMgr_.add(userId, session);
   if (session->conn()->isClosed()) {
     onlineMgr_.remove(userId, session);
-    std::cerr << "[app] 登录后连接随即关闭，撤销在线登记 userId=" << userId << std::endl;
+    LOG_E("[app] 登录后连接随即关闭，撤销在线登记 userId=" << userId);
     return;
   }
   session->reply(makeResult("auth.login_res", 0, "ok",
@@ -486,13 +485,13 @@ void AppServer::onToken(const std::shared_ptr<Session>& session, const json& dat
   }
   session->setLogin(userId, token);
   if (session->conn()->isClosed()) {
-    std::cerr << "[app] token 重连时连接已关闭，userId=" << userId << std::endl;
+    LOG_E("[app] token 重连时连接已关闭，userId=" << userId);
     return;
   }
   onlineMgr_.add(userId, session);
   if (session->conn()->isClosed()) {
     onlineMgr_.remove(userId, session);
-    std::cerr << "[app] token 重连后连接随即关闭，撤销在线登记 userId=" << userId << std::endl;
+    LOG_E("[app] token 重连后连接随即关闭，撤销在线登记 userId=" << userId);
     return;
   }
   session->reply(makeResult("auth.token_res", 0, "ok",

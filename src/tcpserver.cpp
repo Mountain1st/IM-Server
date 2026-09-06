@@ -2,6 +2,7 @@
 
 #include "connection.hpp"
 #include "eventloop_threadpool.hpp"
+#include "log.hpp"
 #include "metrics.hpp"
 #include "util.hpp"
 
@@ -23,36 +24,36 @@ TcpServer::TcpServer(uint16_t port, size_t ioThreads)
 TcpServer::TcpServer(uint16_t port, size_t ioThreads, size_t maxConnections)
     : ioPool_(std::make_unique<EventLoopThreadPool>(ioThreads)),
       maxConnections_(maxConnections) {
-  std::cout << "[server] 配置: 端口 " << port
-            << ", 从 eventloop 线程 " << ioThreads << std::endl;
+  LOG_I("[server] 配置: 端口 " << port
+        << ", 从 eventloop 线程 " << ioThreads);
   // 同时监听 IPv6 与 IPv4：WSL2 的 localhost 中继会按服务器监听的地址族
   // 在 Windows 侧绑定对应的环回监听（127.0.0.1 或 ::1）。只绑单一地址族时，
   // 客户端用另一地址族的主机名/地址会连不上，故双 socket 全覆盖。
   bool v6 = addListener(AF_INET6, /*ipv6Only=*/true, port, "IPv6 [::]");
   bool v4 = addListener(AF_INET, /*ipv6Only=*/false, port, "IPv4 0.0.0.0");
   if (!v6 && !v4) {
-    std::cerr << "[server] 无法监听端口 " << port << std::endl;
+    LOG_E("[server] 无法监听端口 " << port);
     ::exit(1);
   }
-  std::cout << "[server] 监听端口 " << port << " ("
-            << (v6 ? "IPv6" : "") << (v6 && v4 ? " + " : "")
-            << (v4 ? "IPv4" : "") << ")" << std::endl;
+  LOG_I("[server] 监听端口 " << port << " ("
+        << (v6 ? "IPv6" : "") << (v6 && v4 ? " + " : "")
+        << (v4 ? "IPv4" : "") << ")");
 }
 
 bool TcpServer::addListener(int family, bool ipv6Only, uint16_t port,
                             const std::string& label) {
   int fd = ::socket(family, SOCK_STREAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0);
   if (fd < 0) {
-    std::cerr << "[server] " << label << " socket 失败: "
-              << std::strerror(errno) << std::endl;
+    LOG_E("[server] " << label << " socket 失败: "
+          << std::strerror(errno));
     return false;
   }
   setReuseAddr(fd);
   if (family == AF_INET6) {
     int on = ipv6Only ? 1 : 0;
     if (::setsockopt(fd, IPPROTO_IPV6, IPV6_V6ONLY, &on, sizeof on) < 0) {
-      std::cerr << "[server] " << label << " 设置 IPV6_V6ONLY 失败: "
-                << std::strerror(errno) << std::endl;
+      LOG_E("[server] " << label << " 设置 IPV6_V6ONLY 失败: "
+            << std::strerror(errno));
     }
   }
   if (family == AF_INET6) {
@@ -61,8 +62,8 @@ bool TcpServer::addListener(int family, bool ipv6Only, uint16_t port,
     addr.sin6_addr = in6addr_any;
     addr.sin6_port = htons(port);
     if (::bind(fd, reinterpret_cast<sockaddr*>(&addr), sizeof addr) < 0) {
-      std::cerr << "[server] " << label << " bind " << port << " 失败: "
-                << std::strerror(errno) << std::endl;
+      LOG_E("[server] " << label << " bind " << port << " 失败: "
+            << std::strerror(errno));
       ::close(fd);
       return false;
     }
@@ -72,15 +73,15 @@ bool TcpServer::addListener(int family, bool ipv6Only, uint16_t port,
     addr.sin_addr.s_addr = htonl(INADDR_ANY);
     addr.sin_port = htons(port);
     if (::bind(fd, reinterpret_cast<sockaddr*>(&addr), sizeof addr) < 0) {
-      std::cerr << "[server] " << label << " bind " << port << " 失败: "
-                << std::strerror(errno) << std::endl;
+      LOG_E("[server] " << label << " bind " << port << " 失败: "
+            << std::strerror(errno));
       ::close(fd);
       return false;
     }
   }
   if (::listen(fd, SOMAXCONN) < 0) {
-    std::cerr << "[server] " << label << " listen 失败: "
-              << std::strerror(errno) << std::endl;
+    LOG_E("[server] " << label << " listen 失败: "
+          << std::strerror(errno));
     ::close(fd);
     return false;
   }
@@ -199,8 +200,8 @@ void TcpServer::handleAccept() {
         ::inet_ntop(AF_INET, &a4->sin_addr, ip, sizeof ip);
         peerPort = ntohs(a4->sin_port);
       }
-      std::cout << "[server] 新连接 " << ip << ":" << peerPort
-                << " fd=" << cfd << std::endl;
+      LOG_I("[server] 新连接 " << ip << ":" << peerPort
+            << " fd=" << cfd);
 
       g_metrics.connectionsAccepted.fetch_add(1, std::memory_order_relaxed);
       g_metrics.activeConnections.fetch_add(1, std::memory_order_relaxed);
@@ -214,8 +215,8 @@ void TcpServer::deviceNewConnection(int cfd) {
   {
     std::lock_guard<std::mutex> lock(mutex_);
     if (maxConnections_ > 0 && connections_.size() >= maxConnections_) {
-      std::cerr << "[server] 连接数已达上限 (" << maxConnections_
-                << ")，拒绝 fd=" << cfd << std::endl;
+      LOG_E("[server] 连接数已达上限 (" << maxConnections_
+            << ")，拒绝 fd=" << cfd);
       ::close(cfd);
       return;
     }

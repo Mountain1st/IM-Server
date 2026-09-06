@@ -8,6 +8,8 @@
 #include <string>
 #include <vector>
 
+#include "log.hpp"
+
 namespace {
 im::AppServer* g_server = nullptr;
 volatile std::sig_atomic_t g_stop_requested = 0;
@@ -72,9 +74,9 @@ int main(int argc, char* argv[]) {
       pos = comma + 1;
     }
     if (!allowedOrigins.empty()) {
-      std::cout << "[server] 握手允许 Origin/Host: ";
-      for (const auto& o : allowedOrigins) std::cout << o << " ";
-      std::cout << std::endl;
+      std::string origins;
+      for (const auto& o : allowedOrigins) origins += o + " ";
+      LOG_I("[server] 握手允许 Origin/Host: " << origins);
     }
   }
 
@@ -96,6 +98,9 @@ int main(int argc, char* argv[]) {
   if (const char* v = std::getenv("IM_REDIS_PASSWORD")) redisConfig.redisPassword = v;
   if (const char* v = std::getenv("IM_REDIS_DB")) redisConfig.redisDb = std::atoi(v);
 
+  // 日志初始化（环境变量 IM_LOG_FILE / IM_LOG_LEVEL，见 src/log.hpp）
+  im::log::Log::init();
+
   // 业务层：内部启动工作线程并通知 TcpServer（其负责主从 eventloop）。
   // 用户存储为 MySQL：配置缺失或连接失败时抛异常，这里捕获并明确报错退出。
   std::shared_ptr<im::AppServer> server;
@@ -103,7 +108,7 @@ int main(int argc, char* argv[]) {
     server = std::make_shared<im::AppServer>(
         port, ioThreads, workThreads, maxConnections, allowedOrigins, userConfig, redisConfig);
   } catch (const std::exception& e) {
-    std::cerr << "[server] 启动失败: " << e.what() << std::endl;
+    LOG_E("[server] 启动失败: " << e.what());
     return 1;
   }
   g_server = server.get();
@@ -117,11 +122,11 @@ int main(int argc, char* argv[]) {
   ::sigaction(SIGTERM, &sa, nullptr);
   ::signal(SIGPIPE, SIG_IGN);
 
-  std::cout << "[server] 启动完成，按 Ctrl+C 退出" << std::endl;
+  LOG_I("[server] 启动完成，按 Ctrl+C 退出");
   server->run();
   // run() 返回即表示收到停止请求，在主线程执行完整优雅关闭：
   // 停止工作线程 → 通知 TcpServer 停止（主从 eventloop → 关闭连接）
   server->stop();
-  std::cout << "[server] 已退出" << std::endl;
+  LOG_I("[server] 已退出");
   return 0;
 }
