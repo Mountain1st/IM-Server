@@ -19,13 +19,17 @@ public:
   bool saveMessage(const std::string& messageId, int64_t fromUser,
                    int64_t toUser, const std::string& content, int64_t ts,
                    const std::string& clientMsgId, const std::string& chatType,
-                   int status) override;
+                   int status, int64_t groupId = 0) override;
   std::vector<StoredMessage> fetchOffline(int64_t toUser) override;
   void markDelivered(int64_t toUser,
                      const std::vector<std::string>& messageIds) override;
   std::vector<StoredMessage> fetchHistory(int64_t userA, int64_t userB,
                                           int limit) override;
   void markRead(int64_t toUser, int64_t fromUser, int64_t readTs) override;
+  std::vector<StoredMessage> fetchGroupMessages(int64_t groupId,
+                                                int64_t sinceTs,
+                                                int64_t untilTs,
+                                                int limit, bool asc) override;
 
 private:
   MySqlClient client_;

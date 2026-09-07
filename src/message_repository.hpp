@@ -16,6 +16,7 @@ struct StoredMessage {
   std::string clientMsgId;
   std::string chatType;
   int status;             // 0=offline_pending 1=delivered 2=read
+  int64_t groupId = 0;    // 0=单聊；>0=群聊（群消息单行：from=发送者, to=0）
 };
 
 // 消息状态（与 messages 表 status 列一致）
@@ -39,7 +40,8 @@ public:
   virtual bool saveMessage(const std::string& messageId, int64_t fromUser,
                            int64_t toUser, const std::string& content,
                            int64_t ts, const std::string& clientMsgId,
-                           const std::string& chatType, int status) = 0;
+                           const std::string& chatType, int status,
+                           int64_t groupId = 0) = 0;
   // 取某接收方的离线消息（status=offline_pending），按 ts 升序。不移除。
   virtual std::vector<StoredMessage> fetchOffline(int64_t toUser) = 0;
   // 批量标记离线消息为 delivered（客户端 msg.offline_ack 确认）。
@@ -50,6 +52,12 @@ public:
                                                   int limit) = 0;
   // 把接收方 toUser 与 fromUser 之间、readTs 之前未读的消息标记为已读。
   virtual void markRead(int64_t toUser, int64_t fromUser, int64_t readTs) = 0;
+  // 拉取某群在时间窗内的消息：ts > sinceTs（水位线），untilTs==0 表示无上界；
+  // asc=true 按 ts 升序（补发），false 按 ts 倒序（历史）；limit 条。
+  virtual std::vector<StoredMessage> fetchGroupMessages(int64_t groupId,
+                                                        int64_t sinceTs,
+                                                        int64_t untilTs,
+                                                        int limit, bool asc) = 0;
 };
 
 } // namespace im
