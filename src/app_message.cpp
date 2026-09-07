@@ -20,7 +20,6 @@ void AppServer::pushOfflineMessages(int64_t userId,
                                     const std::shared_ptr<Session>& session) {
   // 从消息存储读取该用户的离线消息（status=offline_pending），按 ts 升序
   auto stored = msgRepo_->fetchOffline(userId);
-  if (stored.empty()) return;
   json arr = json::array();
   for (const auto& m : stored) {
     std::string fromNick;
@@ -69,6 +68,7 @@ void AppServer::pushOfflineMessages(int64_t userId,
     std::sort(arr.begin(), arr.end(),
               [](const json& a, const json& b) { return a["ts"] < b["ts"]; });
   }
+  if (arr.empty()) return;
   session->reply(makeEnvelopeText("msg.offline", json{{"msgs", arr}}));
 }
 
