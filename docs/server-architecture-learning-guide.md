@@ -652,7 +652,7 @@ sequenceDiagram
 | `auth.login` | `onLogin()` | 按 account 校验密码（不校验格式，统一 403）、生成 Token、上线并补发离线 |
 | `auth.token` | `onToken()` | 使用 Token 恢复登录态并补发离线 |
 | `auth.logout` | `onLogout()` | 删除在线状态和 Token |
-| `msg.send` | `onSend()` | MySQL 先落库再 ack（在线=delivered 并投递；离线=pending；`to` 为目标 **account**（v1.7，兼容旧 userId 数字），`to==自己 account` 为自己对话框（v1.8 起**落库**、只回 ack 不回显）；**v1.8 权限校验**：自己/联系人/目标 `allowTempChat=1` 才可发送，否则 ack `403 对方未开启临时对话` 且不落库） |
+| `msg.send` | `onSend()` | MySQL 先落库再 ack（在线=delivered 并投递；离线=pending；`to` 为目标 **account**（v1.7，兼容旧 userId 数字），`to==自己 account` 为自己对话框（v1.8 起**落库**、只回 ack 不回显）；**v1.8 权限校验**：自己/联系人/目标 `allowTempChat=1` 才可发送，否则 ack `403 对方未开启临时对话` 且不落库）；`chatType="group"` 时走 `onGroupSend()`（`to` 为数字 `groupId`，非群成员 403，群消息单行存储 `to_user=0, group_id=G`，在线投递+离线按水位线补发，发送者不回显） |
 | `chat.create` | `onCreateConv()` | 账号格式校验后按 account 查找，返回 userId/account/昵称 |
 | `msg.offline_ack` | `onOfflineAck()` | 确认离线消息，标记 delivered |
 | `chat.history` | `onHistory()` | 拉取双人单聊历史（`to` 为目标 account，倒序，默认 50 上限 200；`to==自己 account` 返回自己对话框消息（v1.8 起落库非空）） |
@@ -666,9 +666,15 @@ sequenceDiagram
 | `contact.delete` | `onContactDelete()` | 双向删除联系人，推送对方 `contact.deleted` |
 | `settings.get` | `onSettingsGet()` | 返回我的三开关 `{allowTempChat, searchable, allowAdd}`（bool） |
 | `settings.set` | `onSettingsSet()` | 按提供的字段更新三开关（缺省字段不修改，`CASE WHEN ?<0` 保底） |
+| `group.create` | `onGroupCreate()` | 建群（`name` 非空且 ≤ 32），写入 `groups` + 群主成员行，回 `group.create_res`（含 `groupId`） |
+| `group.invite` | `onGroupInvite()` | 仅群主可拉人（被拉人须是邀请人联系人、未在群、未满 50 人）；成功写入成员行，推送被拉人 `group.added`、群内在线成员 `group.member_changed(join)` |
+| `group.leave` | `onGroupLeave()` | 群主不能退群；成员退群写 `left_ts`，推送剩余在线成员 `group.member_changed(leave)` |
+| `group.list` | `onGroupList()` | 拉取我的群（`listUserGroups`，附 `memberCount`/`isOwner`） |
+| `group.members` | `onGroupMembers()` | 拉取群成员（须为群成员，附 `account`/`username`/`joinedTs`/`isOwner`） |
+| `group.history` | `onGroupHistory()` | 拉取群历史（按成员 `joined_ts`/`left_ts` 窗口过滤，倒序，默认 50 上限 200） |
 | `heartbeat` | 无 | 文档列出但代码未实现（返回 400 未知的指令类型） |
 
-路由位置：`src/appserver.cpp`（onEnvelope + 各处理函数）。
+路由位置：`src/appserver.cpp`（onEnvelope 路由）+ `src/app_group.cpp`（群处理函数）。
 
 ### 12.2 密码
 
