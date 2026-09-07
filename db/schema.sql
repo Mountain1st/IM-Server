@@ -37,12 +37,14 @@ CREATE TABLE IF NOT EXISTS messages (
   ts            BIGINT       NOT NULL,           -- unix 时间戳（秒）
   client_msg_id VARCHAR(64)  NOT NULL DEFAULT '',
   chat_type     VARCHAR(16)  NOT NULL DEFAULT 'single',
+  group_id      BIGINT UNSIGNED NOT NULL DEFAULT 0,
   status        TINYINT      NOT NULL DEFAULT 0,
   delivered_ts  BIGINT       NOT NULL DEFAULT 0,
   read_ts       BIGINT       NOT NULL DEFAULT 0,
   KEY idx_to_status (to_user, status),
   KEY idx_pair_ts  (from_user, to_user, ts),
-  KEY idx_message_id (message_id)
+  KEY idx_message_id (message_id),
+  KEY idx_group_ts (group_id, ts)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 -- 联系人关系表（双向各一条，删除时删两条）
@@ -62,4 +64,23 @@ CREATE TABLE IF NOT EXISTS friend_requests (
   status     TINYINT NOT NULL DEFAULT 0,
   created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
   UNIQUE KEY uk_from_to (from_user, to_user)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS `groups` (
+  group_id    BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+  name        VARCHAR(32)  NOT NULL,
+  owner_id    BIGINT UNSIGNED NOT NULL,
+  created_ts  BIGINT       NOT NULL,
+  KEY idx_owner (owner_id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS group_members (
+  id                BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+  group_id          BIGINT UNSIGNED NOT NULL,
+  user_id           BIGINT UNSIGNED NOT NULL,
+  joined_ts         BIGINT       NOT NULL,
+  left_ts           BIGINT       NOT NULL DEFAULT 0,  -- 0=在群，非0=离开时间
+  last_delivered_ts BIGINT       NOT NULL DEFAULT 0,  -- 离线补发水位线
+  UNIQUE KEY uk_group_user (group_id, user_id),
+  KEY idx_user (user_id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
