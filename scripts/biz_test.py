@@ -363,9 +363,9 @@ def main():
     check("chatType single ok", r["type"] == "msg.ack" and r["data"]["code"] == 0)
     json.loads(b.recv())  # 消费单聊推送
     a.send(env("msg.send", {"to": bob, "content": "x", "clientMsgId": "ct2",
-                            "chatType": "group"}))
+                            "chatType": "invalid"}))
     r = json.loads(a.recv())
-    check("chatType group 400", r["type"] == "msg.ack" and r["data"]["code"] == 400)
+    check("chatType invalid 400", r["type"] == "msg.ack" and r["data"]["code"] == 400)
 
     # clientMsgId 幂等去重：同 id 重发只投递一次
     a.send(env("msg.send", {"to": bob, "content": "dup", "clientMsgId": "dup1"}))
@@ -679,10 +679,125 @@ def main():
     # 恢复（不影响清理）
     g.close(); h.close()
 
+    # ---- v1.9 群聊 ----
+    # a/b 在前文已 close，此处重建会话复用 A/B 账号（A 仍处登录限流 60s 窗内故用 token 重连）
+    a = WS(); a.send(env("auth.token", {"token": alice_token})); json.loads(a.recv())
+    b = WS(); login(b, B, "pw1234")
+    G1 = base + "60"; G2 = base + "61"
+    g1 = WS(); register(g1, G1, "pw1234", nick="群友1"); login(g1, G1, "pw1234")
+    g2 = WS(); register(g2, G2, "pw1234", nick="群友2"); login(g2, G2, "pw1234")
+    # A/B 建联（群邀请要求联系人）
+    a.send(env("contact.request", {"account": B}))
+    r = json.loads(a.recv())
+    if r["data"]["code"] == 0:
+        json.loads(b.recv())
+        b.send(env("contact.accept", {"account": A}))
+        json.loads(b.recv()); json.loads(a.recv())
+    # 建群
+    a.send(env("group.create", {"name": "测试群"}))
+    r = json.loads(a.recv())
+    check("group create ok", r["type"] == "group.create_res" and r["data"]["code"] == 0)
+    gid = r["data"]["data"]["groupId"]
+    # 建群空名 400
+    a.send(env("group.create", {"name": ""}))
+    r = json.loads(a.recv())
+    check("group create empty 400", r["type"] == "group.create_res"
+          and r["data"]["code"] == 400)
+    # 拉人：bob（联系人）成功；g1（非联系人）409
+    a.send(env("group.invite", {"groupId": gid, "account": B}))
+    r = json.loads(a.recv())
+    check("group invite contact ok", r["type"] == "group.invite_res"
+          and r["data"]["code"] == 0)
+    r = json.loads(b.recv())
+    check("group added pushed", r["type"] == "group.added"
+          and r["data"]["groupId"] == gid)
+    json.loads(a.recv())  # 消费 group.member_changed（拉人成功推送群内成员，含邀请人）
+    a.send(env("group.invite", {"groupId": gid, "account": G1}))
+    r = json.loads(a.recv())
+    check("group invite non-contact 409", r["type"] == "group.invite_res"
+          and r["data"]["code"] == 409)
+    # 非群主拉人 403（bob 不是群主）
+    b.send(env("group.invite", {"groupId": gid, "account": G1}))
+    r = json.loads(b.recv())
+    check("group invite non-owner 403", r["type"] == "group.invite_res"
+          and r["data"]["code"] == 403)
+    # 秒级时间戳：history 按 ts > joined 过滤，等待 1s 避开同秒边界
+    #（服务端同秒 join+发言查不到历史，已记入 task-5-report 自审发现）
+    time.sleep(1.1)
+    # 群发消息：a 发，b 收到（from/groupId/chatType 校验），a 不回显
+    a.send(env("msg.send", {"to": gid, "content": "hello group", "clientMsgId": "g1",
+                            "chatType": "group"}))
+    r = json.loads(a.recv())
+    check("group send ack ok", r["type"] == "msg.ack" and r["data"]["code"] == 0)
+    r = json.loads(b.recv())
+    check("group recv ok", r["type"] == "msg.recv" and r["data"]["from"] == A
+          and r["data"]["groupId"] == gid and r["data"]["chatType"] == "group")
+    a.s.settimeout(0.5)
+    try:
+        echo = a.recv()
+    except socket.timeout:
+        echo = None
+    a.s.settimeout(5)
+    check("group no echo to sender", echo is None)
+    # 非成员 g1 发送 403
+    g1.send(env("msg.send", {"to": gid, "content": "x", "clientMsgId": "g2",
+                             "chatType": "group"}))
+    r = json.loads(g1.recv())
+    check("group send non-member 403", r["type"] == "msg.ack" and r["data"]["code"] == 403)
+    # 不存在的群 404
+    a.send(env("msg.send", {"to": 999999999, "content": "x", "clientMsgId": "g3",
+                            "chatType": "group"}))
+    r = json.loads(a.recv())
+    check("group send missing 404", r["type"] == "msg.ack" and r["data"]["code"] == 404)
+    # 群历史：b 可查，g1（从未加入）403
+    b.send(env("group.history", {"groupId": gid}))
+    r = json.loads(b.recv())
+    check("group history ok", r["type"] == "group.history_res"
+          and r["data"]["code"] == 0 and len(r["data"]["data"]["msgs"]) >= 1)
+    g1.send(env("group.history", {"groupId": gid}))
+    r = json.loads(g1.recv())
+    check("group history non-member 403", r["type"] == "group.history_res"
+          and r["data"]["code"] == 403)
+    # 群列表与成员
+    b.send(env("group.list", {}))
+    r = json.loads(b.recv())
+    check("group list ok", r["type"] == "group.list_res"
+          and any(x["groupId"] == gid for x in r["data"]["data"]["groups"]))
+    b.send(env("group.members", {"groupId": gid}))
+    r = json.loads(b.recv())
+    check("group members ok", r["type"] == "group.members_res"
+          and len(r["data"]["data"]["members"]) == 2)
+    # 退群：b 退群后发消息 403；b 可查在群期间历史；群主 a 退群 403
+    b.send(env("group.leave", {"groupId": gid}))
+    r = json.loads(b.recv())
+    check("group leave ok", r["type"] == "group.leave_res" and r["data"]["code"] == 0)
+    json.loads(a.recv())  # 消费 group.member_changed（退群推送群内剩余成员）
+    b.send(env("msg.send", {"to": gid, "content": "x", "clientMsgId": "g4",
+                            "chatType": "group"}))
+    r = json.loads(b.recv())
+    check("group send after leave 403", r["type"] == "msg.ack" and r["data"]["code"] == 403)
+    b.send(env("group.history", {"groupId": gid}))
+    r = json.loads(b.recv())
+    check("group history ex-member ok", r["type"] == "group.history_res"
+          and r["data"]["code"] == 0 and len(r["data"]["data"]["msgs"]) >= 1)
+    a.send(env("group.leave", {"groupId": gid}))
+    r = json.loads(a.recv())
+    check("group owner leave 403", r["type"] == "group.leave_res"
+          and r["data"]["code"] == 403)
+    g1.close(); g2.close()
+    a.close(); b.close()
+
     # 清理本次注册的测试账号及其关联消息（精确账号列表，不误删真实用户）
     import subprocess
-    used = [A, B, C, SINK, SPAM, SINK2, SPAM2, D, E, F, G, H, base + "50"]
+    used = [A, B, C, SINK, SPAM, SINK2, SPAM2, D, E, F, G, H, base + "50", G1, G2]
     inlist = ",".join("'%s'" % x for x in used)
+    # 群表清理必须在 users 删除之前（按 account 查 user_id，无级联外键）
+    subprocess.run(["bash", "-c",
+        "MYSQL_PWD=520010 mysql -u IMS_jack -h 127.0.0.1 -e \""
+        "USE IMS_reactor_db; "
+        "DELETE FROM group_members WHERE user_id IN (SELECT id FROM users WHERE account IN (%s)); "
+        "DELETE FROM \`groups\` WHERE owner_id IN (SELECT id FROM users WHERE account IN (%s));\" 2>/dev/null" % (inlist, inlist)],
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     subprocess.run(["bash", "-c",
         "MYSQL_PWD=520010 mysql -u IMS_jack -h 127.0.0.1 -e \""
         "USE IMS_reactor_db; "
