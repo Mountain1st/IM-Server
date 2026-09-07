@@ -47,6 +47,7 @@ void AppServer::pushOfflineMessages(int64_t userId,
     std::string gname;
     groupRepo_->getGroup(gid, &gname, nullptr);
     for (const auto& m : grows) {
+      if (m.fromUser == userId) continue;  // 跳过发送者自己的消息（与在线路径一致）
       std::string fromNick, fromAccount;
       userStore_->nickname(m.fromUser, &fromNick);
       if (!userStore_->accountOf(m.fromUser, &fromAccount)) fromAccount.clear();

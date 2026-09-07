@@ -233,6 +233,14 @@ void AppServer::onGroupSend(const std::shared_ptr<Session>& session, const json&
     ack(404, "群不存在");
     return;
   }
+  if (content.empty()) {
+    ack(400, "参数错误");
+    return;
+  }
+  if (content.size() > kMaxContentBytes) {
+    ack(413, "消息内容超长（超过64KB）");
+    return;
+  }
   // 幂等 + 限流（与单聊同一套，按发送方去重）
   if (msgDedup_->isDuplicate(session->userId(), clientMsgId)) {
     ack(0, "ok");
