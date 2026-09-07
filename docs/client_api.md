@@ -24,8 +24,9 @@
 | `userId` | number | 数字唯一标识（服务器内部） | **对客户端不透明**：不用于任何指令/事件字段，可忽略 |
 | `account` | string | 登录账号（注册/登录凭据，唯一，**10-11 位纯数字**） | 注册、登录、**消息收发定位目标**（`msg.send.to`、`chat.history.to`、`msg.read.from`）与**联系人/搜索/添加定位目标**（`user.search`、`contact.*` 均用 `account`）均用 `account` |
 | `username` | string | 昵称（展示名，可重复，缺省=account） | 界面展示；消息中由 `fromNick` 直接携带 |
+| `groupId` | number | 数字群标识（群收发定位目标，命名空间独立） | 群聊专用：`msg.send {chatType: "group"}` 的 `to`、群指令/事件的 `groupId` 均用它；建群时分配的数字自增 id，与 `userId` 无关，按 `chatType` 区分单聊/群聊 |
 
-**三者勿混用**：登录、收发消息、历史、已读全部用 `account`；`userId` 对客户端不透明（服务器内部用）；气泡展示用 `username`/`fromNick`。
+**三者勿混用**：登录、收发消息、历史、已读全部用 `account`；`userId` 对客户端不透明（服务器内部用）；气泡展示用 `username`/`fromNick`。**群聊会话键用数字 `groupId`**（单聊会话键为对方 `account`），两者不会冲突。
 
 ## 3. WebSocket 层要求
 
@@ -111,7 +112,8 @@
 - **发送权限（v1.8）**：`to` 为**自己**、**自己的联系人**、或**目标开启临时对话**（`allowTempChat=1`）时可发送；否则 `msg.ack` 回 **`403 对方未开启临时对话，请先添加联系人`** 且**不落库**（非联系人须先发起 `contact.request` 成为联系人，见 §5.11）
 - `content`：消息文本，**上限 64KB**
 - `clientMsgId`：发送端生成（建议 UUID），用于与 `msg.ack` 对齐；**服务端按发送方 + `clientMsgId` 做幂等去重**——5 分钟窗口内重发相同 id，服务端只投递一次但正常回 `msg.ack(code=0)`（客户端网络重试安全）；**被限流拒绝（429）的 `clientMsgId` 不会污染幂等记录**，窗口内重试仍返回 429 而非误报成功
-- `chatType`：可选，本次恒为 `"single"`（缺省即单聊）
+- `chatType`：可选，缺省 `"single"`；**`"group"` 时 `to` 为数字 `groupId`**（整数必填，见 §5.18 群聊）：群不存在回 `404 群不存在`，非群成员回 `403 非群成员`，`to` 缺失/非整数回 `400 参数错误`
+- **群发送（v1.9）**：请求示例 `{ "type": "msg.send", "seq": 16, "data": { "to": 1, "content": "大家好", "clientMsgId": "8f14e45f-0002", "chatType": "group" } }`；群成员在线收 `msg.recv`（含 `groupId`/`groupName`，发送者不回显），离线登录后经 `msg.offline` 补发；群消息**不做已读**；限流/幂等与单聊同一套规则
 - `msg.ack` 只表示服务端已接收，不代表对方已读
 - 发送限流：携带 `clientMsgId` 每用户 10 秒最多 30 条；空 `clientMsgId` 10 秒最多 5 条；超限 `msg.ack` 回 `429 消息发送过于频繁`，客户端应提示发送过频
 
@@ -289,6 +291,79 @@
 - `allowAdd`：是否可被添加为联系人；`false` 时他人 `contact.request` 回 `403 对方未开启添加，请使用其他方式联系`
 - 三开关**默认全开**；客户端应在设置页提供三个开关并调用 `settings.set` 同步
 
+### 5.18 建群 `group.create`（v1.9）
+
+```json
+{ "type": "group.create", "seq": 16, "data": { "name": "周末徒步群" } }
+```
+响应（成功）：
+```json
+{ "type": "group.create_res", "data": { "code": 0, "msg": "ok", "data": { "groupId": 1, "name": "周末徒步群" } } }
+```
+- `name`：群名，必填，非空且长度 ≤ 32，否则回 `400 参数错误`
+- 建群者自动成为群主；`groupId` 为数字自增 id（与 `userId` 命名空间独立），后续群操作均用它定位
+- 未登录回 `401 未登录`
+
+### 5.19 群主拉人 `group.invite`（v1.9）
+
+```json
+{ "type": "group.invite", "seq": 17, "data": { "groupId": 1, "account": "13900139000" } }
+```
+响应（成功）：
+```json
+{ "type": "group.invite_res", "data": { "code": 0, "msg": "ok", "data": {} } }
+```
+- 仅群主可拉人；成功时被拉人在线会收到 `group.added`（`{groupId, name, inviter}`）推送，群内其他在线成员会收到 `group.member_changed`（`{groupId, change: "join", account}`）推送
+- 错误码：`400 参数错误`（`groupId` 缺失/非整数）/ `404 群不存在` / `404 目标用户不存在` / `403 仅群主可拉人` / `403 群已满`（50 人，含群主）/ `409 对方不是你的联系人`（被拉人须先是邀请人的联系人）/ `409 对方已在群中`
+
+### 5.20 退群 `group.leave`（v1.9）
+
+```json
+{ "type": "group.leave", "seq": 18, "data": { "groupId": 1 } }
+```
+响应（成功）：
+```json
+{ "type": "group.leave_res", "data": { "code": 0, "msg": "ok", "data": {} } }
+```
+- 成功时群内剩余在线成员会收到 `group.member_changed`（`{groupId, change: "leave", account}`）推送
+- 错误码：`400 参数错误` / `404 群不存在` / `403 群主不能退群` / `403 非群成员`
+
+### 5.21 我的群列表 `group.list`（v1.9）
+
+```json
+{ "type": "group.list", "seq": 19, "data": {} }
+```
+响应（成功）：
+```json
+{ "type": "group.list_res", "data": { "code": 0, "msg": "ok", "data": { "groups": [ { "groupId": 1, "name": "周末徒步群", "memberCount": 3, "isOwner": true } ] } } }
+```
+- 用于客户端启动时拉取群，作为群会话列表入口；`isOwner` 表示我是否为群主
+- 被拉入群但离线时，登录后用 `group.list` 发现新群（配合 `msg.offline` 补群消息，自洽）
+
+### 5.22 群成员列表 `group.members`（v1.9）
+
+```json
+{ "type": "group.members", "seq": 20, "data": { "groupId": 1 } }
+```
+响应（成功）：
+```json
+{ "type": "group.members_res", "data": { "code": 0, "msg": "ok", "data": { "members": [ { "account": "13800138000", "username": "小爱", "joinedTs": 1720000000, "isOwner": true } ] } } }
+```
+- 须为群成员，否则回 `403 非群成员`；`400 参数错误`（`groupId` 缺失/非整数）
+
+### 5.23 群历史 `group.history`（v1.9）
+
+```json
+{ "type": "group.history", "seq": 21, "data": { "groupId": 1, "limit": 50 } }
+```
+响应（成功）：
+```json
+{ "type": "group.history_res", "data": { "code": 0, "msg": "ok", "data": { "msgs": [ { "from": "13800138000", "fromNick": "小爱", "groupId": 1, "groupName": "周末徒步群", "content": "大家好", "ts": 1720000000, "clientMsgId": "...", "messageId": "...", "chatType": "group" } ] } } }
+```
+- `limit` 可选，默认 50，上限 200；`msgs[]` **按时间倒序（最新在前）**，元素含 `groupId`/`groupName`，`chatType` 为 `"group"`
+- 仅返回加群后、退群前的消息；非（曾）成员回 `403 非群成员`
+- 群消息**不做已读**（无群已读回执）；`chat.history` 单聊视图已加群隔离，群消息不会混入
+
 ## 6. 服务端 → 客户端事件
 
 ### 6.1 收到新消息 `msg.recv`（单聊）
@@ -372,9 +447,9 @@
 | 0 | OK | 成功 |
 | 400 | BAD_PACKET | 请求格式错误，检查字段（含不能添加自己） |
 | 401 | NOT_LOGIN | 未登录就发消息，请先登录 |
-| 403 | WRONG_PASSWORD | 登录失败；**对方未开启临时对话/未开启添加** |
-| 404 | USER_NOT_FOUND | 目标用户不存在 / 不存在该待处理请求 / 对方不是你的联系人 |
-| 409 | USER_EXISTS | 注册时登录账号已存在；**对方已是联系人 / 已存在待处理的请求** |
+| 403 | WRONG_PASSWORD | 登录失败；**对方未开启临时对话/未开启添加**；**群场景（非群成员 / 仅群主可拉人 / 群主不能退群 / 群已满）** |
+| 404 | USER_NOT_FOUND | 目标用户不存在 / 不存在该待处理请求 / 对方不是你的联系人 / **群不存在** |
+| 409 | USER_EXISTS | 注册时登录账号已存在；**对方已是联系人 / 已存在待处理的请求**；**拉群时对方不是你的联系人 / 对方已在群中** |
 | 413 | MSG_TOO_LONG | 消息超过 64KB |
 | 429 | TOO_MANY_ATTEMPTS | 登录失败次数过多被临时锁定，稍后再试 |
 | 429 | TOO_MANY_MESSAGES | 消息发送过频被限流，稍后再试 |
@@ -383,8 +458,8 @@
 > `msg` 字段为**中文错误原因**，客户端应依据 `code` 判断错误类型，`msg` 仅用于展示。各 `code` 对应的 `msg`：
 > `400`→无效的封包 / 封包格式错误 / 封包字段错误 / 参数错误 / 未知的指令类型 / 不能添加自己为联系人；
 > `401`→未登录 / 登录凭证无效或已过期；
-> `403`→账号或密码错误 / 对方未开启临时对话，请先添加联系人 / 对方未开启添加，请使用其他方式联系；`404`→目标用户不存在 / 不存在该待处理请求 / 对方不是你的联系人；
-> `409`→账号已存在 / 对方已是你的联系人 / 已存在待处理的请求；`413`→消息内容超长（超过64KB）；
+> `403`→账号或密码错误 / 对方未开启临时对话，请先添加联系人 / 对方未开启添加，请使用其他方式联系 / 非群成员 / 仅群主可拉人 / 群主不能退群 / 群已满；`404`→目标用户不存在 / 不存在该待处理请求 / 对方不是你的联系人 / 群不存在；
+> `409`→账号已存在 / 对方已是你的联系人 / 已存在待处理的请求 / 对方不是你的联系人 / 对方已在群中；`413`→消息内容超长（超过64KB）；
 > `429`→登录尝试过于频繁，请稍后再试 / 消息发送过于频繁，请稍后再试；`500`→服务器内部错误
 
 ## 8. 客户端实现指引
@@ -435,6 +510,16 @@ CONNECTED(已登录) --auth.logout 成功--> CONNECTED(未登录)
 5. **成为联系人**：同意后请求方收 `contact.added` 推送；双方均可 `contact.list` 拉取完整联系人列表
 6. **对话**：此时 `msg.send {to: 对方 account}` 必可发送（联系人无需 `allowTempChat`）；若对方关闭临时对话，非联系人在 `contact.request` 成功前 `msg.send` 会回 `403 对方未开启临时对话，请先添加联系人`
 7. **删除**：需要时 `contact.delete {account}` 移除联系人，对方收 `contact.deleted` 推送
+
+### 8.7 建群 → 拉人 → 群聊流程（v1.9）
+
+联系人之间发起群聊：
+
+1. **建群**：群主发起 `group.create {name}` → `group.create_res` 拿到 `groupId`
+2. **拉人**：群主逐个 `group.invite {groupId, account}`（被拉人须是群主的联系人，否则 `409 对方不是你的联系人`）→ `group.invite_res` 成功；被拉人在线收 `group.added` 推送（`{groupId, name, inviter}`），群内其他在线成员收 `group.member_changed`（`change: "join"`）；被拉人离线时登录后用 `group.list` 发现新群
+3. **群聊**：成员 `msg.send {to: groupId, chatType: "group"}` → `msg.ack`；在线成员收 `msg.recv`（含 `groupId`/`groupName`，发送者不回显），离线成员登录后经 `msg.offline` 补发
+4. **成员/历史**：打开群会话时 `group.members` 拉成员、`group.history` 拉历史（仅加群后可见）；群消息不做已读
+5. **退群**：成员 `group.leave {groupId}` → `group.leave_res`；剩余在线成员收 `group.member_changed`（`change: "leave"`）；群主不能退群（`403 群主不能退群`）
 
 ## 9. Qt 与 Web 接入要点对照
 
