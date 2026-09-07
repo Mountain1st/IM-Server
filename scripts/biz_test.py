@@ -721,9 +721,6 @@ def main():
     r = json.loads(b.recv())
     check("group invite non-owner 403", r["type"] == "group.invite_res"
           and r["data"]["code"] == 403)
-    # 秒级时间戳：history 按 ts > joined 过滤，等待 1s 避开同秒边界
-    #（服务端同秒 join+发言查不到历史，已记入 task-5-report 自审发现）
-    time.sleep(1.1)
     # 群发消息：a 发，b 收到（from/groupId/chatType 校验），a 不回显
     a.send(env("msg.send", {"to": gid, "content": "hello group", "clientMsgId": "g1",
                             "chatType": "group"}))
