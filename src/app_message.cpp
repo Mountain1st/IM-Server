@@ -4,6 +4,7 @@
 #include "metrics.hpp"
 #include "session.hpp"
 
+#include <algorithm>
 #include <ctime>
 
 namespace im {
@@ -36,6 +37,38 @@ void AppServer::pushOfflineMessages(int64_t userId,
       {"chatType", m.chatType},
     });
   }
+  // 群离线补发：各群按水位线查行（ts > watermark 且在成员在群期间内），与单聊行按 ts 合并
+  int64_t maxTs = 0;
+  for (const auto& m : stored) maxTs = std::max(maxTs, m.ts);
+  for (const int64_t gid : groupRepo_->listUserGroups(userId)) {
+    int64_t joined = 0, left = 0;
+    if (!groupRepo_->memberPeriod(gid, userId, &joined, &left)) continue;
+    const int64_t wm = groupRepo_->getWatermark(gid, userId);
+    auto grows = msgRepo_->fetchGroupMessages(gid, std::max(wm, joined - 1), left, 100, true);
+    std::string gname;
+    groupRepo_->getGroup(gid, &gname, nullptr);
+    for (const auto& m : grows) {
+      std::string fromNick, fromAccount;
+      userStore_->nickname(m.fromUser, &fromNick);
+      if (!userStore_->accountOf(m.fromUser, &fromAccount)) fromAccount.clear();
+      arr.push_back(json{{"from", fromAccount},
+                         {"fromNick", fromNick},
+                         {"groupId", gid},
+                         {"groupName", gname},
+                         {"content", m.content},
+                         {"ts", m.ts},
+                         {"clientMsgId", m.clientMsgId},
+                         {"messageId", m.messageId},
+                         {"chatType", "group"}});
+      maxTs = std::max(maxTs, m.ts);
+      groupRepo_->setWatermark(gid, userId, m.ts);
+    }
+  }
+  if (!arr.empty()) {
+    // 按 ts 升序合并（单聊行已升序，群行逐群升序追加后整体排序）
+    std::sort(arr.begin(), arr.end(),
+              [](const json& a, const json& b) { return a["ts"] < b["ts"]; });
+  }
   session->reply(makeEnvelopeText("msg.offline", json{{"msgs", arr}}));
 }
 
@@ -46,8 +79,12 @@ void AppServer::onSend(const std::shared_ptr<Session>& session, const json& data
     session->reply(makeEnvelopeText("msg.ack",
         json{{"code", code}, {"msg", msg}, {"clientMsgId", clientMsgId}}));
   };
-  // chatType 仅支持单聊；缺省按 "single" 处理（协议 §3）
+  // chatType：缺省 "single"；"group" 走群分支（协议 v1.9）；其他值拒绝
   std::string chatType = data.value("chatType", "single");
+  if (chatType == "group") {
+    onGroupSend(session, data, content, clientMsgId);
+    return;
+  }
   if (chatType != "single") {
     ack(400, "封包格式错误");
     return;

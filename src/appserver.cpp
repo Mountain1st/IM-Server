@@ -111,6 +111,9 @@ AppServer::AppServer(uint16_t port, size_t ioThreads, size_t workThreads, size_t
           userConfig.mysqlPassword, userConfig.mysqlDb)),
       contactRepo_(std::make_unique<ContactRepository>(
           userConfig.mysqlHost, userConfig.mysqlPort, userConfig.mysqlUser,
+          userConfig.mysqlPassword, userConfig.mysqlDb)),
+      groupRepo_(std::make_unique<GroupRepository>(
+          userConfig.mysqlHost, userConfig.mysqlPort, userConfig.mysqlUser,
           userConfig.mysqlPassword, userConfig.mysqlDb)) {
   if (!msgRepo_->ok()) {
     throw std::runtime_error("消息存储连接失败");
@@ -121,6 +124,11 @@ AppServer::AppServer(uint16_t port, size_t ioThreads, size_t workThreads, size_t
     throw std::runtime_error("联系人存储连接失败");
   }
   LOG_I("[db] 联系人存储: MySQL (host=" << userConfig.mysqlHost << ":"
+        << userConfig.mysqlPort << ", db=" << userConfig.mysqlDb << ")");
+  if (!groupRepo_->ok()) {
+    throw std::runtime_error("群存储连接失败: " + groupRepo_->errStr());
+  }
+  LOG_I("[db] 群存储: MySQL (host=" << userConfig.mysqlHost << ":"
         << userConfig.mysqlPort << ", db=" << userConfig.mysqlDb << ")");
 }
 
@@ -264,6 +272,30 @@ void AppServer::onEnvelope(const std::shared_ptr<Session>& session, const json& 
     }
     if (type == "settings.set") {
       onSettingsSet(session, data);
+      return;
+    }
+    if (type == "group.create") {
+      onGroupCreate(session, data);
+      return;
+    }
+    if (type == "group.invite") {
+      onGroupInvite(session, data);
+      return;
+    }
+    if (type == "group.leave") {
+      onGroupLeave(session, data);
+      return;
+    }
+    if (type == "group.list") {
+      onGroupList(session, data);
+      return;
+    }
+    if (type == "group.members") {
+      onGroupMembers(session, data);
+      return;
+    }
+    if (type == "group.history") {
+      onGroupHistory(session, data);
       return;
     }
     session->reply(makeError(400, "未知的指令类型"));

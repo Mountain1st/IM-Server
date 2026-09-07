@@ -1,6 +1,7 @@
 #pragma once
 
 #include "contact_repository.hpp"
+#include "group_repository.hpp"
 #include "message.hpp"
 #include "message_repository.hpp"
 #include "msg_dedup.hpp"
@@ -78,6 +79,14 @@ private:
   void onContactDelete(const std::shared_ptr<Session>& session, const json& data);
   void onSettingsGet(const std::shared_ptr<Session>& session, const json& data);
   void onSettingsSet(const std::shared_ptr<Session>& session, const json& data);
+  void onGroupCreate(const std::shared_ptr<Session>& session, const json& data);
+  void onGroupInvite(const std::shared_ptr<Session>& session, const json& data);
+  void onGroupLeave(const std::shared_ptr<Session>& session, const json& data);
+  void onGroupList(const std::shared_ptr<Session>& session, const json& data);
+  void onGroupMembers(const std::shared_ptr<Session>& session, const json& data);
+  void onGroupHistory(const std::shared_ptr<Session>& session, const json& data);
+  void onGroupSend(const std::shared_ptr<Session>& session, const json& data,
+                   const std::string& content, const std::string& clientMsgId);
   // 推送 pending 好友请求（登录/重连后补发）
   void pushPendingRequests(int64_t userId, const std::shared_ptr<Session>& session);
   // 生成全局消息 ID（时间戳前缀 + 进程内自增序列，防重启碰撞）
@@ -91,6 +100,7 @@ private:
   std::unique_ptr<UserStore> userStore_;    // MySQL 用户存储（连接失败时构造抛错）
   std::unique_ptr<MessageRepository> msgRepo_; // MySQL 消息存储（离线/历史/已读）
   std::unique_ptr<ContactRepository> contactRepo_; // 联系人/请求/设置存储
+  std::unique_ptr<GroupRepository> groupRepo_;  // 群/成员/水位线存储
   OnlineManager onlineMgr_;
   std::unique_ptr<MsgDedupStore> msgDedup_;    // 消息幂等去重（内存/Redis 双后端）
   std::unique_ptr<RateLimiterStore> msgLimiter_; // msg.send 限流（内存/Redis 双后端）
