@@ -781,12 +781,93 @@ def main():
     r = json.loads(a.recv())
     check("group owner leave 403", r["type"] == "group.leave_res"
           and r["data"]["code"] == 403)
+    # 重入语义：退群成员由群主重新拉入 → 新发言可见、旧时段消息不可见
+    # （"hello group" 为退群前旧消息，"after-rejoin" 为重入后新消息）
+    time.sleep(1.1)  # 跨秒：重入 joined 须大于旧消息 ts（history 按 joined-1 严格大于过滤）
+    a.send(env("group.invite", {"groupId": gid, "account": B}))
+    r = json.loads(a.recv())
+    check("group re-invite ok", r["type"] == "group.invite_res"
+          and r["data"]["code"] == 0)
+    r = json.loads(b.recv())
+    check("group re-added pushed", r["type"] == "group.added"
+          and r["data"]["groupId"] == gid)
+    json.loads(a.recv())  # 消费 group.member_changed
+    a.send(env("msg.send", {"to": gid, "content": "after-rejoin", "clientMsgId": "g5",
+                            "chatType": "group"}))
+    r = json.loads(a.recv())
+    check("group send after rejoin ack ok", r["type"] == "msg.ack"
+          and r["data"]["code"] == 0)
+    r = json.loads(b.recv())
+    check("group recv after rejoin ok", r["type"] == "msg.recv"
+          and r["data"]["content"] == "after-rejoin")
+    b.send(env("group.history", {"groupId": gid}))
+    r = json.loads(b.recv())
+    rejoin_contents = [m["content"] for m in r["data"]["data"]["msgs"]]
+    check("group rejoin sees new", r["data"]["code"] == 0
+          and "after-rejoin" in rejoin_contents)
+    check("group rejoin not sees old", "hello group" not in rejoin_contents)
+    # 50 人上限：新群 + 49 新成员 = 50 人已满，第 51 人 invite → 403 群已满
+    a.send(env("group.create", {"name": "满员群"}))
+    r = json.loads(a.recv())
+    check("group cap create ok", r["type"] == "group.create_res"
+          and r["data"]["code"] == 0)
+    gid2 = r["data"]["data"]["groupId"]
+    # 11 位合规账号：base(9 位)+2 位后缀，跳过已用后缀避免冲突
+    cap_block = {"10", "11", "12", "13", "14", "15", "50", "60", "61", "77"}
+    cap_accounts = []
+    n = 16
+    while len(cap_accounts) < 49:
+        cand = base + "%02d" % n
+        n += 1
+        if cand[len(base):] in cap_block:
+            continue
+        cap_accounts.append(cand)
+    cap_ok = True
+    for i, acct in enumerate(cap_accounts):
+        u = WS()
+        rr = register(u, acct, "pw1234")
+        assert rr["data"]["code"] == 0, rr
+        rr = login(u, acct, "pw1234")
+        assert rr["data"]["code"] == 0, rr
+        u.send(env("contact.request", {"account": A}))
+        json.loads(u.recv())      # request_res
+        json.loads(a.recv())      # contact.request 推送
+        a.send(env("contact.accept", {"account": acct}))
+        json.loads(a.recv())      # accept_res
+        json.loads(u.recv())      # contact.added
+        a.send(env("group.invite", {"groupId": gid2, "account": acct}))
+        r = json.loads(a.recv())
+        if r["type"] == "group.invite_res" and r["data"]["code"] == 0:
+            json.loads(u.recv())  # group.added
+            json.loads(a.recv())  # group.member_changed
+        else:
+            cap_ok = False
+        u.close()
+    check("group cap 49 invites ok", cap_ok)
+    a.send(env("group.members", {"groupId": gid2}))
+    r = json.loads(a.recv())
+    check("group cap members 50", r["type"] == "group.members_res"
+          and r["data"]["code"] == 0
+          and len(r["data"]["data"]["members"]) == 50)
+    # 第 51 人（第 50 个新账号）：先建联再 invite → 403 群已满
+    OVER = base + "78"
+    o = WS(); register(o, OVER, "pw1234"); login(o, OVER, "pw1234")
+    o.send(env("contact.request", {"account": A}))
+    json.loads(o.recv()); json.loads(a.recv())
+    a.send(env("contact.accept", {"account": OVER}))
+    json.loads(a.recv()); json.loads(o.recv())
+    a.send(env("group.invite", {"groupId": gid2, "account": OVER}))
+    r = json.loads(a.recv())
+    check("group invite over cap 403", r["type"] == "group.invite_res"
+          and r["data"]["code"] == 403)
+    o.close()
     g1.close(); g2.close()
     a.close(); b.close()
 
     # 清理本次注册的测试账号及其关联消息（精确账号列表，不误删真实用户）
     import subprocess
-    used = [A, B, C, SINK, SPAM, SINK2, SPAM2, D, E, F, G, H, base + "50", G1, G2]
+    used = [A, B, C, SINK, SPAM, SINK2, SPAM2, D, E, F, G, H, base + "50", G1, G2] \
+        + cap_accounts + [OVER]
     inlist = ",".join("'%s'" % x for x in used)
     # 群表清理必须在 users 删除之前（按 account 查 user_id，无级联外键）
     subprocess.run(["bash", "-c",
