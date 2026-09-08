@@ -113,7 +113,7 @@
 - `content`：消息文本，**上限 64KB**
 - `clientMsgId`：发送端生成（建议 UUID），用于与 `msg.ack` 对齐；**服务端按发送方 + `clientMsgId` 做幂等去重**——5 分钟窗口内重发相同 id，服务端只投递一次但正常回 `msg.ack(code=0)`（客户端网络重试安全）；**被限流拒绝（429）的 `clientMsgId` 不会污染幂等记录**，窗口内重试仍返回 429 而非误报成功
 - `chatType`：可选，缺省 `"single"`；**`"group"` 时 `to` 为数字 `groupId`**（整数必填，见 §5.18 群聊）：群不存在回 `404 群不存在`，非群成员回 `403 非群成员`，`to` 缺失/非整数回 `400 参数错误`
-- **群发送（v1.9）**：请求示例 `{ "type": "msg.send", "seq": 16, "data": { "to": 1, "content": "大家好", "clientMsgId": "8f14e45f-0002", "chatType": "group" } }`；群成员在线收 `msg.recv`（含 `groupId`/`groupName`，发送者不回显），离线登录后经 `msg.offline` 补发；群消息**不做已读**；限流/幂等与单聊同一套规则
+- **群发送（v1.9）**：请求示例 `{ "type": "msg.send", "seq": 16, "data": { "to": 1, "content": "大家好", "clientMsgId": "8f14e45f-0002", "chatType": "group" } }`；内容规则与单聊一致（空消息 `400 参数错误`，超 64KB `413`）；群成员在线收 `msg.recv`（含 `groupId`/`groupName`，发送者不回显），离线登录后经 `msg.offline` 补发（同样不含自己发的消息）；群消息**不做已读**；限流/幂等与单聊同一套规则
 - `msg.ack` 只表示服务端已接收，不代表对方已读
 - 发送限流：携带 `clientMsgId` 每用户 10 秒最多 30 条；空 `clientMsgId` 10 秒最多 5 条；超限 `msg.ack` 回 `429 消息发送过于频繁`，客户端应提示发送过频
 
