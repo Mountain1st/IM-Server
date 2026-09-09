@@ -312,3 +312,21 @@ docker compose up -d --build
 - 容器内 imserver 通过服务名连接：`IM_MYSQL_HOST=mysql`、`IM_REDIS_HOST=redis`（端口 6379）
 - `mysql_data` / `redis_data` 命名卷持久化数据
 - `docker compose` 启用 Redis（`IM_REDIS_ENABLED=1`），token 免密重连跨容器重启不失效
+
+## 11. 安全说明（2026-09-08 审查结论）
+
+### 11.1 已确认安全
+- **无 SQL 注入**：全仓 SQL 经 `mysqlStmtExec` 参数化（`?` 绑定），用户字符串无一拼接进 SQL
+- **密码存储**：PBKDF2-HMAC-SHA256（10 万次迭代）+ 每用户独立 128 位盐，非明文
+- **Token**：256 位随机生成，7 天过期，登出即失效，内存/Redis 只存 SHA-256 摘要
+- **无越权**：`msg.send/history/read/offline_ack`、`group.*`、联系人、设置接口均按 `session->userId()` 校验身份与成员关系，遍历 `userId`/`groupId` 不可读他人数据
+- **登录不泄露存在性**：账号不存在与密码错误统一回 `403 账号或密码错误`
+- **传输层防护**：单消息 2MB 上限、握手 10 秒超时、僵尸连接 60 秒踢除、写缓冲 8MB 防慢消费
+
+### 11.2 已知限制（待加固，按严重度排序）
+1. **高**：`msg.offline_ack` 的 `messageIds` 数组无数量上限，单包可触发大量 DB 更新（需登录）
+2. **高**：登录限流表淘汰逻辑可被海量假账号洗表，目标账号失败计数可被清零（网络可达）
+3. **中**：`clientMsgId` 无长度上限（`content` 有 64KB 帽），超长可致 Redis 大 key
+4. **中**：离线补发 SQL 无 `LIMIT`（`kOfflineMaxPerUser` 配置未生效），长期累积后单包过大
+5. **中**：无单 IP 连接数限制（全局上限默认 `0`=不限，需启动参数开启）
+6. **低**：JSON 无嵌套深度限制；群发扇出约 49 倍出流量放大（建群需 49 个联系人，门槛较高）；登录后 `404` 可探活账号（IM 常见设计）；compose 与缺省配置含明文密码（已入 git 历史，生产部署须轮换并改用环境变量注入）；Redis 缺省无密码（靠 `127.0.0.1` 绑定与内网隔离）；MySQL 单账号全权（未做最小授权）
