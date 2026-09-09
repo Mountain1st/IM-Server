@@ -1,6 +1,7 @@
 #include "mysql_message_repository.hpp"
 
 #include "log.hpp"
+#include "server_config.hpp"
 
 #include <cstdlib>
 #include <cstring>
@@ -69,7 +70,8 @@ std::vector<StoredMessage> MySqlMessageRepository::fetchOffline(int64_t toUser) 
       "SELECT message_id, from_user, to_user, content, ts, client_msg_id, chat_type, status, "
       "group_id FROM messages WHERE to_user = " + std::to_string(toUser) +
       " AND status = " + std::to_string(kMsgOfflinePending) +
-      " AND group_id = 0 ORDER BY ts ASC, id ASC";
+      " AND group_id = 0 ORDER BY ts ASC, id ASC LIMIT " +
+      std::to_string(config::kOfflineMaxPerUser);
   if (mysql_query(client_.handle(), sql.c_str())) {
     LOG_E("[mysql] 查询离线消息失败: " << client_.errStr());
     return out;

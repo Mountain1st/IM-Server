@@ -98,8 +98,9 @@ std::unique_ptr<MsgDedupStore> makeMsgDedup(const RedisStoreConfig& c) {
 
 AppServer::AppServer(uint16_t port, size_t ioThreads, size_t workThreads, size_t maxConnections,
                      std::vector<std::string> allowedOrigins, UserStoreConfig userConfig,
-                     RedisStoreConfig redisConfig)
-    : tcpServer_(std::make_shared<TcpServer>(port, ioThreads, maxConnections)),
+                     RedisStoreConfig redisConfig, size_t maxPerIpConnections)
+    : tcpServer_(std::make_shared<TcpServer>(port, ioThreads, maxConnections,
+                                             maxPerIpConnections)),
       workPool_(workThreads),
       allowedOrigins_(std::move(allowedOrigins)),
       userStore_(std::make_unique<UserStore>(makeUserRepository(userConfig),

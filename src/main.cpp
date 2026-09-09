@@ -101,12 +101,19 @@ int main(int argc, char* argv[]) {
   // 日志初始化（环境变量 IM_LOG_FILE / IM_LOG_LEVEL，见 src/log.hpp）
   im::log::Log::init();
 
+  // 单 IP 并发连接上限：IM_MAX_PER_IP_CONN 覆盖（缺省 100；0 表示不限）
+  size_t maxPerIpConn = im::config::kMaxPerIpConnections;
+  if (const char* v = std::getenv("IM_MAX_PER_IP_CONN")) {
+    maxPerIpConn = static_cast<size_t>(std::atoi(v));
+  }
+
   // 业务层：内部启动工作线程并通知 TcpServer（其负责主从 eventloop）。
   // 用户存储为 MySQL：配置缺失或连接失败时抛异常，这里捕获并明确报错退出。
   std::shared_ptr<im::AppServer> server;
   try {
     server = std::make_shared<im::AppServer>(
-        port, ioThreads, workThreads, maxConnections, allowedOrigins, userConfig, redisConfig);
+        port, ioThreads, workThreads, maxConnections, allowedOrigins, userConfig, redisConfig,
+        maxPerIpConn);
   } catch (const std::exception& e) {
     LOG_E("[server] 启动失败: " << e.what());
     return 1;

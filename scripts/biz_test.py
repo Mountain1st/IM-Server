@@ -468,6 +468,17 @@ def main():
     b2.send(env("msg.offline_ack", {"messageIds": [r["data"]["msgs"][0]["messageId"]]}))
     r = json.loads(b2.recv())
     check("offline_ack ok", r["type"] == "msg.offline_ack_res" and r["data"]["code"] == 0)
+    # 安全加固：offline_ack 的 messageIds 数组超限（>1000）必须拒绝，不能逐条打 DB
+    b3 = WS()
+    r = login(b3, B, "pw1234")
+    check("relogin bob for ack-limit ok", r["type"] == "auth.login_res" and r["data"]["code"] == 0)
+    b3.send(env("msg.offline_ack", {"messageIds": ["x"] * 1500}))
+    r = json.loads(b3.recv())
+    check("offline_ack oversized rejected", r["type"] == "msg.offline_ack_res" and r["data"]["code"] == 400)
+    b3.close()
+    # 安全加固：clientMsgId 超长（>64）必须拒绝（与 DB 列宽对齐，防 Redis 大 key）
+    r = send_msg(a, B, "id-len probe", "y" * 65)
+    check("clientMsgId oversized rejected", r["type"] == "msg.ack" and r["data"]["code"] == 400)
     b2.close()
 
     # v1.8：chat.history 的 to 为登录账号 account；自己对话框（to==自己账号）已落库，

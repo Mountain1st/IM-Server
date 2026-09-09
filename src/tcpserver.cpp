@@ -21,9 +21,11 @@ namespace im {
 TcpServer::TcpServer(uint16_t port, size_t ioThreads)
     : TcpServer(port, ioThreads, 0) {}
 
-TcpServer::TcpServer(uint16_t port, size_t ioThreads, size_t maxConnections)
+TcpServer::TcpServer(uint16_t port, size_t ioThreads, size_t maxConnections,
+                     size_t maxPerIpConnections)
     : ioPool_(std::make_unique<EventLoopThreadPool>(ioThreads)),
-      maxConnections_(maxConnections) {
+      maxConnections_(maxConnections),
+      maxPerIpConnections_(maxPerIpConnections) {
   LOG_I("[server] 配置: 端口 " << port
         << ", 从 eventloop 线程 " << ioThreads);
   // 同时监听 IPv6 与 IPv4：WSL2 的 localhost 中继会按服务器监听的地址族
@@ -205,13 +207,14 @@ void TcpServer::handleAccept() {
 
       g_metrics.connectionsAccepted.fetch_add(1, std::memory_order_relaxed);
       g_metrics.activeConnections.fetch_add(1, std::memory_order_relaxed);
-      deviceNewConnection(cfd);
+      deviceNewConnection(cfd, ip);
     }
   }
 }
 
-void TcpServer::deviceNewConnection(int cfd) {
+void TcpServer::deviceNewConnection(int cfd, const std::string& peerIp) {
   // 连接数上限检查：超限则立即拒绝并关闭（防连接耗尽）
+  // 单 IP 上限检查：同 IP 并发超限同样拒绝（防单 IP 占槽；0 表示不限）
   {
     std::lock_guard<std::mutex> lock(mutex_);
     if (maxConnections_ > 0 && connections_.size() >= maxConnections_) {
@@ -219,6 +222,16 @@ void TcpServer::deviceNewConnection(int cfd) {
             << ")，拒绝 fd=" << cfd);
       ::close(cfd);
       return;
+    }
+    if (maxPerIpConnections_ > 0) {
+      size_t n = perIpCounts_[peerIp];
+      if (n >= maxPerIpConnections_) {
+        LOG_E("[server] IP " << peerIp << " 连接数已达上限 ("
+              << maxPerIpConnections_ << ")，拒绝 fd=" << cfd);
+        ::close(cfd);
+        return;
+      }
+      perIpCounts_[peerIp] = n + 1;
     }
   }
   // 简单分配：客户端 fd 对从线程数量求模，余数决定由哪个从 loop 处理
@@ -229,6 +242,7 @@ void TcpServer::deviceNewConnection(int cfd) {
   {
     std::lock_guard<std::mutex> lock(mutex_);
     connections_.insert(conn);
+    if (maxPerIpConnections_ > 0) connIp_[conn.get()] = peerIp;
   }
   auto self = shared_from_this();
   ioLoop->runInLoop([this, self, conn, ioLoop] {
@@ -241,6 +255,16 @@ void TcpServer::removeConnection(const ConnectionPtr& conn) {
   {
     std::lock_guard<std::mutex> lock(mutex_);
     connections_.erase(conn);
+    // 扣减该连接所属 IP 的计数
+    auto it = connIp_.find(conn.get());
+    if (it != connIp_.end()) {
+      auto jt = perIpCounts_.find(it->second);
+      if (jt != perIpCounts_.end()) {
+        if (jt->second <= 1) perIpCounts_.erase(jt);
+        else --jt->second;
+      }
+      connIp_.erase(it);
+    }
   }
   g_metrics.activeConnections.fetch_sub(1, std::memory_order_relaxed);
   g_metrics.connectionsClosed.fetch_add(1, std::memory_order_relaxed);

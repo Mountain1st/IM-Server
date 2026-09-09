@@ -2,11 +2,14 @@
 
 #include "channel.hpp"
 #include "eventloop.hpp"
+#include "server_config.hpp"
 
 #include <cstdint>
 #include <functional>
 #include <memory>
 #include <mutex>
+#include <string>
+#include <unordered_map>
 #include <unordered_set>
 #include <vector>
 
@@ -23,7 +26,8 @@ class Connection;
 class TcpServer : public std::enable_shared_from_this<TcpServer> {
 public:
   TcpServer(uint16_t port, size_t ioThreads);
-  TcpServer(uint16_t port, size_t ioThreads, size_t maxConnections);
+  TcpServer(uint16_t port, size_t ioThreads, size_t maxConnections,
+            size_t maxPerIpConnections = config::kMaxPerIpConnections);
   ~TcpServer();
 
   using ConnectionPtr = std::shared_ptr<Connection>;
@@ -62,7 +66,7 @@ private:
   bool addListener(int family, bool ipv6Only, uint16_t port,
                    const std::string& label);
   void handleAccept();
-  void deviceNewConnection(int cfd);
+  void deviceNewConnection(int cfd, const std::string& peerIp);
 
   EventLoop acceptLoop_;  // 主 eventloop：绑定监听 fd，负责 accept
   std::unique_ptr<EventLoopThreadPool> ioPool_; // 从 eventloop 线程池：与客户端通信
@@ -70,6 +74,9 @@ private:
   std::mutex mutex_;
   std::unordered_set<ConnectionPtr> connections_;
   size_t maxConnections_ = 0; // 0 表示不限
+  size_t maxPerIpConnections_ = config::kMaxPerIpConnections; // 0 表示不限
+  std::unordered_map<std::string, size_t> perIpCounts_; // IP -> 并发连接数
+  std::unordered_map<Connection*, std::string> connIp_; // 连接 -> IP（释放时扣减）
 
   NewConnectionCallback newConnCb_;
   ConnectionClosedCallback connClosedCb_;

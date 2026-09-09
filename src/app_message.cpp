@@ -80,6 +80,11 @@ void AppServer::onSend(const std::shared_ptr<Session>& session, const json& data
     session->reply(makeEnvelopeText("msg.ack",
         json{{"code", code}, {"msg", msg}, {"clientMsgId", clientMsgId}}));
   };
+  // clientMsgId 长度上限：与 DB 列宽对齐，超长直接拒绝（单聊/群聊同规则）
+  if (clientMsgId.size() > kMaxClientMsgIdBytes) {
+    ack(400, "参数错误");
+    return;
+  }
   // chatType：缺省 "single"；"group" 走群分支（协议 v1.9）；其他值拒绝
   std::string chatType = data.value("chatType", "single");
   if (chatType == "group") {
@@ -198,6 +203,12 @@ void AppServer::onSend(const std::shared_ptr<Session>& session, const json& data
 
 void AppServer::onOfflineAck(const std::shared_ptr<Session>& session, const json& data) {
   // 客户端确认已收到 msg.offline 中的消息，服务端标记为已投递
+  // 数组数量上限：超限直接拒绝，防单包触发海量 DB 更新
+  if (data.contains("messageIds") && data["messageIds"].is_array() &&
+      data["messageIds"].size() > kMaxOfflineAckIds) {
+    session->reply(makeResult("msg.offline_ack_res", 400, "确认数量超限", json::object()));
+    return;
+  }
   std::vector<std::string> messageIds;
   if (data.contains("messageIds") && data["messageIds"].is_array()) {
     for (const auto& v : data["messageIds"]) {

@@ -25,6 +25,8 @@ inline constexpr size_t kMaxQueuedBytes = 8 * 1024 * 1024;
 inline constexpr size_t kMaxMessageBytes = 2 * 1024 * 1024;
 // 单个 WebSocket 帧上限（解析层）
 inline constexpr size_t kMaxFrameBytes = 64u * 1024 * 1024;
+// 单 IP 并发连接上限（防单 IP 建数千连接耗尽 fd/内存；0 表示不限）
+inline constexpr size_t kMaxPerIpConnections = 100;
 
 // ---- Connection（网络读写） ----
 // 读缓冲单次分配大小
@@ -55,6 +57,10 @@ inline constexpr size_t kMaxPasswordLen = 32;
 inline constexpr std::chrono::seconds kSendWindow(10);
 inline constexpr size_t kMaxSendPerWindow = 30;
 inline constexpr size_t kMaxSendNoIdPerWindow = 5;
+// clientMsgId 长度上限（64，与 messages.client_msg_id 列宽对齐，防 Redis 大 key）
+inline constexpr size_t kMaxClientMsgIdBytes = 64;
+// msg.offline_ack 单次确认数量上限（防单包触发海量 DB 更新）
+inline constexpr size_t kMaxOfflineAckIds = 1000;
 
 // ---- 存储（内存态，防膨胀） ----
 // 每用户离线消息上限

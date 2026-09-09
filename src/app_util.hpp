@@ -23,6 +23,8 @@ constexpr size_t kMaxPasswordLen = config::kMaxPasswordLen;
 constexpr std::chrono::seconds kSendWindow(config::kSendWindow);
 constexpr size_t kMaxSendPerWindow = config::kMaxSendPerWindow;
 constexpr size_t kMaxSendNoIdPerWindow = config::kMaxSendNoIdPerWindow;
+constexpr size_t kMaxClientMsgIdBytes = config::kMaxClientMsgIdBytes;
+constexpr size_t kMaxOfflineAckIds = config::kMaxOfflineAckIds;
 
 // 账号格式：10-11 位纯数字（如手机号）。
 // 注册与新建对话（chat.create）均按此校验，不合规回 400；

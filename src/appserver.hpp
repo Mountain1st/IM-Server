@@ -40,9 +40,11 @@ public:
             std::vector<std::string> allowedOrigins, UserStoreConfig userConfig);
   // redisConfig：Redis 连接配置（IM_REDIS_ENABLED=1 启用 token 等存储到 Redis；
   // 连接失败则启动报错退出）
+  // maxPerIpConnections：单 IP 并发连接上限（0 表示不限；缺省见 server_config）
   AppServer(uint16_t port, size_t ioThreads, size_t workThreads, size_t maxConnections,
             std::vector<std::string> allowedOrigins, UserStoreConfig userConfig,
-            RedisStoreConfig redisConfig);
+            RedisStoreConfig redisConfig,
+            size_t maxPerIpConnections = config::kMaxPerIpConnections);
   ~AppServer();
 
   void start();

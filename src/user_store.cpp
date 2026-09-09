@@ -99,25 +99,33 @@ void UserStore::recordFail(const std::string& account, std::chrono::steady_clock
   if (g.failures == 0) g.windowStart = now; // 窗口起点以首次失败计
   ++g.failures;
   // 防表无限膨胀：超限时先清理已过期条目；若仍超限，
-  // 则强淘汰窗口最早（最旧）的条目（跳过当前账号，
-  // 防止攻击者用海量新账号把目标账号的失败计数挤掉，绕过限流）。
+  // 则强淘汰窗口最早（最旧）的条目。跳过当前账号与仍被锁定的账号：
+  // 被锁定账号的计数是限流依据，淘汰它等于给攻击者清零（洗表绕过）。
   if (loginGuards_.size() > kLoginGuardLimit) {
     for (auto it = loginGuards_.begin(); it != loginGuards_.end();) {
       if (now - it->second.windowStart >= kLockWindow) it = loginGuards_.erase(it);
       else ++it;
     }
+    auto locked = [&](const LoginGuard& e) {
+      return e.failures >= kMaxLoginFailures && now - e.windowStart < kLockWindow;
+    };
     while (loginGuards_.size() > kLoginGuardLimit) {
       auto oldest = loginGuards_.end();
       for (auto it = loginGuards_.begin(); it != loginGuards_.end(); ++it) {
         if (it->first == account) continue;
+        if (locked(it->second)) continue; // 被锁定账号不可淘汰
         if (oldest == loginGuards_.end() ||
             it->second.windowStart < oldest->second.windowStart) {
           oldest = it;
         }
       }
-      if (oldest == loginGuards_.end()) break; // 只剩当前条目，无法再淘汰
+      if (oldest == loginGuards_.end()) break; // 无可淘汰条目
       loginGuards_.erase(oldest);
     }
+    // 仍超限说明表内全是被锁定账号：丢弃当前条目，表不再增长。
+    // 此时新账号的失败不被记录（极端压力下对新键 fail-open），
+    // 但已锁定账号的保护不受影响。
+    if (loginGuards_.size() > kLoginGuardLimit) loginGuards_.erase(account);
   }
 }
 
