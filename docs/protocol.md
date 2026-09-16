@@ -1,9 +1,10 @@
-# IM 协议文档（v1.9）
+# IM 协议文档（v2.0）
 
 > 本协议为服务端、Qt 客户端、Web 客户端三端共用的统一消息协议。
 > 传输层为 WebSocket 文本帧（UTF-8 编码的 JSON 字符串）。
 
-**版本变更（v0.1 → v1.9）**
+**版本变更（v0.1 → v2.0）**
+- v2.0 **群管理闭环**：新增 `group.kick/transfer/dissolve/rename/announce`（踢人、转让群主、解散群、改群名、群公告）；新增推送 `group.removed/owner_changed/dissolved/renamed/announced`（踢人复用 `group.member_changed(kick)`）；`group.list` 条目新增 `announcement`/`announceTs`（已解散群不列出）；解散后除 `group.history` 外其余群操作回 `404 群已解散`
 - v1.9 **群聊最小闭环**：新增 `group.create/invite/leave/list/members/history`（建群、群主拉人、退群、列表、成员、历史）；`msg.send` 支持 `chatType: "group"`（`to` 为数字 groupId）；群消息单行存储（`to_user=0, group_id=G`），离线按水位线补发；`msg.recv/msg.offline` 群载荷含 `groupId/groupName`；群不做已读；`chat.history`/`msg.read` 单聊视图加群隔离
 - v1.8.1 **联系人列表恒含"自己"**：`contact.list` 返回中恒有一条 `account=自己账号、username=自己昵称` 的联系人，排第一位；新用户注册时自动建立（写入 contacts 表），存量用户可用 `db/migrate_self_contact.sql` 一次性补齐；登录不重复写入
 - v1.8 **联系人体系与隐私设置**：新增 `user.search`（按账号/昵称模糊搜索，受 `searchable` 控制）；`contact.request/accept/reject/list/requests/delete`（好友请求状态机，同意后双方成为联系人；`contact.request` 在线推送、离线登录补发）；`settings.get/set` 三开关（`allowTempChat` 允许非联系人临时对话、`searchable` 可被搜索、`allowAdd` 可被添加）；`msg.send` 权限：自己对话框/联系人/目标开启临时对话才可发送，否则 `403 对方未开启临时对话`；**自己对话框统一为 `to==自己 account`（删除 `to:0` 特例），消息落库、历史可查**
@@ -109,6 +110,11 @@
 | `group.list` | `{}` | 拉取我的群列表（v1.9），回 `group.list_res` |
 | `group.members` | `{ "groupId": 1 }` | 拉取群成员列表（v1.9，须为群成员），回 `group.members_res` |
 | `group.history` | `{ "groupId": 1, "limit": 50(可选) }` | 拉取群历史（v1.9，仅加群后、退群前可见，按 ts 倒序，默认 50 条，上限 200），回 `group.history_res` |
+| `group.kick` | `{ "groupId": 1, "account": "<对方账号>" }` | 踢人（v2.0，仅群主），回 `group.kick_res`；成功推送被踢者 `group.removed`、其余在线成员 `group.member_changed(kick)` |
+| `group.transfer` | `{ "groupId": 1, "account": "<对方账号>" }` | 转让群主（v2.0，仅群主，原群主变为普通成员），回 `group.transfer_res`；成功推送在线成员 `group.owner_changed` |
+| `group.dissolve` | `{ "groupId": 1 }` | 解散群（v2.0，仅群主），回 `group.dissolve_res`；成功推送解散前在线成员 `group.dissolved` |
+| `group.rename` | `{ "groupId": 1, "name": "新群名" }` | 改群名（v2.0，仅群主，`name` 非空且长度 ≤ 32），回 `group.rename_res`；成功推送在线成员 `group.renamed` |
+| `group.announce` | `{ "groupId": 1, "content": "公告正文" }` | 群公告（v2.0，仅群主，`content` ≤ 1024 字节，空=清空），回 `group.announce_res`；成功推送在线成员 `group.announced`（正文走 `group.list` 拉取） |
 | `heartbeat` | `{}` | 已预留但**暂未实现**：发送将返回 `400 未知的指令类型`；心跳请依赖 WebSocket 层 Ping/Pong |
 
 约束：
@@ -123,6 +129,7 @@
 - **三开关（v1.8）**：`allowTempChat`（是否允许非联系人给自己发临时对话）、`searchable`（是否可被 `user.search` 搜索到）、`allowAdd`（是否可被添加为联系人）；三者**默认全开**；`allowTempChat=0` 时非联系人发送被 403 拒绝；`searchable=0` 时搜索结果不返回该用户；`allowAdd=0` 时对方 `contact.request` 回 `403 对方未开启添加，请使用其他方式联系`
 - `msg.send` 的 `chatType` 可选，缺省 `"single"`；**`single` 时 `to` 为目标登录账号 `account`**（单聊权限与落库规则见上）；**`group` 时 `to` 为数字 `groupId`（整数必填）**：群不存在回 `404 群不存在`，非群成员回 `403 非群成员`，`to` 缺失/非整数回 `400 参数错误`；其他 `chatType` 值回 `400 封包格式错误`；**群发送同样校验内容**：空消息回 `400 参数错误`，超 64KB 回 `413 消息内容超长（超过64KB）`
 - **群聊约束（v1.9）**：`group.create` 的 `name` 非空且长度 ≤ 32，否则 `400 参数错误`；`group.invite` 仅群主可拉人（非群主 `403 仅群主可拉人`），被拉人须是邀请人的联系人（否则 `409 对方不是你的联系人`），已在群 `409 对方已在群中`，群满（50 人，含群主）`403 群已满`，群不存在 / 目标不存在各回 `404 群不存在` / `404 目标用户不存在`，`groupId` 缺失或非整数 `400 参数错误`；`group.leave` 群主不能退群（`403 群主不能退群`），非成员退群 `403 非群成员`，群不存在 `404 群不存在`；`group.members` / `group.history` 非（曾）成员 `403 非群成员`；群消息**不做已读**（无群已读回执，`msg.read` 仅限单聊视图）
+- **群管理（v2.0）**：`group.kick/transfer/dissolve/rename/announce` 仅群主可操作（非群主 `403 仅群主可操作`）；`groupId` 缺失/非整数 `400 参数错误`，群不存在 `404 群不存在`；已解散群操作（除 `group.history`）回 `404 群已解散`；`group.kick` 不能踢群主本人（`409 不能踢群主`）、目标不存在 `404 目标用户不存在`、非成员 `409 目标非群成员`；`group.transfer` 只能转给现群成员（`409 不能转让给自己` / `409 目标非群成员`），原群主变为普通成员；`group.rename` 的 `name` 非空且长度 ≤ 32（同建群，否则 `400 参数错误`）；`group.announce` 的 `content` ≤ 1024 字节（超限 `413 消息内容超长`），空=清空；被踢可被重新拉入，重入后仅看新窗口历史（与退群一致）
 - **群存储与补发（v1.9）**：群消息单行存储（`to_user=0, group_id=G`）；在线成员直接收 `msg.recv`（发送者不回显），离线成员按水位线在登录/重连时经 `msg.offline` 合并补发（补发同样不含发送者自己发的消息）；`chat.history` / `msg.read` 单聊视图均加群隔离（`group_id=0`），群消息不混入单聊
 - `msg.send` 的 `clientMsgId` 由发送端生成（建议 UUID），用于与 `msg.ack` 对齐与幂等去重；**同一发送方在 5 分钟窗口内重发相同 `clientMsgId`，服务端只投递一次**，重复请求仍正常回 `msg.ack(code=0)`
 - `msg.send` 限流：携带 `clientMsgId` 每用户 10 秒窗口最多 30 条；**空 `clientMsgId` 不参与去重，走更严限制：10 秒窗口最多 5 条**；超限回 `429 消息发送过于频繁`（`msg.ack` 携带该错误码）
@@ -161,11 +168,21 @@
 | `group.create_res` | `{ "code": 0, "msg": "ok", "data": { "groupId": 1, "name": "..." } }` | 建群结果；`400` 参数错误（`name` 为空或超长） |
 | `group.invite_res` | `{ "code": 0, "msg": "ok", "data": {} }` | 群主拉人结果；`400` 参数错误 / `404` 群不存在 / 目标用户不存在 / `403` 仅群主可拉人 / 群已满 / `409` 对方不是你的联系人 / 对方已在群中 |
 | `group.leave_res` | `{ "code": 0, "msg": "ok", "data": {} }` | 退群结果；`404` 群不存在 / `403` 群主不能退群 / 非群成员 |
-| `group.list_res` | `{ "code": 0, "msg": "ok", "data": { "groups": [ { "groupId": 1, "name": "...", "memberCount": 2, "isOwner": true }, ... ] } }` | 我的群列表；`isOwner` 表示我是否为群主 |
+| `group.kick_res` | `{ "code": 0, "msg": "ok", "data": {} }` | 踢人结果；`400` 参数错误 / `404` 群不存在 / 目标用户不存在 / 群已解散 / `403` 仅群主可操作 / `409` 不能踢群主 / 目标非群成员 |
+| `group.transfer_res` | `{ "code": 0, "msg": "ok", "data": {} }` | 转让群主结果；`400` 参数错误 / `404` 群不存在 / 目标用户不存在 / 群已解散 / `403` 仅群主可操作 / `409` 不能转让给自己 / 目标非群成员 |
+| `group.dissolve_res` | `{ "code": 0, "msg": "ok", "data": {} }` | 解散群结果；`400` 参数错误 / `404` 群不存在 / 群已解散 / `403` 仅群主可操作 |
+| `group.rename_res` | `{ "code": 0, "msg": "ok", "data": {} }` | 改群名结果；`400` 参数错误（`groupId` 缺失/非整数，`name` 为空或超 32） / `404` 群不存在 / 群已解散 / `403` 仅群主可操作 |
+| `group.announce_res` | `{ "code": 0, "msg": "ok", "data": {} }` | 群公告结果；`400` 参数错误 / `404` 群不存在 / 群已解散 / `403` 仅群主可操作 / `413` 消息内容超长（`content` 超 1024 字节，空=清空） |
+| `group.list_res` | `{ "code": 0, "msg": "ok", "data": { "groups": [ { "groupId": 1, "name": "...", "memberCount": 2, "isOwner": true, "announcement": "...", "announceTs": 1720000000 }, ... ] } }` | 我的群列表；`isOwner` 表示我是否为群主；`announcement`/`announceTs` 为最新群公告正文与发布时间（v2.0，无公告时为空串/0）；已解散群不列出 |
 | `group.members_res` | `{ "code": 0, "msg": "ok", "data": { "members": [ { "account": "...", "username": "昵称", "joinedTs": 1720000000, "isOwner": true }, ... ] } }` | 群成员列表；非群成员 `403 非群成员` |
 | `group.history_res` | `{ "code": 0, "msg": "ok", "data": { "msgs": [ { "from": "<account>", "fromNick": "...", "groupId": 1, "groupName": "...", "content": "...", "ts": 1720000000, "clientMsgId": "...", "messageId": "...", "chatType": "group" }, ... ] } }` | 群历史（仅加群后、退群前可见，按 ts 倒序）；非（曾）成员 `403 非群成员` |
 | `group.added` | `{ "groupId": 1, "name": "...", "inviter": "<邀请人账号>" }` | 被拉入群的推送（在线直接推送；离线登录后用 `group.list` + `msg.offline` 自洽） |
-| `group.member_changed` | `{ "groupId": 1, "change": "join"/"leave", "account": "<变动成员账号>" }` | 群成员变动推送（`join` 有人入群 / `leave` 有人退群），推送给群内在线成员 |
+| `group.member_changed` | `{ "groupId": 1, "change": "join"/"leave"/"kick", "account": "<变动成员账号>" }` | 群成员变动推送（`join` 有人入群 / `leave` 有人退群 / `kick` 有人被踢，v2.0），推送给群内在线成员 |
+| `group.removed` | `{ "groupId": 1, "name": "..." }` | 被踢推送（v2.0，仅推送给被踢的在线者） |
+| `group.owner_changed` | `{ "groupId": 1, "account": "<新群主账号>" }` | 转让群主推送（v2.0），推送给群内在线成员 |
+| `group.dissolved` | `{ "groupId": 1 }` | 解散群推送（v2.0），推送给解散前在线成员 |
+| `group.renamed` | `{ "groupId": 1, "name": "..." }` | 改群名推送（v2.0），推送给群内在线成员 |
+| `group.announced` | `{ "groupId": 1 }` | 群公告推送（v2.0，正文走 `group.list` 拉取，避免大包扇出），推送给群内在线成员 |
 | `error` | `{ "code": 400, "msg": "..." }` | 通用错误事件（简式结构） |
 
 字段细则：
@@ -184,10 +201,10 @@
 | 0 | OK | 成功 |
 | 400 | BAD_PACKET | 封包格式非法 |
 | 401 | NOT_LOGIN | 未登录 / token 无效或过期 |
-| 403 | WRONG_PASSWORD | 账号或密码错误 / **未开启临时对话** / **对方未开启添加** / **群场景（非群成员 / 仅群主可拉人 / 群主不能退群 / 群已满）** |
-| 404 | USER_NOT_FOUND | 目标用户不存在 / **不存在该待处理请求** / **对方不是你的联系人** / **群不存在** |
-| 409 | USER_EXISTS | 登录账号已存在 / **对方已是联系人** / **已存在待处理的请求** / **对方不是你的联系人（拉群）** / **对方已在群中** |
-| 413 | MSG_TOO_LONG | 消息超长（>64KB） |
+| 403 | WRONG_PASSWORD | 账号或密码错误 / **未开启临时对话** / **对方未开启添加** / **群场景（非群成员 / 仅群主可拉人 / 仅群主可操作 / 群主不能退群 / 群已满）** |
+| 404 | USER_NOT_FOUND | 目标用户不存在 / **不存在该待处理请求** / **对方不是你的联系人** / **群不存在 / 群已解散** |
+| 409 | USER_EXISTS | 登录账号已存在 / **对方已是联系人** / **已存在待处理的请求** / **对方不是你的联系人（拉群）** / **对方已在群中 / 不能踢群主 / 目标非群成员 / 不能转让给自己** |
+| 413 | MSG_TOO_LONG | 消息超长（>64KB） / **群公告超长（>1024 字节，文案"消息内容超长"）** |
 | 429 | TOO_MANY_ATTEMPTS | 登录失败次数过多被临时限流 |
 | 429 | TOO_MANY_MESSAGES | `msg.send` 发送过频被限流（`msg.ack` 携带） |
 | 500 | INTERNAL | 服务器内部错误（**预留**，当前版本服务端未返回过该码） |
@@ -195,8 +212,8 @@
 > `msg` 字段为**中文错误原因**，`code` 不变，客户端应依据 `code` 判断错误类型，`msg` 仅用于展示。各 `code` 对应的 `msg`：
 > `400`→无效的封包 / 封包格式错误 / 封包字段错误 / 参数错误 / 未知的指令类型 / 账号须为10-11位数字 / 不能添加自己为联系人；
 > `401`→未登录 / 登录凭证无效或已过期；
-> `403`→账号或密码错误 / 对方未开启临时对话，请先添加联系人 / 对方未开启添加，请使用其他方式联系 / 非群成员 / 仅群主可拉人 / 群主不能退群 / 群已满；`404`→目标用户不存在 / 不存在该待处理请求 / 对方不是你的联系人 / 群不存在；
-> `409`→账号已存在 / 对方已是你的联系人 / 已存在待处理的请求 / 对方不是你的联系人 / 对方已在群中；`413`→消息内容超长（超过64KB）；
+> `403`→账号或密码错误 / 对方未开启临时对话，请先添加联系人 / 对方未开启添加，请使用其他方式联系 / 非群成员 / 仅群主可拉人 / 仅群主可操作 / 群主不能退群 / 群已满；`404`→目标用户不存在 / 不存在该待处理请求 / 对方不是你的联系人 / 群不存在 / 群已解散；
+> `409`→账号已存在 / 对方已是你的联系人 / 已存在待处理的请求 / 对方不是你的联系人 / 对方已在群中 / 不能踢群主 / 目标非群成员 / 不能转让给自己；`413`→消息内容超长（超过64KB） / 消息内容超长（群公告超 1024 字节）；
 > `429`→登录尝试过于频繁，请稍后再试 / 消息发送过于频繁，请稍后再试；`500`→服务器内部错误
 
 ## 7. 时序示例
