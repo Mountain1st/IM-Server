@@ -84,6 +84,8 @@ private:
   void onGroupCreate(const std::shared_ptr<Session>& session, const json& data);
   void onGroupInvite(const std::shared_ptr<Session>& session, const json& data);
   void onGroupLeave(const std::shared_ptr<Session>& session, const json& data);
+  void onGroupKick(const std::shared_ptr<Session>& session, const json& data);
+  void onGroupTransfer(const std::shared_ptr<Session>& session, const json& data);
   void onGroupList(const std::shared_ptr<Session>& session, const json& data);
   void onGroupMembers(const std::shared_ptr<Session>& session, const json& data);
   void onGroupHistory(const std::shared_ptr<Session>& session, const json& data);

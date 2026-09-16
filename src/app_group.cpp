@@ -132,6 +132,127 @@ void AppServer::onGroupLeave(const std::shared_ptr<Session>& session, const json
   }
 }
 
+void AppServer::onGroupKick(const std::shared_ptr<Session>& session, const json& data) {
+  int64_t groupId = 0;
+  if (data.contains("groupId") && data["groupId"].is_number_integer()) {
+    groupId = data["groupId"].get<int64_t>();
+  } else {
+    session->reply(makeResult("group.kick_res", 400, "参数错误", json::object()));
+    return;
+  }
+  std::string name;
+  int64_t ownerId = 0;
+  bool dissolved = false;
+  if (!groupRepo_->getGroup(groupId, &name, &ownerId, nullptr, nullptr, &dissolved)) {
+    session->reply(makeResult("group.kick_res", 404, "群不存在", json::object()));
+    return;
+  }
+  if (dissolved) {
+    session->reply(makeResult("group.kick_res", 404, "群已解散", json::object()));
+    return;
+  }
+  if (ownerId != session->userId()) {
+    session->reply(makeResult("group.kick_res", 403, "仅群主可操作", json::object()));
+    return;
+  }
+  const std::string account = data.value("account", "");
+  int64_t target = 0;
+  std::string nick;
+  const int frc = userStore_->lookupAccount(account, &target, &nick);
+  if (frc == 2) {
+    session->reply(makeResult("group.kick_res", 500, "服务器内部错误", json::object()));
+    return;
+  }
+  if (frc != 0) {
+    session->reply(makeResult("group.kick_res", 404, "目标用户不存在", json::object()));
+    return;
+  }
+  if (target == ownerId) {
+    session->reply(makeResult("group.kick_res", 409, "不能踢群主", json::object()));
+    return;
+  }
+  if (!groupRepo_->isMember(groupId, target)) {
+    session->reply(makeResult("group.kick_res", 409, "目标非群成员", json::object()));
+    return;
+  }
+  const int64_t now = static_cast<int64_t>(std::time(nullptr));
+  groupRepo_->removeMember(groupId, target, now);  // 同退群：left_ts=now，窗口保留，可重拉
+  session->reply(makeResult("group.kick_res", 0, "ok", json::object()));
+  // 被踢者（在线）收 group.removed，其余在线成员收 member_changed(kick)
+  json removed = {{"groupId", groupId}, {"name", name}};
+  for (auto& t : onlineMgr_.sessions(target)) {
+    t->reply(makeEnvelopeText("group.removed", removed));
+  }
+  std::string targetAccount;
+  userStore_->accountOf(target, &targetAccount);
+  json changed = {{"groupId", groupId}, {"change", "kick"}, {"account", targetAccount}};
+  for (const int64_t uid : groupRepo_->listMemberIds(groupId)) {
+    for (auto& t : onlineMgr_.sessions(uid)) {
+      t->reply(makeEnvelopeText("group.member_changed", changed));
+    }
+  }
+}
+
+void AppServer::onGroupTransfer(const std::shared_ptr<Session>& session, const json& data) {
+  // 转让群主：仅群主可操作，目标须是群内他人
+  int64_t groupId = 0;
+  if (data.contains("groupId") && data["groupId"].is_number_integer()) {
+    groupId = data["groupId"].get<int64_t>();
+  } else {
+    session->reply(makeResult("group.transfer_res", 400, "参数错误", json::object()));
+    return;
+  }
+  std::string name;
+  int64_t ownerId = 0;
+  bool dissolved = false;
+  if (!groupRepo_->getGroup(groupId, &name, &ownerId, nullptr, nullptr, &dissolved)) {
+    session->reply(makeResult("group.transfer_res", 404, "群不存在", json::object()));
+    return;
+  }
+  if (dissolved) {
+    session->reply(makeResult("group.transfer_res", 404, "群已解散", json::object()));
+    return;
+  }
+  if (ownerId != session->userId()) {
+    session->reply(makeResult("group.transfer_res", 403, "仅群主可操作", json::object()));
+    return;
+  }
+  const std::string account = data.value("account", "");
+  int64_t target = 0;
+  std::string nick;
+  const int frc = userStore_->lookupAccount(account, &target, &nick);
+  if (frc == 2) {
+    session->reply(makeResult("group.transfer_res", 500, "服务器内部错误", json::object()));
+    return;
+  }
+  if (frc != 0) {
+    session->reply(makeResult("group.transfer_res", 404, "目标用户不存在", json::object()));
+    return;
+  }
+  if (target == session->userId()) {
+    session->reply(makeResult("group.transfer_res", 409, "不能转让给自己", json::object()));
+    return;
+  }
+  if (!groupRepo_->isMember(groupId, target)) {
+    session->reply(makeResult("group.transfer_res", 409, "目标非群成员", json::object()));
+    return;
+  }
+  if (!groupRepo_->setOwner(groupId, target)) {
+    session->reply(makeResult("group.transfer_res", 500, "服务器内部错误", json::object()));
+    return;
+  }
+  session->reply(makeResult("group.transfer_res", 0, "ok", json::object()));
+  // 通知在线成员新群主
+  std::string targetAccount;
+  userStore_->accountOf(target, &targetAccount);
+  json changed = {{"groupId", groupId}, {"account", targetAccount}};
+  for (const int64_t uid : groupRepo_->listMemberIds(groupId)) {
+    for (auto& t : onlineMgr_.sessions(uid)) {
+      t->reply(makeEnvelopeText("group.owner_changed", changed));
+    }
+  }
+}
+
 void AppServer::onGroupList(const std::shared_ptr<Session>& session, const json& data) {
   const auto gids = groupRepo_->listUserGroups(session->userId());
   json arr = json::array();
