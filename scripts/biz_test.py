@@ -1047,6 +1047,10 @@ def main():
     r = json.loads(m1.recv())
     check("mgmt announce dissolved 404", r["type"] == "group.announce_res"
           and r["data"]["code"] == 404)
+    m1.send(env("group.transfer", {"groupId": dgid, "account": M2}))
+    r = json.loads(m1.recv())
+    check("mgmt transfer dissolved 404", r["type"] == "group.transfer_res"
+          and r["data"]["code"] == 404)
     # 曾成员仍可查解散前窗口历史
     m2.send(env("group.history", {"groupId": dgid}))
     r = json.loads(m2.recv())

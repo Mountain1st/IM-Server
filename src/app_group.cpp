@@ -244,7 +244,7 @@ void AppServer::onGroupTransfer(const std::shared_ptr<Session>& session, const j
     return;
   }
   if (!groupRepo_->setOwner(groupId, target)) {
-    session->reply(makeResult("group.transfer_res", 500, "服务器内部错误", json::object()));
+    session->reply(makeResult("group.transfer_res", 404, "群已解散", json::object()));
     return;
   }
   session->reply(makeResult("group.transfer_res", 0, "ok", json::object()));

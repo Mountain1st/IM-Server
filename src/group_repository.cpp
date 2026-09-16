@@ -149,14 +149,17 @@ bool GroupRepository::setOwner(int64_t groupId, int64_t newOwnerId) {
   if (!client_.ok()) return false;
   int errNo = 0;
   MYSQL_STMT* stmt = mysqlStmtExec(
-      client_.handle(), "UPDATE `groups` SET owner_id = ? WHERE group_id = ?",
+      client_.handle(),
+      "UPDATE `groups` SET owner_id = ? WHERE group_id = ? AND dissolved = 0",
       {std::to_string(newOwnerId), std::to_string(groupId)}, &errNo);
   if (!stmt) {
     LOG_E("[mysql] 转让群主失败 errno=" << errNo);
     return false;
   }
+  // 要求恰好影响 1 行：并发解散赢了竞态时返回 false，上层回 404 群已解散
+  const my_ulonglong affected = mysql_stmt_affected_rows(stmt);
   mysql_stmt_close(stmt);
-  return true;
+  return affected == 1;
 }
 
 bool GroupRepository::dissolveGroup(int64_t groupId, int64_t now) {
