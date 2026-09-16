@@ -874,7 +874,7 @@ def main():
     o.close()
 
     # ---- v2.0 群管理（踢/转让/解散/改名/公告）----
-    # 新账号段 80~85（11 位合规；cap 占用 16~67、OVER 用 78，故选 80 段避碰撞）
+    # 新账号段 80~83（11 位合规；cap 占用 16~67、OVER 用 78，故选 80 段避碰撞）
     M1 = base + "80"; M2 = base + "81"; M3 = base + "82"; M4 = base + "83"
     m1 = WS(); register(m1, M1, "pw1234"); login(m1, M1, "pw1234")
     m2 = WS(); register(m2, M2, "pw1234"); login(m2, M2, "pw1234")
@@ -1022,7 +1022,7 @@ def main():
     check("mgmt dissolve list filtered",
           r["data"]["code"] == 0
           and all(x["groupId"] != dgid for x in r["data"]["data"]["groups"]))
-    # 解散后操作 404：群发 / 拉人 / 成员 / 改名 / 踢人
+    # 解散后操作 404：群发 / 拉人 / 成员 / 改名 / 公告 / 踢人
     m1.send(env("msg.send", {"to": dgid, "content": "x", "clientMsgId": "dd1",
                              "chatType": "group"}))
     r = json.loads(m1.recv())
@@ -1038,6 +1038,14 @@ def main():
     m1.send(env("group.kick", {"groupId": dgid, "account": M2}))
     r = json.loads(m1.recv())
     check("mgmt kick dissolved 404", r["type"] == "group.kick_res"
+          and r["data"]["code"] == 404)
+    m1.send(env("group.rename", {"groupId": dgid, "name": "x"}))
+    r = json.loads(m1.recv())
+    check("mgmt rename dissolved 404", r["type"] == "group.rename_res"
+          and r["data"]["code"] == 404)
+    m1.send(env("group.announce", {"groupId": dgid, "content": "x"}))
+    r = json.loads(m1.recv())
+    check("mgmt announce dissolved 404", r["type"] == "group.announce_res"
           and r["data"]["code"] == 404)
     # 曾成员仍可查解散前窗口历史
     m2.send(env("group.history", {"groupId": dgid}))
