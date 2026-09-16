@@ -2,7 +2,7 @@
 
 本文基于当前工作区源码整理，面向已经学习过 Reactor、希望深入 WebSocket、并发模型和生产化架构的读者。
 
-> **源码状态说明：** 文中的源码行号以当前工作区为准。所述能力（Origin / Host 校验、PBKDF2-HMAC-SHA256、消息限流、协议文档与测试脚本等）均已随版本提交至 `HEAD`（截至 v1.8）。
+> **源码状态说明：** 文中的源码行号以当前工作区为准。所述能力（Origin / Host 校验、PBKDF2-HMAC-SHA256、消息限流、协议文档与测试脚本等）均已随版本提交至 `HEAD`（截至 v2.0，群聊管理）。
 
 ## 1. 项目定位
 
@@ -669,9 +669,14 @@ sequenceDiagram
 | `group.create` | `onGroupCreate()` | 建群（`name` 非空且 ≤ 32），写入 `groups` + 群主成员行，回 `group.create_res`（含 `groupId`） |
 | `group.invite` | `onGroupInvite()` | 仅群主可拉人（被拉人须是邀请人联系人、未在群、未满 50 人）；成功写入成员行，推送被拉人 `group.added`、群内在线成员 `group.member_changed(join)` |
 | `group.leave` | `onGroupLeave()` | 群主不能退群；成员退群写 `left_ts`，推送剩余在线成员 `group.member_changed(leave)` |
-| `group.list` | `onGroupList()` | 拉取我的群（`listUserGroups`，附 `memberCount`/`isOwner`） |
+| `group.list` | `onGroupList()` | 拉取我的群（`listUserGroups`，附 `memberCount`/`isOwner`/`announcement`/`announceTs`，已解散群不列出） |
 | `group.members` | `onGroupMembers()` | 拉取群成员（须为群成员，附 `account`/`username`/`joinedTs`/`isOwner`） |
-| `group.history` | `onGroupHistory()` | 拉取群历史（按成员 `joined_ts`/`left_ts` 窗口过滤，倒序，默认 50 上限 200） |
+| `group.history` | `onGroupHistory()` | 拉取群历史（按成员 `joined_ts`/`left_ts` 窗口过滤，倒序，默认 50 上限 200；已解散群仍可查窗口） |
+| `group.kick` | `onGroupKick()` | 仅群主踢人（复用退群路径置 `left_ts`，可重拉、窗口可见）；被踢者收 `group.removed`，其余成员收 `member_changed(kick)` |
+| `group.transfer` | `onGroupTransfer()` | 仅群主转让给现成员（`setOwner` 带 `dissolved=0` 守卫）；原群主变普通成员（之后可退群），成员收 `group.owner_changed` |
+| `group.dissolve` | `onGroupDissolve()` | 仅群主解散（置 `dissolved=1`）；成员收 `group.dissolved`；除 history 外群操作回 404 群已解散 |
+| `group.rename` | `onGroupRename()` | 仅群主改名（非空 ≤ 32）；成员收 `group.renamed` |
+| `group.announce` | `onGroupAnnounce()` | 仅群主发布公告（≤ 1024 字节，空 = 清空）；成员收 `group.announced`（只带 groupId，正文走 `group.list` 拉取） |
 | `heartbeat` | 无 | 文档列出但代码未实现（返回 400 未知的指令类型） |
 
 路由位置：`src/appserver.cpp`（onEnvelope 路由）+ `src/app_group.cpp`（群处理函数）。
