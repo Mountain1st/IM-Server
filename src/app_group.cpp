@@ -39,8 +39,13 @@ void AppServer::onGroupInvite(const std::shared_ptr<Session>& session, const jso
   }
   std::string name;
   int64_t ownerId = 0;
-  if (!groupRepo_->getGroup(groupId, &name, &ownerId)) {
+  bool dissolved = false;
+  if (!groupRepo_->getGroup(groupId, &name, &ownerId, nullptr, nullptr, &dissolved)) {
     session->reply(makeResult("group.invite_res", 404, "群不存在", json::object()));
+    return;
+  }
+  if (dissolved) {
+    session->reply(makeResult("group.invite_res", 404, "群已解散", json::object()));
     return;
   }
   if (ownerId != session->userId()) {
@@ -253,17 +258,64 @@ void AppServer::onGroupTransfer(const std::shared_ptr<Session>& session, const j
   }
 }
 
+void AppServer::onGroupDissolve(const std::shared_ptr<Session>& session, const json& data) {
+  int64_t groupId = 0;
+  if (data.contains("groupId") && data["groupId"].is_number_integer()) {
+    groupId = data["groupId"].get<int64_t>();
+  } else {
+    session->reply(makeResult("group.dissolve_res", 400, "参数错误", json::object()));
+    return;
+  }
+  std::string name;
+  int64_t ownerId = 0;
+  bool dissolved = false;
+  if (!groupRepo_->getGroup(groupId, &name, &ownerId, nullptr, nullptr, &dissolved)) {
+    session->reply(makeResult("group.dissolve_res", 404, "群不存在", json::object()));
+    return;
+  }
+  if (dissolved) {
+    session->reply(makeResult("group.dissolve_res", 404, "群已解散", json::object()));
+    return;
+  }
+  if (ownerId != session->userId()) {
+    session->reply(makeResult("group.dissolve_res", 403, "仅群主可操作", json::object()));
+    return;
+  }
+  // 解散前取现成员（推送 dissolved 事件用）
+  const auto memberIds = groupRepo_->listMemberIds(groupId);
+  const int64_t now = static_cast<int64_t>(std::time(nullptr));
+  if (!groupRepo_->dissolveGroup(groupId, now)) {
+    session->reply(makeResult("group.dissolve_res", 404, "群已解散", json::object()));
+    return;
+  }
+  session->reply(makeResult("group.dissolve_res", 0, "ok", json::object()));
+  // 通知解散前在线成员
+  json evt = {{"groupId", groupId}};
+  for (const int64_t uid : memberIds) {
+    for (auto& t : onlineMgr_.sessions(uid)) {
+      t->reply(makeEnvelopeText("group.dissolved", evt));
+    }
+  }
+}
+
 void AppServer::onGroupList(const std::shared_ptr<Session>& session, const json& data) {
   const auto gids = groupRepo_->listUserGroups(session->userId());
   json arr = json::array();
   for (const int64_t gid : gids) {
     std::string name;
     int64_t ownerId = 0;
-    if (!groupRepo_->getGroup(gid, &name, &ownerId)) continue;
+    std::string announcement;
+    int64_t announceTs = 0;
+    bool dissolved = false;
+    if (!groupRepo_->getGroup(gid, &name, &ownerId, &announcement, &announceTs, &dissolved))
+      continue;
+    if (dissolved) continue;
     arr.push_back(json{{"groupId", gid},
                        {"name", name},
                        {"memberCount", groupRepo_->activeCount(gid)},
-                       {"isOwner", ownerId == session->userId()}});
+                       {"isOwner", ownerId == session->userId()},
+                       {"announcement", announcement},
+                       {"announceTs", announceTs}});
   }
   session->reply(makeResult("group.list_res", 0, "ok", json{{"groups", arr}}));
 }
@@ -274,6 +326,17 @@ void AppServer::onGroupMembers(const std::shared_ptr<Session>& session, const js
     groupId = data["groupId"].get<int64_t>();
   } else {
     session->reply(makeResult("group.members_res", 400, "参数错误", json::object()));
+    return;
+  }
+  std::string name;
+  int64_t ownerId = 0;
+  bool dissolved = false;
+  if (!groupRepo_->getGroup(groupId, &name, &ownerId, nullptr, nullptr, &dissolved)) {
+    session->reply(makeResult("group.members_res", 404, "群不存在", json::object()));
+    return;
+  }
+  if (dissolved) {
+    session->reply(makeResult("group.members_res", 404, "群已解散", json::object()));
     return;
   }
   if (!groupRepo_->isMember(groupId, session->userId())) {
@@ -350,8 +413,13 @@ void AppServer::onGroupSend(const std::shared_ptr<Session>& session, const json&
   }
   std::string gname;
   int64_t ownerId = 0;
-  if (!groupRepo_->getGroup(groupId, &gname, &ownerId)) {
+  bool dissolved = false;
+  if (!groupRepo_->getGroup(groupId, &gname, &ownerId, nullptr, nullptr, &dissolved)) {
     ack(404, "群不存在");
+    return;
+  }
+  if (dissolved) {
+    ack(404, "群已解散");
     return;
   }
   if (content.empty()) {
