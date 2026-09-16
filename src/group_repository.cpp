@@ -39,7 +39,9 @@ int64_t GroupRepository::createGroup(const std::string& name, int64_t ownerId,
   if (!client_.ok()) return 0;
   int errNo = 0;
   MYSQL_STMT* stmt = mysqlStmtExec(
-      client_.handle(), "INSERT INTO `groups` (name, owner_id, created_ts) VALUES (?, ?, ?)",
+      client_.handle(),
+      "INSERT INTO `groups` (name, owner_id, created_ts, announcement, announce_ts, "
+      "dissolved, dissolved_ts) VALUES (?, ?, ?, '', 0, 0, 0)",
       {name, std::to_string(ownerId), std::to_string(now)}, &errNo);
   if (!stmt) {
     LOG_E("[mysql] 建群失败 errno=" << errNo);
@@ -83,19 +85,31 @@ bool GroupRepository::groupExists(int64_t groupId) {
   return found;
 }
 
-bool GroupRepository::getGroup(int64_t groupId, std::string* name, int64_t* ownerId) {
+bool GroupRepository::getGroup(int64_t groupId, std::string* name, int64_t* ownerId,
+                                std::string* announcement, int64_t* announceTs,
+                                bool* dissolved) {
   std::lock_guard<std::mutex> lock(mutex_);
   if (!client_.ok() || groupId <= 0) return false;
   int errNo = 0;
   MYSQL_STMT* stmt = mysqlStmtExec(
-      client_.handle(), "SELECT name, owner_id FROM `groups` WHERE group_id = ? LIMIT 1",
+      client_.handle(),
+      "SELECT name, owner_id, announcement, announce_ts, dissolved FROM `groups` "
+      "WHERE group_id = ? LIMIT 1",
       {std::to_string(groupId)}, &errNo);
   if (!stmt) return false;
   char nameBuf[128] = {0};
   unsigned long nameLen = 0;
   bool nameNull = false;
   int64_t oid = 0;
-  MYSQL_BIND res[2];
+  // 公告上限 1024 字节，2048 字节栈缓冲足够
+  char annBuf[2048] = {0};
+  unsigned long annLen = 0;
+  bool annNull = false;
+  int64_t annTs = 0;
+  bool annTsNull = false;
+  signed char dissolvedTiny = 0;
+  bool dissolvedNull = false;
+  MYSQL_BIND res[5];
   memset(res, 0, sizeof res);
   res[0].buffer_type = MYSQL_TYPE_STRING;
   res[0].buffer = nameBuf;
@@ -104,15 +118,97 @@ bool GroupRepository::getGroup(int64_t groupId, std::string* name, int64_t* owne
   res[0].is_null = &nameNull;
   res[1].buffer_type = MYSQL_TYPE_LONGLONG;
   res[1].buffer = &oid;
+  res[2].buffer_type = MYSQL_TYPE_STRING;
+  res[2].buffer = annBuf;
+  res[2].buffer_length = sizeof annBuf;
+  res[2].length = &annLen;
+  res[2].is_null = &annNull;
+  res[3].buffer_type = MYSQL_TYPE_LONGLONG;
+  res[3].buffer = &annTs;
+  res[3].is_null = &annTsNull;
+  res[4].buffer_type = MYSQL_TYPE_TINY;
+  res[4].buffer = &dissolvedTiny;
+  res[4].is_null = &dissolvedNull;
   bool found = false;
   if (!mysql_stmt_bind_result(stmt, res) && !mysql_stmt_store_result(stmt) &&
       mysql_stmt_fetch(stmt) == 0) {
     if (name) *name = nameNull ? std::string() : std::string(nameBuf, nameLen);
     if (ownerId) *ownerId = oid;
+    if (announcement)
+      *announcement = annNull ? std::string() : std::string(annBuf, annLen);
+    if (announceTs) *announceTs = annTsNull ? 0 : annTs;
+    if (dissolved) *dissolved = !dissolvedNull && dissolvedTiny != 0;
     found = true;
   }
   mysql_stmt_close(stmt);
   return found;
+}
+
+bool GroupRepository::setOwner(int64_t groupId, int64_t newOwnerId) {
+  std::lock_guard<std::mutex> lock(mutex_);
+  if (!client_.ok()) return false;
+  int errNo = 0;
+  MYSQL_STMT* stmt = mysqlStmtExec(
+      client_.handle(), "UPDATE `groups` SET owner_id = ? WHERE group_id = ?",
+      {std::to_string(newOwnerId), std::to_string(groupId)}, &errNo);
+  if (!stmt) {
+    LOG_E("[mysql] 转让群主失败 errno=" << errNo);
+    return false;
+  }
+  mysql_stmt_close(stmt);
+  return true;
+}
+
+bool GroupRepository::dissolveGroup(int64_t groupId, int64_t now) {
+  std::lock_guard<std::mutex> lock(mutex_);
+  if (!client_.ok()) return false;
+  int errNo = 0;
+  MYSQL_STMT* stmt = mysqlStmtExec(
+      client_.handle(),
+      "UPDATE `groups` SET dissolved = 1, dissolved_ts = ? WHERE group_id = ? "
+      "AND dissolved = 0",
+      {std::to_string(now), std::to_string(groupId)}, &errNo);
+  if (!stmt) {
+    LOG_E("[mysql] 解散群失败 errno=" << errNo);
+    return false;
+  }
+  // 要求恰好影响 1 行：重复解散返回 false，上层回 404 群已解散
+  const my_ulonglong affected = mysql_stmt_affected_rows(stmt);
+  mysql_stmt_close(stmt);
+  return affected == 1;
+}
+
+bool GroupRepository::renameGroup(int64_t groupId, const std::string& name) {
+  std::lock_guard<std::mutex> lock(mutex_);
+  if (!client_.ok()) return false;
+  int errNo = 0;
+  MYSQL_STMT* stmt = mysqlStmtExec(
+      client_.handle(), "UPDATE `groups` SET name = ? WHERE group_id = ? AND dissolved = 0",
+      {name, std::to_string(groupId)}, &errNo);
+  if (!stmt) {
+    LOG_E("[mysql] 群改名失败 errno=" << errNo);
+    return false;
+  }
+  mysql_stmt_close(stmt);
+  return true;
+}
+
+bool GroupRepository::setAnnouncement(int64_t groupId, const std::string& text,
+                                      int64_t now) {
+  std::lock_guard<std::mutex> lock(mutex_);
+  if (!client_.ok()) return false;
+  int errNo = 0;
+  MYSQL_STMT* stmt = mysqlStmtExec(
+      client_.handle(),
+      "UPDATE `groups` SET announcement = ?, announce_ts = ? WHERE group_id = ? "
+      "AND dissolved = 0",
+      {text, std::to_string(now), std::to_string(groupId)}, &errNo);
+  if (!stmt) {
+    LOG_E("[mysql] 发布群公告失败 errno=" << errNo);
+    return false;
+  }
+  mysql_stmt_close(stmt);
+  return true;
 }
 
 bool GroupRepository::isMember(int64_t groupId, int64_t userId) {

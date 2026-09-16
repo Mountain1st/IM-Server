@@ -26,8 +26,15 @@ class GroupRepository {
   // 建群，返回 groupId（>0），失败返回 0。
   int64_t createGroup(const std::string& name, int64_t ownerId, int64_t now);
   bool groupExists(int64_t groupId);
-  // 查询群信息，找到返回 true（写出 name/ownerId）。
-  bool getGroup(int64_t groupId, std::string* name, int64_t* ownerId);
+  // 查询群信息，找到返回 true（写出 name/ownerId；后三个可选，传 nullptr 则不写出）。
+  bool getGroup(int64_t groupId, std::string* name, int64_t* ownerId,
+                std::string* announcement = nullptr, int64_t* announceTs = nullptr,
+                bool* dissolved = nullptr);
+  // 转让群主 / 解散 / 改名 / 发布公告（空 text=清空）。成功返回 true。
+  bool setOwner(int64_t groupId, int64_t newOwnerId);
+  bool dissolveGroup(int64_t groupId, int64_t now);
+  bool renameGroup(int64_t groupId, const std::string& name);
+  bool setAnnouncement(int64_t groupId, const std::string& text, int64_t now);
 
   // ---- 成员 ----
   bool isMember(int64_t groupId, int64_t userId);  // 现成员（走缓存）
