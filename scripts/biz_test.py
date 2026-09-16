@@ -872,12 +872,242 @@ def main():
     check("group invite over cap 403", r["type"] == "group.invite_res"
           and r["data"]["code"] == 403)
     o.close()
+
+    # ---- v2.0 群管理（踢/转让/解散/改名/公告）----
+    # 新账号段 80~85（11 位合规；cap 占用 16~67、OVER 用 78，故选 80 段避碰撞）
+    M1 = base + "80"; M2 = base + "81"; M3 = base + "82"; M4 = base + "83"
+    m1 = WS(); register(m1, M1, "pw1234"); login(m1, M1, "pw1234")
+    m2 = WS(); register(m2, M2, "pw1234"); login(m2, M2, "pw1234")
+    m3 = WS(); register(m3, M3, "pw1234"); login(m3, M3, "pw1234")
+    m4 = WS(); register(m4, M4, "pw1234"); login(m4, M4, "pw1234")
+
+    def _befriend(x, xacct, y, yacct):
+        # 两账号建联（request+accept，消费双方推送）
+        x.send(env("contact.request", {"account": yacct}))
+        json.loads(x.recv()); json.loads(y.recv())
+        y.send(env("contact.accept", {"account": xacct}))
+        json.loads(y.recv()); json.loads(x.recv())
+    _befriend(m1, M1, m2, M2)
+    _befriend(m1, M1, m3, M3)
+    _befriend(m2, M2, m3, M3)
+
+    # 踢人组：M1 群主，M2/M3 成员，M4 为圈外人（存在但非成员）
+    m1.send(env("group.create", {"name": "踢人组"}))
+    r = json.loads(m1.recv())
+    check("mgmt kick create ok", r["type"] == "group.create_res" and r["data"]["code"] == 0)
+    kgid = r["data"]["data"]["groupId"]
+    m1.send(env("group.invite", {"groupId": kgid, "account": M2}))
+    check("mgmt kick invite M2 ok", json.loads(m1.recv())["data"]["code"] == 0)
+    json.loads(m2.recv()); json.loads(m1.recv())
+    m1.send(env("group.invite", {"groupId": kgid, "account": M3}))
+    check("mgmt kick invite M3 ok", json.loads(m1.recv())["data"]["code"] == 0)
+    json.loads(m3.recv()); json.loads(m1.recv()); json.loads(m2.recv())
+    # 踢前旧消息（重拉后应不可见）
+    m1.send(env("msg.send", {"to": kgid, "content": "kick-old", "clientMsgId": "kk0",
+                             "chatType": "group"}))
+    check("mgmt kick-old ack ok", json.loads(m1.recv())["data"]["code"] == 0)
+    json.loads(m2.recv()); json.loads(m3.recv())
+    # 群主踢成员 ok；被踢者收 removed，其余成员收 kick 事件
+    m1.send(env("group.kick", {"groupId": kgid, "account": M2}))
+    r = json.loads(m1.recv())
+    check("mgmt kick ok", r["type"] == "group.kick_res" and r["data"]["code"] == 0)
+    r = json.loads(m2.recv())
+    check("mgmt kick removed pushed", r["type"] == "group.removed"
+          and r["data"]["groupId"] == kgid)
+    r = json.loads(m1.recv())
+    check("mgmt kick member_changed", r["type"] == "group.member_changed"
+          and r["data"]["groupId"] == kgid and r["data"]["change"] == "kick"
+          and r["data"]["account"] == M2)
+    json.loads(m3.recv())  # 消费 m3 的 kick 事件
+    # 被踢者群发 403
+    m2.send(env("msg.send", {"to": kgid, "content": "x", "clientMsgId": "kk1",
+                             "chatType": "group"}))
+    r = json.loads(m2.recv())
+    check("mgmt kicked send 403", r["type"] == "msg.ack" and r["data"]["code"] == 403)
+    # 踢人权限：非群主 403、踢群主本人 409、踢非成员 409、目标不存在 404
+    m3.send(env("group.kick", {"groupId": kgid, "account": M1}))
+    r = json.loads(m3.recv())
+    check("mgmt kick non-owner 403", r["type"] == "group.kick_res"
+          and r["data"]["code"] == 403)
+    m1.send(env("group.kick", {"groupId": kgid, "account": M1}))
+    r = json.loads(m1.recv())
+    check("mgmt kick owner-self 409", r["type"] == "group.kick_res"
+          and r["data"]["code"] == 409)
+    m1.send(env("group.kick", {"groupId": kgid, "account": M4}))
+    r = json.loads(m1.recv())
+    check("mgmt kick non-member 409", r["type"] == "group.kick_res"
+          and r["data"]["code"] == 409)
+    m1.send(env("group.kick", {"groupId": kgid, "account": NOBODY}))
+    r = json.loads(m1.recv())
+    check("mgmt kick missing 404", r["type"] == "group.kick_res"
+          and r["data"]["code"] == 404)
+    # 重拉：跨秒保证新窗口，重拉后新发言可见、旧消息不可见
+    time.sleep(1.1)
+    m1.send(env("group.invite", {"groupId": kgid, "account": M2}))
+    check("mgmt kick re-invite ok", json.loads(m1.recv())["data"]["code"] == 0)
+    json.loads(m2.recv()); json.loads(m1.recv()); json.loads(m3.recv())
+    m1.send(env("msg.send", {"to": kgid, "content": "kick-new", "clientMsgId": "kk2",
+                             "chatType": "group"}))
+    check("mgmt kick-new ack ok", json.loads(m1.recv())["data"]["code"] == 0)
+    json.loads(m2.recv()); json.loads(m3.recv())
+    m2.send(env("group.history", {"groupId": kgid}))
+    r = json.loads(m2.recv())
+    contents = [x["content"] for x in r["data"]["data"]["msgs"]]
+    check("mgmt kick rejoin sees new", r["data"]["code"] == 0 and "kick-new" in contents)
+    check("mgmt kick rejoin not sees old", "kick-old" not in contents)
+
+    # 转让组：M1 群主转给 M2
+    m1.send(env("group.create", {"name": "转让组"}))
+    tgid = json.loads(m1.recv())["data"]["data"]["groupId"]
+    m1.send(env("group.invite", {"groupId": tgid, "account": M2}))
+    json.loads(m1.recv()); json.loads(m2.recv()); json.loads(m1.recv())
+    m1.send(env("group.transfer", {"groupId": tgid, "account": M2}))
+    r = json.loads(m1.recv())
+    check("mgmt transfer ok", r["type"] == "group.transfer_res" and r["data"]["code"] == 0)
+    r = json.loads(m2.recv())
+    check("mgmt owner_changed pushed", r["type"] == "group.owner_changed"
+          and r["data"]["groupId"] == tgid and r["data"]["account"] == M2)
+    json.loads(m1.recv())  # 消费 m1 的 owner_changed
+    # 原群主变为成员后可退群
+    m1.send(env("group.leave", {"groupId": tgid}))
+    check("mgmt ex-owner leave ok", json.loads(m1.recv())["data"]["code"] == 0)
+    json.loads(m2.recv())  # 消费 leave 的 member_changed
+    # 新群主可拉人（M2 与 M3 已建联）
+    m2.send(env("group.invite", {"groupId": tgid, "account": M3}))
+    check("mgmt new-owner invite ok", json.loads(m2.recv())["data"]["code"] == 0)
+    json.loads(m3.recv()); json.loads(m2.recv())
+    # 转让权限：非群主 403、转非成员 409、目标不存在 404、转自己 409
+    m3.send(env("group.transfer", {"groupId": tgid, "account": M3}))
+    r = json.loads(m3.recv())
+    check("mgmt transfer non-owner 403", r["type"] == "group.transfer_res"
+          and r["data"]["code"] == 403)
+    m2.send(env("group.transfer", {"groupId": tgid, "account": M4}))
+    r = json.loads(m2.recv())
+    check("mgmt transfer non-member 409", r["type"] == "group.transfer_res"
+          and r["data"]["code"] == 409)
+    m2.send(env("group.transfer", {"groupId": tgid, "account": NOBODY}))
+    r = json.loads(m2.recv())
+    check("mgmt transfer missing 404", r["type"] == "group.transfer_res"
+          and r["data"]["code"] == 404)
+    m2.send(env("group.transfer", {"groupId": tgid, "account": M2}))
+    r = json.loads(m2.recv())
+    check("mgmt transfer self 409", r["type"] == "group.transfer_res"
+          and r["data"]["code"] == 409)
+
+    # 解散组：M1 群主，M2 成员
+    m1.send(env("group.create", {"name": "解散组"}))
+    dgid = json.loads(m1.recv())["data"]["data"]["groupId"]
+    m1.send(env("group.invite", {"groupId": dgid, "account": M2}))
+    json.loads(m1.recv()); json.loads(m2.recv()); json.loads(m1.recv())
+    m1.send(env("msg.send", {"to": dgid, "content": "bye-group", "clientMsgId": "dd0",
+                             "chatType": "group"}))
+    json.loads(m1.recv()); json.loads(m2.recv())
+    # 非群主解散 403（先验权限，组仍存活）
+    m2.send(env("group.dissolve", {"groupId": dgid}))
+    r = json.loads(m2.recv())
+    check("mgmt dissolve non-owner 403", r["type"] == "group.dissolve_res"
+          and r["data"]["code"] == 403)
+    m1.send(env("group.dissolve", {"groupId": dgid}))
+    r = json.loads(m1.recv())
+    check("mgmt dissolve ok", r["type"] == "group.dissolve_res" and r["data"]["code"] == 0)
+    r = json.loads(m1.recv())
+    check("mgmt dissolved pushed self", r["type"] == "group.dissolved"
+          and r["data"]["groupId"] == dgid)
+    r = json.loads(m2.recv())
+    check("mgmt dissolved pushed member", r["type"] == "group.dissolved"
+          and r["data"]["groupId"] == dgid)
+    # list 不再列出
+    m1.send(env("group.list", {}))
+    r = json.loads(m1.recv())
+    check("mgmt dissolve list filtered",
+          r["data"]["code"] == 0
+          and all(x["groupId"] != dgid for x in r["data"]["data"]["groups"]))
+    # 解散后操作 404：群发 / 拉人 / 成员 / 改名 / 踢人
+    m1.send(env("msg.send", {"to": dgid, "content": "x", "clientMsgId": "dd1",
+                             "chatType": "group"}))
+    r = json.loads(m1.recv())
+    check("mgmt dissolved send 404", r["type"] == "msg.ack" and r["data"]["code"] == 404)
+    m1.send(env("group.invite", {"groupId": dgid, "account": M3}))
+    r = json.loads(m1.recv())
+    check("mgmt dissolved invite 404", r["type"] == "group.invite_res"
+          and r["data"]["code"] == 404)
+    m1.send(env("group.members", {"groupId": dgid}))
+    r = json.loads(m1.recv())
+    check("mgmt dissolved members 404", r["type"] == "group.members_res"
+          and r["data"]["code"] == 404)
+    m1.send(env("group.kick", {"groupId": dgid, "account": M2}))
+    r = json.loads(m1.recv())
+    check("mgmt kick dissolved 404", r["type"] == "group.kick_res"
+          and r["data"]["code"] == 404)
+    # 曾成员仍可查解散前窗口历史
+    m2.send(env("group.history", {"groupId": dgid}))
+    r = json.loads(m2.recv())
+    check("mgmt dissolved history ok", r["type"] == "group.history_res"
+          and r["data"]["code"] == 0
+          and any(x["content"] == "bye-group" for x in r["data"]["data"]["msgs"]))
+
+    # 改名/公告组：M1 群主，M2 成员
+    m1.send(env("group.create", {"name": "改名组"}))
+    rgid = json.loads(m1.recv())["data"]["data"]["groupId"]
+    m1.send(env("group.invite", {"groupId": rgid, "account": M2}))
+    json.loads(m1.recv()); json.loads(m2.recv()); json.loads(m1.recv())
+    m1.send(env("group.rename", {"groupId": rgid, "name": "新群名"}))
+    r = json.loads(m1.recv())
+    check("mgmt rename ok", r["type"] == "group.rename_res" and r["data"]["code"] == 0)
+    r = json.loads(m1.recv())
+    check("mgmt renamed pushed self", r["type"] == "group.renamed"
+          and r["data"]["groupId"] == rgid and r["data"]["name"] == "新群名")
+    r = json.loads(m2.recv())
+    check("mgmt renamed pushed member", r["type"] == "group.renamed"
+          and r["data"]["name"] == "新群名")
+    m1.send(env("group.rename", {"groupId": rgid, "name": ""}))
+    r = json.loads(m1.recv())
+    check("mgmt rename empty 400", r["type"] == "group.rename_res"
+          and r["data"]["code"] == 400)
+    m1.send(env("group.rename", {"groupId": rgid, "name": "a" * 33}))
+    r = json.loads(m1.recv())
+    check("mgmt rename long 400", r["type"] == "group.rename_res"
+          and r["data"]["code"] == 400)
+    m2.send(env("group.rename", {"groupId": rgid, "name": "黑名"}))
+    r = json.loads(m2.recv())
+    check("mgmt rename non-owner 403", r["type"] == "group.rename_res"
+          and r["data"]["code"] == 403)
+    # 公告：发布 ok + 事件 + list 下发 + 清空 + 超限 + 非群主
+    m1.send(env("group.announce", {"groupId": rgid, "content": "公告正文"}))
+    r = json.loads(m1.recv())
+    check("mgmt announce ok", r["type"] == "group.announce_res" and r["data"]["code"] == 0)
+    check("mgmt announced pushed self",
+          json.loads(m1.recv())["type"] == "group.announced")
+    check("mgmt announced pushed member",
+          json.loads(m2.recv())["type"] == "group.announced")
+    m1.send(env("group.list", {}))
+    r = json.loads(m1.recv())
+    entry = [x for x in r["data"]["data"]["groups"] if x["groupId"] == rgid]
+    check("mgmt announce list has body", len(entry) == 1
+          and entry[0]["announcement"] == "公告正文")
+    m1.send(env("group.announce", {"groupId": rgid, "content": ""}))
+    check("mgmt announce clear ok", json.loads(m1.recv())["data"]["code"] == 0)
+    json.loads(m1.recv()); json.loads(m2.recv())  # 消费清空事件
+    m1.send(env("group.list", {}))
+    r = json.loads(m1.recv())
+    entry = [x for x in r["data"]["data"]["groups"] if x["groupId"] == rgid]
+    check("mgmt announce cleared", len(entry) == 1 and entry[0]["announcement"] == "")
+    m1.send(env("group.announce", {"groupId": rgid, "content": "x" * 1025}))
+    r = json.loads(m1.recv())
+    check("mgmt announce oversize 413", r["type"] == "group.announce_res"
+          and r["data"]["code"] == 413)
+    m2.send(env("group.announce", {"groupId": rgid, "content": "黑公告"}))
+    r = json.loads(m2.recv())
+    check("mgmt announce non-owner 403", r["type"] == "group.announce_res"
+          and r["data"]["code"] == 403)
+    m1.close(); m2.close(); m3.close(); m4.close()
     g1.close(); g2.close()
     a.close(); b.close()
 
     # 清理本次注册的测试账号及其关联消息（精确账号列表，不误删真实用户）
     import subprocess
-    used = [A, B, C, SINK, SPAM, SINK2, SPAM2, D, E, F, G, H, base + "50", G1, G2] \
+    used = [A, B, C, SINK, SPAM, SINK2, SPAM2, D, E, F, G, H, base + "50", G1, G2,
+            M1, M2, M3, M4] \
         + cap_accounts + [OVER]
     inlist = ",".join("'%s'" % x for x in used)
     # 群表清理必须在 users 删除之前（按 account 查 user_id，无级联外键）
