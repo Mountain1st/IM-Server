@@ -71,6 +71,10 @@ CREATE TABLE IF NOT EXISTS `groups` (
   name        VARCHAR(32)  NOT NULL,
   owner_id    BIGINT UNSIGNED NOT NULL,
   created_ts  BIGINT       NOT NULL,
+  announcement TEXT        NOT NULL,             -- 群公告正文（单条最新，空=无公告）
+  announce_ts  BIGINT       NOT NULL DEFAULT 0,  -- 公告发布时间
+  dissolved    TINYINT      NOT NULL DEFAULT 0,  -- 0=正常，1=已解散
+  dissolved_ts BIGINT       NOT NULL DEFAULT 0,  -- 解散时间
   KEY idx_owner (owner_id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
