@@ -11,6 +11,7 @@ namespace im {
 namespace {
 constexpr size_t kMaxGroupMembers = 50;      // 群人数上限（含群主）
 constexpr size_t kMaxGroupNameLen = 32;      // 群名长度上限
+constexpr size_t kMaxAnnouncementBytes = 1024;  // 群公告长度上限
 }  // namespace
 
 void AppServer::onGroupCreate(const std::shared_ptr<Session>& session, const json& data) {
@@ -294,6 +295,93 @@ void AppServer::onGroupDissolve(const std::shared_ptr<Session>& session, const j
   for (const int64_t uid : memberIds) {
     for (auto& t : onlineMgr_.sessions(uid)) {
       t->reply(makeEnvelopeText("group.dissolved", evt));
+    }
+  }
+}
+
+void AppServer::onGroupRename(const std::shared_ptr<Session>& session, const json& data) {
+  // 改名：复用建群规则（空或 >32 → 400），仅群主可操作
+  int64_t groupId = 0;
+  if (data.contains("groupId") && data["groupId"].is_number_integer()) {
+    groupId = data["groupId"].get<int64_t>();
+  } else {
+    session->reply(makeResult("group.rename_res", 400, "参数错误", json::object()));
+    return;
+  }
+  const std::string name = data.value("name", "");
+  if (name.empty() || name.size() > kMaxGroupNameLen) {
+    session->reply(makeResult("group.rename_res", 400, "参数错误", json::object()));
+    return;
+  }
+  std::string oldName;
+  int64_t ownerId = 0;
+  bool dissolved = false;
+  if (!groupRepo_->getGroup(groupId, &oldName, &ownerId, nullptr, nullptr, &dissolved)) {
+    session->reply(makeResult("group.rename_res", 404, "群不存在", json::object()));
+    return;
+  }
+  if (dissolved) {
+    session->reply(makeResult("group.rename_res", 404, "群已解散", json::object()));
+    return;
+  }
+  if (ownerId != session->userId()) {
+    session->reply(makeResult("group.rename_res", 403, "仅群主可操作", json::object()));
+    return;
+  }
+  if (!groupRepo_->renameGroup(groupId, name)) {
+    session->reply(makeResult("group.rename_res", 404, "群不存在", json::object()));
+    return;
+  }
+  session->reply(makeResult("group.rename_res", 0, "ok", json::object()));
+  // 通知在线成员新群名
+  json renamed = {{"groupId", groupId}, {"name", name}};
+  for (const int64_t uid : groupRepo_->listMemberIds(groupId)) {
+    for (auto& t : onlineMgr_.sessions(uid)) {
+      t->reply(makeEnvelopeText("group.renamed", renamed));
+    }
+  }
+}
+
+void AppServer::onGroupAnnounce(const std::shared_ptr<Session>& session, const json& data) {
+  // 公告：空 content=清空（announce_ts 照写），超 1024 字节 → 413，仅群主可操作
+  int64_t groupId = 0;
+  if (data.contains("groupId") && data["groupId"].is_number_integer()) {
+    groupId = data["groupId"].get<int64_t>();
+  } else {
+    session->reply(makeResult("group.announce_res", 400, "参数错误", json::object()));
+    return;
+  }
+  const std::string content = data.value("content", "");
+  if (content.size() > kMaxAnnouncementBytes) {
+    session->reply(makeResult("group.announce_res", 413, "消息内容超长", json::object()));
+    return;
+  }
+  std::string name;
+  int64_t ownerId = 0;
+  bool dissolved = false;
+  if (!groupRepo_->getGroup(groupId, &name, &ownerId, nullptr, nullptr, &dissolved)) {
+    session->reply(makeResult("group.announce_res", 404, "群不存在", json::object()));
+    return;
+  }
+  if (dissolved) {
+    session->reply(makeResult("group.announce_res", 404, "群已解散", json::object()));
+    return;
+  }
+  if (ownerId != session->userId()) {
+    session->reply(makeResult("group.announce_res", 403, "仅群主可操作", json::object()));
+    return;
+  }
+  const int64_t now = static_cast<int64_t>(std::time(nullptr));
+  if (!groupRepo_->setAnnouncement(groupId, content, now)) {
+    session->reply(makeResult("group.announce_res", 404, "群不存在", json::object()));
+    return;
+  }
+  session->reply(makeResult("group.announce_res", 0, "ok", json::object()));
+  // 正文走 list 拉取，不扇出大包，只推 groupId
+  json announced = {{"groupId", groupId}};
+  for (const int64_t uid : groupRepo_->listMemberIds(groupId)) {
+    for (auto& t : onlineMgr_.sessions(uid)) {
+      t->reply(makeEnvelopeText("group.announced", announced));
     }
   }
 }

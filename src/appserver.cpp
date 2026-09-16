@@ -290,6 +290,8 @@ void AppServer::onEnvelope(const std::shared_ptr<Session>& session, const json& 
     if (type == "group.kick") { onGroupKick(session, data); return; }
     if (type == "group.transfer") { onGroupTransfer(session, data); return; }
     if (type == "group.dissolve") { onGroupDissolve(session, data); return; }
+    if (type == "group.rename") { onGroupRename(session, data); return; }
+    if (type == "group.announce") { onGroupAnnounce(session, data); return; }
     if (type == "group.list") {
       onGroupList(session, data);
       return;
