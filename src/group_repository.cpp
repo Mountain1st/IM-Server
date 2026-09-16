@@ -179,7 +179,7 @@ bool GroupRepository::dissolveGroup(int64_t groupId, int64_t now) {
 }
 
 bool GroupRepository::renameGroup(int64_t groupId, const std::string& name) {
-  std::lock_guard<std::mutex> lock(mutex_);
+  std::unique_lock<std::mutex> lock(mutex_);
   if (!client_.ok()) return false;
   int errNo = 0;
   MYSQL_STMT* stmt = mysqlStmtExec(
@@ -189,13 +189,19 @@ bool GroupRepository::renameGroup(int64_t groupId, const std::string& name) {
     LOG_E("[mysql] 群改名失败 errno=" << errNo);
     return false;
   }
+  const my_ulonglong affected = mysql_stmt_affected_rows(stmt);
   mysql_stmt_close(stmt);
-  return true;
+  if (affected == 1) return true;
+  // 同值更新 affected=0 属正常，回查区分：存在且未解散则仍算成功
+  lock.unlock();
+  bool dissolved = false;
+  if (!getGroup(groupId, nullptr, nullptr, nullptr, nullptr, &dissolved)) return false;
+  return !dissolved;
 }
 
 bool GroupRepository::setAnnouncement(int64_t groupId, const std::string& text,
                                       int64_t now) {
-  std::lock_guard<std::mutex> lock(mutex_);
+  std::unique_lock<std::mutex> lock(mutex_);
   if (!client_.ok()) return false;
   int errNo = 0;
   MYSQL_STMT* stmt = mysqlStmtExec(
@@ -207,8 +213,14 @@ bool GroupRepository::setAnnouncement(int64_t groupId, const std::string& text,
     LOG_E("[mysql] 发布群公告失败 errno=" << errNo);
     return false;
   }
+  const my_ulonglong affected = mysql_stmt_affected_rows(stmt);
   mysql_stmt_close(stmt);
-  return true;
+  if (affected == 1) return true;
+  // 同值更新 affected=0 属正常，回查区分：存在且未解散则仍算成功
+  lock.unlock();
+  bool dissolved = false;
+  if (!getGroup(groupId, nullptr, nullptr, nullptr, nullptr, &dissolved)) return false;
+  return !dissolved;
 }
 
 bool GroupRepository::isMember(int64_t groupId, int64_t userId) {
