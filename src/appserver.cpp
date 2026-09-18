@@ -14,6 +14,7 @@
 
 #include <algorithm>
 #include <ctime>
+#include <cstdlib>
 #include <iostream>
 #include <stdexcept>
 
@@ -131,9 +132,40 @@ AppServer::AppServer(uint16_t port, size_t ioThreads, size_t workThreads, size_t
   }
   LOG_I("[db] 群存储: MySQL (host=" << userConfig.mysqlHost << ":"
         << userConfig.mysqlPort << ", db=" << userConfig.mysqlDb << ")");
+  // 离线 TTL 清理间隔（秒）：环境变量可覆盖（测试用小值），非法值回退默认
+  if (const char* v = std::getenv("IM_OFFLINE_PURGE_INTERVAL")) {
+    const int n = std::atoi(v);
+    if (n > 0) purgeIntervalSec_ = n;
+  }
+  LOG_I("[purge] 离线消息 TTL 清理线程已启动（间隔 " << purgeIntervalSec_
+        << " 秒，保留 " << (config::kOfflineTtl.count() / 24) << " 天）");
+  purgeThread_ = std::thread([this] { purgeLoop(); });
 }
 
-AppServer::~AppServer() = default;
+AppServer::~AppServer() {
+  // 停清理线程（wait_for 被唤醒后立即退出，不会阻塞析构）
+  purgeStop_.store(true);
+  {
+    std::lock_guard<std::mutex> lk(purgeMutex_);
+    purgeCv_.notify_all();
+  }
+  if (purgeThread_.joinable()) purgeThread_.join();
+}
+
+void AppServer::purgeLoop() {
+  while (!purgeStop_.load()) {
+    std::unique_lock<std::mutex> lk(purgeMutex_);
+    purgeCv_.wait_for(lk, std::chrono::seconds(purgeIntervalSec_),
+                      [this] { return purgeStop_.load(); });
+    if (purgeStop_.load()) break;
+    lk.unlock();
+    const int64_t removed = msgRepo_->purgeExpiredOffline(
+        static_cast<int64_t>(std::time(nullptr)));
+    if (removed > 0) {
+      LOG_I("[purge] 已清理 " << removed << " 条过期离线消息");
+    }
+  }
+}
 
 void AppServer::start() {
   // 1) 通知工作线程启动

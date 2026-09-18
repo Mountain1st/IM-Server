@@ -21,6 +21,8 @@ public:
                    const std::string& clientMsgId, const std::string& chatType,
                    int status, int64_t groupId = 0) override;
   std::vector<StoredMessage> fetchOffline(int64_t toUser) override;
+  // 删除超过 TTL 仍未领取的单聊离线消息。返回删除条数。
+  int64_t purgeExpiredOffline(int64_t nowSec) override;
   void markDelivered(int64_t toUser,
                      const std::vector<std::string>& messageIds) override;
   std::vector<StoredMessage> fetchHistory(int64_t userA, int64_t userB,

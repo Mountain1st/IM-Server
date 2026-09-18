@@ -7,12 +7,16 @@
 #include "msg_dedup.hpp"
 #include "online_manager.hpp"
 #include "rate_limiter_store.hpp"
+#include "server_config.hpp"
 #include "tcpserver.hpp"
 #include "threadpool.hpp"
 #include "user_store.hpp"
 
 #include <atomic>
+#include <condition_variable>
 #include <cstdint>
+#include <mutex>
+#include <thread>
 #include <memory>
 #include <string>
 #include <vector>
@@ -55,6 +59,9 @@ public:
   void run(); // 运行主 eventloop（阻塞），供 main 调用
 
 private:
+  // 离线消息 TTL 清理循环（独立线程）：周期删除超期未领取的单聊离线消息
+  void purgeLoop();
+
   void onNewConnection(EventLoop* ioLoop, const TcpServer::ConnectionPtr& conn);
   void onSessionClosed(const std::shared_ptr<Session>& session);
   // 业务指令路由：在工作线程池线程执行
@@ -112,6 +119,12 @@ private:
   std::unique_ptr<MsgDedupStore> msgDedup_;    // 消息幂等去重（内存/Redis 双后端）
   std::unique_ptr<RateLimiterStore> msgLimiter_; // msg.send 限流（内存/Redis 双后端）
   std::atomic<uint64_t> msgSeq_{0}; // 全局消息序列（生成 messageId）
+  // 离线 TTL 清理线程（间隔秒由 IM_OFFLINE_PURGE_INTERVAL 覆盖，缺省 1800）
+  int purgeIntervalSec_ = config::kOfflinePurgeIntervalSec;
+  std::thread purgeThread_;
+  std::mutex purgeMutex_;
+  std::condition_variable purgeCv_;
+  std::atomic<bool> purgeStop_{false};
 };
 
 } // namespace im

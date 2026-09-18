@@ -44,6 +44,8 @@ public:
                            int64_t groupId = 0) = 0;
   // 取某接收方的离线消息（status=offline_pending），按 ts 升序。不移除。
   virtual std::vector<StoredMessage> fetchOffline(int64_t toUser) = 0;
+  // 删除超过 TTL 仍未领取的单聊离线消息（ts < nowSec - 7 天）。返回删除条数。
+  virtual int64_t purgeExpiredOffline(int64_t nowSec) = 0;
   // 批量标记离线消息为 delivered（客户端 msg.offline_ack 确认）。
   virtual void markDelivered(int64_t toUser,
                              const std::vector<std::string>& messageIds) = 0;

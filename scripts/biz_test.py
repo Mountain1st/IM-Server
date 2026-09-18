@@ -481,6 +481,37 @@ def main():
     check("clientMsgId oversized rejected", r["type"] == "msg.ack" and r["data"]["code"] == 400)
     b2.close()
 
+    # v2.1：离线消息 TTL 清理——超 7 天未领取的离线消息由后台任务删除
+    def sql_q(q):
+        import subprocess
+        out = subprocess.run(
+            ["bash", "-c",
+             "MYSQL_PWD=520010 mysql -u IMS_jack -h 127.0.0.1 -N -e \"%s\" IMS_reactor_db" % q],
+            capture_output=True, text=True)
+        return out.stdout.strip()
+
+    old_ts = int(time.time()) - 8 * 86400
+    for i in range(2):
+        sql_q("INSERT INTO messages (message_id,from_user,to_user,content,ts,client_msg_id,"
+              "chat_type,group_id,status) VALUES ('purge-old-%d',%d,%d,'stale',%d,'','single',0,0)"
+              % (i, alice, bob, old_ts + i))
+    r = send_msg(a, bob, "fresh offline", "purge-new-1")
+    check("purge fresh ack ok", r["type"] == "msg.ack" and r["data"]["code"] == 0)
+    time.sleep(3)  # 测试环境 IM_OFFLINE_PURGE_INTERVAL=2，等一轮清理
+    n = sql_q("SELECT COUNT(*) FROM messages WHERE message_id LIKE 'purge-old-%'")
+    check("expired offline purged", n == "0")
+    nf = sql_q("SELECT COUNT(*) FROM messages WHERE client_msg_id='purge-new-1'")
+    check("fresh offline kept", nf == "1")
+    b4 = WS()
+    r = login(b4, B, "pw1234")
+    r = json.loads(b4.recv())
+    check("purge login offline only fresh",
+          r["type"] == "msg.offline" and len(r["data"]["msgs"]) == 1
+          and r["data"]["msgs"][0]["content"] == "fresh offline")
+    b4.send(env("msg.offline_ack", {"messageIds": [m["messageId"] for m in r["data"]["msgs"]]}))
+    json.loads(b4.recv())
+    b4.close()
+
     # v1.8：chat.history 的 to 为登录账号 account；自己对话框（to==自己账号）已落库，
     # 历史可查（见 self history persisted 用例）；与无历史的其他账号返回空列表
     a.send(env("chat.history", {"to": B}))

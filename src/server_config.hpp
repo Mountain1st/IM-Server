@@ -67,6 +67,8 @@ inline constexpr size_t kMaxOfflineAckIds = 1000;
 inline constexpr size_t kOfflineMaxPerUser = 100;
 // 离线消息保留时长（TTL）：到期自动清理，超限时丢最旧
 inline constexpr std::chrono::hours kOfflineTtl = std::chrono::hours(7 * 24);
+// 离线 TTL 清理的默认间隔（秒）；环境变量 IM_OFFLINE_PURGE_INTERVAL 可覆盖（测试用小值）
+inline constexpr int kOfflinePurgeIntervalSec = 1800;
 // 幂等去重窗口与每用户 id 上限
 inline constexpr std::chrono::minutes kDedupWindow = std::chrono::minutes(5);
 inline constexpr size_t kDedupMaxPerUser = 1024;
