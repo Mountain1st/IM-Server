@@ -8,3 +8,8 @@ imclient
 imserver
 scripts/__pycache__/
 __pycache__/
+
+# IDE 与产物
+docs/docs/
+.vscode/
+Testing/
