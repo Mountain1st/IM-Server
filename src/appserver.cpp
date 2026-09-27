@@ -157,7 +157,9 @@ AppServer::AppServer(uint16_t port, size_t ioThreads, size_t workThreads, size_t
     if (n > 0) purgeIntervalSec_ = n;
   }
   LOG_I("[purge] 离线消息 TTL 清理线程已启动（间隔 " << purgeIntervalSec_
-        << " 秒，保留 " << (config::kOfflineTtl.count() / 24) << " 天）");
+        << " 秒，保留 "
+        << std::chrono::duration_cast<std::chrono::hours>(config::kOfflineTtl).count()
+        << " 天）");
   purgeThread_ = std::thread([this] { purgeLoop(); });
 }
 

@@ -63,11 +63,14 @@ bool MySqlMessageRepository::saveMessage(const std::string& messageId, int64_t f
 }
 
 int64_t MySqlMessageRepository::purgeExpiredOffline(int64_t nowSec) {
-  // TTL 清理：删除超期未领取的单聊离线消息（群消息不走 pending 状态，不在此列）
+  // TTL 清理：删除超期未领取的单聊离线消息（群消息不走 pending 状态，不在此列）。
+  // 注意 kOfflineTtl 是 hours 单位，须显式换算为秒（历史 bug：直接 .count() 把
+  // 168 小时当 168 秒用，实际 TTL 缩短 3600 倍）
   std::lock_guard<std::mutex> lock(mutex_);
   if (!client_.ok()) return 0;
-  const int64_t expireBefore = nowSec -
-      static_cast<int64_t>(config::kOfflineTtl.count());
+  const int64_t ttlSec = static_cast<int64_t>(
+      std::chrono::duration_cast<std::chrono::seconds>(config::kOfflineTtl).count());
+  const int64_t expireBefore = nowSec - ttlSec;
   const std::string sql =
       "DELETE FROM messages WHERE status = " + std::to_string(kMsgOfflinePending) +
       " AND group_id = 0 AND ts < " + std::to_string(expireBefore);

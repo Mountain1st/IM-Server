@@ -497,20 +497,28 @@ def main():
         sql_q("INSERT INTO messages (message_id,from_user,to_user,content,ts,client_msg_id,"
               "chat_type,group_id,status) VALUES ('purge-old-%d',%d,%d,'stale',%d,'','single',0,0)"
               % (i, alice, bob, old_ts + i))
+    # 10 分钟前的离线消息：TTL 为 7 天，不应被清理（防 168 秒单位错误回归）
+    sql_q("INSERT INTO messages (message_id,from_user,to_user,content,ts,client_msg_id,"
+          "chat_type,group_id,status) VALUES ('purge-mid',%d,%d,'recent',%d,'','single',0,0)"
+          % (alice, bob, int(time.time()) - 600))
     r = send_msg(a, bob, "fresh offline", "purge-new-1")
     check("purge fresh ack ok", r["type"] == "msg.ack" and r["data"]["code"] == 0)
     time.sleep(3)  # 测试环境 IM_OFFLINE_PURGE_INTERVAL=2，等一轮清理
-    n = sql_q("SELECT COUNT(*) FROM messages WHERE message_id LIKE 'purge-old-%'")
+    n = sql_q("SELECT COUNT(*) FROM messages WHERE message_id LIKE 'purge-old-%%'"
+              " AND from_user=%d AND to_user=%d" % (alice, bob))
     check("expired offline purged", n == "0")
+    nm = sql_q("SELECT COUNT(*) FROM messages WHERE message_id='purge-mid'"
+               " AND from_user=%d AND to_user=%d" % (alice, bob))
+    check("10min offline kept (TTL=7d)", nm == "1")
     nf = sql_q("SELECT COUNT(*) FROM messages WHERE client_msg_id='purge-new-1'"
                " AND from_user=%d AND to_user=%d" % (alice, bob))
     check("fresh offline kept", nf == "1")
     b4 = WS()
     r = login(b4, B, "pw1234")
     r = json.loads(b4.recv())
-    check("purge login offline only fresh",
-          r["type"] == "msg.offline" and len(r["data"]["msgs"]) == 1
-          and r["data"]["msgs"][0]["content"] == "fresh offline")
+    contents = [m["content"] for m in r["data"]["msgs"]]
+    check("purge login offline has fresh and 10min",
+          r["type"] == "msg.offline" and sorted(contents) == ["fresh offline", "recent"])
     b4.send(env("msg.offline_ack", {"messageIds": [m["messageId"] for m in r["data"]["msgs"]]}))
     json.loads(b4.recv())
     b4.close()
