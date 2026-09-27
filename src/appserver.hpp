@@ -6,6 +6,7 @@
 #include "message_repository.hpp"
 #include "msg_dedup.hpp"
 #include "online_manager.hpp"
+#include "presence_store.hpp"
 #include "rate_limiter_store.hpp"
 #include "server_config.hpp"
 #include "tcpserver.hpp"
@@ -115,6 +116,7 @@ private:
   std::unique_ptr<MessageRepository> msgRepo_; // MySQL 消息存储（离线/历史/已读）
   std::unique_ptr<ContactRepository> contactRepo_; // 联系人/请求/设置存储
   std::unique_ptr<GroupRepository> groupRepo_;  // 群/成员/水位线存储
+  std::shared_ptr<PresenceStore> presence_;  // 在线状态标记（内存/Redis 双后端）
   OnlineManager onlineMgr_;
   std::unique_ptr<MsgDedupStore> msgDedup_;    // 消息幂等去重（内存/Redis 双后端）
   std::unique_ptr<RateLimiterStore> msgLimiter_; // msg.send 限流（内存/Redis 双后端）

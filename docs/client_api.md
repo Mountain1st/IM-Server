@@ -240,7 +240,7 @@
 ```
 响应（成功）：
 ```json
-{ "type": "contact.list_res", "data": { "code": 0, "msg": "ok", "data": { "contacts": [ { "account": "13900139000", "username": "小波" } ] } } }
+{ "type": "contact.list_res", "data": { "code": 0, "msg": "ok", "data": { "contacts": [ { "account": "13900139000", "username": "小波", "online": true } ] } } }
 ```
 - 用于客户端启动时拉取联系人，作为会话列表/发起对话的入口
 - **返回恒含自己的条目（排第一位）**：`account=自己的账号、username=自己的昵称`（v1.8.1）；注册时自动建立，登录不重复写入
@@ -348,7 +348,7 @@
 ```
 响应（成功）：
 ```json
-{ "type": "group.members_res", "data": { "code": 0, "msg": "ok", "data": { "members": [ { "account": "13800138000", "username": "小爱", "joinedTs": 1720000000, "isOwner": true } ] } } }
+{ "type": "group.members_res", "data": { "code": 0, "msg": "ok", "data": { "members": [ { "account": "13800138000", "username": "小爱", "joinedTs": 1720000000, "isOwner": true, "online": true } ] } } }
 ```
 - 须为群成员，否则回 `403 非群成员`；`400 参数错误`（`groupId` 缺失/非整数）
 

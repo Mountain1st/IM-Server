@@ -594,6 +594,12 @@ def main():
     r = json.loads(d.recv())
     check("contact list has E", r["type"] == "contact.list_res"
           and any(x["account"] == E for x in r["data"]["data"]["contacts"]))
+    # v2.1：联系人列表下发在线状态（Presence，内存/Redis 双后端）
+    d.send(env("contact.list", {}))
+    r = json.loads(d.recv())
+    emap = {x["account"]: x for x in r["data"]["data"]["contacts"]}
+    check("contact online E true", emap.get(E, {}).get("online") is True)
+    check("contact online self true", emap.get(D, {}).get("online") is True)
     # 成为联系人后互发消息成功
     r = send_msg(d, E, "hi contact", "ct1")
     check("contact send ok", r["data"]["code"] == 0)
@@ -688,7 +694,26 @@ def main():
     check("self contact not duplicated on login", r["data"]["code"] == 0 and cnt == 1)
     selfc.close(); selfc2.close()
 
-    d.close(); e.close(); f.close()
+    # v2.1：Presence 离线翻转（D-E 已建联，d 在线观察 e）
+    e.close()
+    time.sleep(1)
+    d.send(env("contact.list", {}))
+    r = json.loads(d.recv())
+    dmap = {x["account"]: x for x in r["data"]["data"]["contacts"]}
+    check("presence offline flip", dmap.get(E, {}).get("online") is False)
+    e2 = WS()
+    login(e2, E, "pw1234")
+    d.send(env("contact.list", {}))
+    r = json.loads(d.recv())
+    dmap = {x["account"]: x for x in r["data"]["data"]["contacts"]}
+    check("presence online flip", dmap.get(E, {}).get("online") is True)
+    e2.close()
+    time.sleep(1)
+    d.send(env("contact.list", {}))
+    r = json.loads(d.recv())
+    dmap = {x["account"]: x for x in r["data"]["data"]["contacts"]}
+    check("presence offline flip again", dmap.get(E, {}).get("online") is False)
+    d.close(); f.close()
 
     # ---- v1.8 隐私开关 ----
     g = WS(); register(g, G, "pw1234"); login(g, G, "pw1234")
@@ -806,6 +831,10 @@ def main():
     r = json.loads(b.recv())
     check("group members ok", r["type"] == "group.members_res"
           and len(r["data"]["data"]["members"]) == 2)
+    # v2.1：群成员列表下发在线状态
+    mmap = {x["account"]: x for x in r["data"]["data"]["members"]}
+    check("group members online true", all(m.get("online") is True
+                                           for m in mmap.values()))
     # 退群：b 退群后发消息 403；b 可查在群期间历史；群主 a 退群 403
     b.send(env("group.leave", {"groupId": gid}))
     r = json.loads(b.recv())

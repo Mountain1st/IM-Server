@@ -136,12 +136,14 @@ void AppServer::onContactList(const std::shared_ptr<Session>& session, const jso
     std::string account, username;
     userStore_->accountOf(id, &account);
     userStore_->nickname(id, &username);
-    arr.push_back(json{{"account", account}, {"username", username}});
+    arr.push_back(json{{"account", account}, {"username", username},
+                       {"online", onlineMgr_.isOnlinePresence(id)}});
   }
   std::string selfAccount, selfNick;
   userStore_->accountOf(self, &selfAccount);
   userStore_->nickname(self, &selfNick);
-  json selfEntry = json{{"account", selfAccount}, {"username", selfNick}};
+  json selfEntry = json{{"account", selfAccount}, {"username", selfNick},
+                        {"online", onlineMgr_.isOnlinePresence(self)}};
   json out = json::array();
   out.push_back(selfEntry);
   for (const auto& e : arr) out.push_back(e);

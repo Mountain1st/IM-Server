@@ -70,7 +70,7 @@ add_executable(imserver
 target_include_directories(imserver PRIVATE src third_party ${MYSQL_INCLUDE_DIR})
 target_link_libraries(imserver PRIVATE Threads::Threads ${MYSQLCLIENT_LIB})
 if(HAVE_HIREDIS)
-    target_sources(imserver PRIVATE src/redis_client.cpp src/redis_token_store.cpp src/redis_rate_limiter.cpp src/redis_msg_dedup.cpp)
+    target_sources(imserver PRIVATE src/redis_client.cpp src/redis_token_store.cpp src/redis_rate_limiter.cpp src/redis_msg_dedup.cpp src/redis_presence_store.cpp)
     target_include_directories(imserver PRIVATE ${HIREDIS_INCLUDE_DIR})
     target_link_libraries(imserver PRIVATE ${HIREDIS_LIB})
 endif()

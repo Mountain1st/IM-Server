@@ -445,7 +445,8 @@ void AppServer::onGroupMembers(const std::shared_ptr<Session>& session, const js
     arr.push_back(json{{"account", account},
                        {"username", username},
                        {"joinedTs", joined},
-                       {"isOwner", uid == ownerId}});
+                       {"isOwner", uid == ownerId},
+                       {"online", onlineMgr_.isOnlinePresence(uid)}});
   }
   session->reply(makeResult("group.members_res", 0, "ok", json{{"members", arr}}));
 }

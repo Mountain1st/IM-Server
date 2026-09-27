@@ -1,9 +1,10 @@
-# IM 协议文档（v2.0）
+# IM 协议文档（v2.1）
 
 > 本协议为服务端、Qt 客户端、Web 客户端三端共用的统一消息协议。
 > 传输层为 WebSocket 文本帧（UTF-8 编码的 JSON 字符串）。
 
-**版本变更（v0.1 → v2.0）**
+**版本变更（v0.1 → v2.1）**
+- v2.1 **在线状态（Presence）上 Redis**：`IM_REDIS_ENABLED=1` 时在线状态存 Redis（`p:online:<userId>` 连接计数 + TTL 兜底），未启用则内存；`contact.list` 与 `group.members` 条目新增 `online` 字段（该用户/成员当前是否在线，多端任一在线即 true）；后台新增离线消息 TTL 清理（超 7 天未领取自动删除，`IM_OFFLINE_PURGE_INTERVAL` 可调）
 - v2.0 **群管理闭环**：新增 `group.kick/transfer/dissolve/rename/announce`（踢人、转让群主、解散群、改群名、群公告）；新增推送 `group.removed/owner_changed/dissolved/renamed/announced`（踢人复用 `group.member_changed(kick)`）；`group.list` 条目新增 `announcement`/`announceTs`（已解散群不列出）；解散后除 `group.history` 外其余群操作回 `404 群已解散`
 - v1.9 **群聊最小闭环**：新增 `group.create/invite/leave/list/members/history`（建群、群主拉人、退群、列表、成员、历史）；`msg.send` 支持 `chatType: "group"`（`to` 为数字 groupId）；群消息单行存储（`to_user=0, group_id=G`），离线按水位线补发；`msg.recv/msg.offline` 群载荷含 `groupId/groupName`；群不做已读；`chat.history`/`msg.read` 单聊视图加群隔离
 - v1.8.1 **联系人列表恒含"自己"**：`contact.list` 返回中恒有一条 `account=自己账号、username=自己昵称` 的联系人，排第一位；新用户注册时自动建立（写入 contacts 表），存量用户可用 `db/migrate_self_contact.sql` 一次性补齐；登录不重复写入
@@ -157,7 +158,7 @@
 | `contact.request_res` | `{ "code": 0, "msg": "ok", "data": {} }` | 好友请求结果；`403` 对方未开启添加、`409` 对方已是联系人 / 已存在待处理请求、`400` 不能添加自己、`404` 目标用户不存在 |
 | `contact.accept_res` | `{ "code": 0, "msg": "ok", "data": {} }` | 同意好友请求结果；`404` 不存在该待处理请求 |
 | `contact.reject_res` | `{ "code": 0, "msg": "ok", "data": {} }` | 拒绝好友请求结果；`404` 不存在该待处理请求 |
-| `contact.list_res` | `{ "code": 0, "msg": "ok", "data": { "contacts": [ { "account": "...", "username": "昵称" }, ... ] } }` | 我的联系人列表 |
+| `contact.list_res` | `{ "code": 0, "msg": "ok", "data": { "contacts": [ { "account": "...", "username": "昵称", "online": true }, ... ] } }` | 我的联系人列表；`online` 为该联系人当前是否在线（v2.1，Presence 内存/Redis 双后端） |
 | `contact.requests_res` | `{ "code": 0, "msg": "ok", "data": { "requests": [ { "account": "...", "username": "昵称", "ts": 1720000000 }, ... ] } }` | 收到的待处理好友请求列表（按 ts 排序） |
 | `contact.delete_res` | `{ "code": 0, "msg": "ok", "data": {} }` | 删除联系人结果；`400` 参数错误 / 不能删自己、`404` 对方不是你的联系人 |
 | `settings.get_res` | `{ "code": 0, "msg": "ok", "data": { "allowTempChat": true, "searchable": true, "allowAdd": true } }` | 我的隐私设置三开关（bool） |
@@ -174,7 +175,7 @@
 | `group.rename_res` | `{ "code": 0, "msg": "ok", "data": {} }` | 改群名结果；`400` 参数错误（`groupId` 缺失/非整数，`name` 为空或超 32） / `404` 群不存在 / 群已解散 / `403` 仅群主可操作 |
 | `group.announce_res` | `{ "code": 0, "msg": "ok", "data": {} }` | 群公告结果；`400` 参数错误 / `404` 群不存在 / 群已解散 / `403` 仅群主可操作 / `413` 消息内容超长（`content` 超 1024 字节，空=清空） |
 | `group.list_res` | `{ "code": 0, "msg": "ok", "data": { "groups": [ { "groupId": 1, "name": "...", "memberCount": 2, "isOwner": true, "announcement": "...", "announceTs": 1720000000 }, ... ] } }` | 我的群列表；`isOwner` 表示我是否为群主；`announcement`/`announceTs` 为最新群公告正文与发布时间（v2.0，无公告时为空串/0）；已解散群不列出 |
-| `group.members_res` | `{ "code": 0, "msg": "ok", "data": { "members": [ { "account": "...", "username": "昵称", "joinedTs": 1720000000, "isOwner": true }, ... ] } }` | 群成员列表；非群成员 `403 非群成员` |
+| `group.members_res` | `{ "code": 0, "msg": "ok", "data": { "members": [ { "account": "...", "username": "昵称", "joinedTs": 1720000000, "isOwner": true, "online": true }, ... ] } }` | 群成员列表；非群成员 `403 非群成员`；`online` 为成员当前是否在线（v2.1） |
 | `group.history_res` | `{ "code": 0, "msg": "ok", "data": { "msgs": [ { "from": "<account>", "fromNick": "...", "groupId": 1, "groupName": "...", "content": "...", "ts": 1720000000, "clientMsgId": "...", "messageId": "...", "chatType": "group" }, ... ] } }` | 群历史（仅加群后、退群前可见，按 ts 倒序）；非（曾）成员 `403 非群成员` |
 | `group.added` | `{ "groupId": 1, "name": "...", "inviter": "<邀请人账号>" }` | 被拉入群的推送（在线直接推送；离线登录后用 `group.list` + `msg.offline` 自洽） |
 | `group.member_changed` | `{ "groupId": 1, "change": "join"/"leave"/"kick", "account": "<变动成员账号>" }` | 群成员变动推送（`join` 有人入群 / `leave` 有人退群 / `kick` 有人被踢，v2.0），推送给群内在线成员 |

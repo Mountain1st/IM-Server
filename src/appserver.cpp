@@ -6,6 +6,7 @@
 #include "mysql_message_repository.hpp"
 #include "mysql_user_repository.hpp"
 #include "redis_msg_dedup.hpp"
+#include "redis_presence_store.hpp"
 #include "redis_rate_limiter.hpp"
 #include "redis_token_store.hpp"
 #include "server_config.hpp"
@@ -53,6 +54,22 @@ AppServer::AppServer(uint16_t port, size_t ioThreads, size_t workThreads, size_t
                      std::vector<std::string> allowedOrigins, UserStoreConfig userConfig)
     : AppServer(port, ioThreads, workThreads, maxConnections, std::move(allowedOrigins),
                 userConfig, RedisStoreConfig{}) {}
+
+// 构造 Presence（在线状态）存储：Redis 启用则用 Redis（连接失败抛错），否则内存
+std::shared_ptr<PresenceStore> makePresenceStore(const RedisStoreConfig& c) {
+  if (!c.enabled) {
+    LOG_I("[db] 在线状态: 内存");
+    return std::make_shared<MemoryPresenceStore>();
+  }
+  auto rs = std::make_shared<RedisPresenceStore>(
+      c.redisHost, c.redisPort, c.redisPassword, c.redisDb);
+  if (!rs->ok()) {
+    throw std::runtime_error("Redis 连接失败: " + rs->errStr());
+  }
+  LOG_I("[db] 在线状态: Redis (host=" << c.redisHost << ":" << c.redisPort
+        << ", db=" << c.redisDb << ")");
+  return rs;
+}
 
 // 构造 token 存储：Redis 启用则用 Redis（连接失败抛错），否则内存
 std::shared_ptr<TokenStore> makeTokenStore(const RedisStoreConfig& c) {
@@ -116,7 +133,9 @@ AppServer::AppServer(uint16_t port, size_t ioThreads, size_t workThreads, size_t
           userConfig.mysqlPassword, userConfig.mysqlDb)),
       groupRepo_(std::make_unique<GroupRepository>(
           userConfig.mysqlHost, userConfig.mysqlPort, userConfig.mysqlUser,
-          userConfig.mysqlPassword, userConfig.mysqlDb)) {
+          userConfig.mysqlPassword, userConfig.mysqlDb)),
+      presence_(makePresenceStore(redisConfig)),
+      onlineMgr_(presence_) {
   if (!msgRepo_->ok()) {
     throw std::runtime_error("消息存储连接失败");
   }
