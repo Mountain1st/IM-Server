@@ -115,7 +115,7 @@ public:
 | `group.owner_changed` / `renamed` / `announced` / `dissolved` | 群信息窗刷新/公告条更新 |
 | `contact.request` / `contact.added` / `contact.deleted` | 好友请求红点 / 列表刷新 |
 
-## 6. 跨端状态同步方案（已读/多端一致性，v2.2 建议）
+## 6. 跨端状态同步（v2.2 已实现）
 
 **能实现，服务端代价小**。当前缺口：A 端已读不会通知 B 端；一端发消息其他端不回显自己的消息。方案：
 

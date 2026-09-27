@@ -558,9 +558,10 @@ void AppServer::onGroupSend(const std::shared_ptr<Session>& session, const json&
                    {"chatType", "group"}};
   int64_t maxTs = now;
   for (const int64_t uid : groupRepo_->listMemberIds(groupId)) {
-    if (uid == session->userId()) continue;  // 发送者不回显
     bool pushed = false;
     for (auto& t : onlineMgr_.sessions(uid)) {
+      // 发送者仅发起连接不回显；其其他端回显（v2.2 多端一致），接收方全端投递
+      if (uid == session->userId() && t.get() == session.get()) continue;
       t->reply(makeEnvelopeText("msg.recv", recvData));
       pushed = true;
     }

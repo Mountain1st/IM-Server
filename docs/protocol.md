@@ -1,9 +1,10 @@
-# IM 协议文档（v2.1）
+# IM 协议文档（v2.2）
 
 > 本协议为服务端、Qt 客户端、Web 客户端三端共用的统一消息协议。
 > 传输层为 WebSocket 文本帧（UTF-8 编码的 JSON 字符串）。
 
-**版本变更（v0.1 → v2.1）**
+**版本变更（v0.1 → v2.2）**
+- v2.2 **多端一致性**：单聊/群聊的自发消息**回显到发送者其他在线端**（发起连接不回显，多设备会话视图一致）；新增推送 `msg.read_notify`（`{from, readTs}`，一端已读同步其他端，免 ACK、丢失靠补发/历史拉取自愈）
 - v2.1 **在线状态（Presence）上 Redis**：`IM_REDIS_ENABLED=1` 时在线状态存 Redis（`p:online:<userId>` 连接计数 + TTL 兜底），未启用则内存；`contact.list` 与 `group.members` 条目新增 `online` 字段（该用户/成员当前是否在线，多端任一在线即 true）；后台新增离线消息 TTL 清理（超 7 天未领取自动删除，`IM_OFFLINE_PURGE_INTERVAL` 可调）
 - v2.0 **群管理闭环**：新增 `group.kick/transfer/dissolve/rename/announce`（踢人、转让群主、解散群、改群名、群公告）；新增推送 `group.removed/owner_changed/dissolved/renamed/announced`（踢人复用 `group.member_changed(kick)`）；`group.list` 条目新增 `announcement`/`announceTs`（已解散群不列出）；解散后除 `group.history` 外其余群操作回 `404 群已解散`
 - v1.9 **群聊最小闭环**：新增 `group.create/invite/leave/list/members/history`（建群、群主拉人、退群、列表、成员、历史）；`msg.send` 支持 `chatType: "group"`（`to` 为数字 groupId）；群消息单行存储（`to_user=0, group_id=G`），离线按水位线补发；`msg.recv/msg.offline` 群载荷含 `groupId/groupName`；群不做已读；`chat.history`/`msg.read` 单聊视图加群隔离
@@ -147,7 +148,8 @@
 | `auth.login_res` | `{ "code": 0, "msg": "ok", "data": { "userId": 1, "account": "...", "username": "昵称", "token": "..." } }` | 登录结果；成功时返回用户信息与 token（token 用于断线免密重连） |
 | `auth.token_res` | `{ "code": 0, "msg": "ok", "data": { "userId": 1, "username": "昵称", "token": "..." } }` | 免密重连结果；成功时返回用户信息与当前 token |
 | `auth.logout_res` | `{ "code": 0, "msg": "ok", "data": {} }` | 登出结果 |
-| `msg.recv` | `{ "from": "<account>", "fromNick": "发送方昵称", "content": "...", "ts": 1720000000, "clientMsgId": "...", "messageId": "全局消息ID", "chatType": "single" }` | 收到的新消息（单聊推送）；`from` 为发送方登录账号（v1.7）；`fromNick` 供直接展示；`messageId` 为服务器生成的全局唯一 ID（v1.4 起，客户端可忽略）；**群聊推送结构相同，另含 `groupId`（数字群标识）/`groupName` 且 `chatType` 为 `"group"`（v1.9）** |
+| `msg.recv` | `{ "from": "<account>", "fromNick": "发送方昵称", "content": "...", "ts": 1720000000, "clientMsgId": "...", "messageId": "全局消息ID", "chatType": "single" }` | 收到的新消息（单聊推送）；`from` 为发送方登录账号（v1.7）；`fromNick` 供直接展示；`messageId` 为服务器生成的全局唯一 ID（v1.4 起，客户端可忽略）；**群聊推送结构相同，另含 `groupId`（数字群标识）/`groupName` 且 `chatType` 为 `"group"`（v1.9）**；**v2.2 多端一致：发送者自己的其他在线端也会收到该消息（发起连接不回显），多设备会话视图一致** |
+| `msg.read_notify` | `{ "from": "<account>", "readTs": 1720000000 }` | 已读同步（v2.2）：该用户某一端调用 `msg.read` 后，其**其他在线端**收到此推送（`from` 为会话对方账号），客户端应将对应会话未读清零；免 ACK，丢失靠离线补发与 `chat.history` 拉取自愈 |
 | `msg.ack` | `{ "code": 0, "msg": "ok", "clientMsgId": "..." }` | 服务端已接收消息的回执，`clientMsgId` 对齐发送端 |
 | `msg.offline` | `{ "msgs": [ { "from": "<account>", "fromNick": "...", "content": "...", "ts": 1720000000, "clientMsgId": "...", "messageId": "...", "chatType": "single" }, ... ] }` | 登录后补发的离线消息列表；`msgs[]` 元素结构与 `msg.recv` 相同（`from` 为发送方登录账号；**群消息元素另含 `groupId`/`groupName` 且 `chatType` 为 `"group"`（v1.9，单聊与群按水位线合并补发）**）；**非破坏性补发**（v1.5：确认前保留，收到后应发 `msg.offline_ack`，确认后不再补发） |
 | `chat.create_res` | `{ "code": 0, "msg": "ok", "data": { "userId": 1, "account": "登录账号", "username": "昵称" } }` | 新建对话结果；成功返回目标用户 `userId`、**`account`** 与昵称；`404` 表示账号不存在 |

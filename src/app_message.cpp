@@ -199,6 +199,12 @@ void AppServer::onSend(const std::shared_ptr<Session>& session, const json& data
     // 目标离线：已持久化为 offline_pending，待其登录后补发
     g_metrics.messagesOffline.fetch_add(1, std::memory_order_relaxed);
   }
+  // 多端一致性（v2.2）：自发消息回显到发送者的其他在线端（发起连接不回显），
+  // 保证同一账号多设备会话视图一致
+  for (auto& t : onlineMgr_.sessions(session->userId())) {
+    if (t.get() == session.get()) continue;
+    t->reply(makeEnvelopeText("msg.recv", recvData));
+  }
 }
 
 void AppServer::onOfflineAck(const std::shared_ptr<Session>& session, const json& data) {
@@ -272,6 +278,16 @@ void AppServer::onRead(const std::shared_ptr<Session>& session, const json& data
   int64_t ts = data.value("ts", static_cast<int64_t>(std::time(nullptr)));
   msgRepo_->markRead(session->userId(), from, ts);
   session->reply(makeResult("msg.read_res", 0, "ok", json::object()));
+  // 多端一致性（v2.2）：已读同步——通知该用户其他在线端刷新未读状态（免 ACK，
+  // 丢失靠重登补发与 chat.history 拉取兜底）
+  std::string fromAccount;
+  if (userStore_->accountOf(from, &fromAccount)) {
+    json rd = {{"from", fromAccount}, {"readTs", ts}};
+    for (auto& t : onlineMgr_.sessions(session->userId())) {
+      if (t.get() == session.get()) continue;
+      t->reply(makeEnvelopeText("msg.read_notify", rd));
+    }
+  }
 }
 
 void AppServer::onCreateConv(const std::shared_ptr<Session>& session, const json& data) {

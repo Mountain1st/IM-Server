@@ -588,7 +588,7 @@ CONNECTED(已登录) --auth.logout 成功--> CONNECTED(未登录)
 
 1. **建群**：群主发起 `group.create {name}` → `group.create_res` 拿到 `groupId`
 2. **拉人**：群主逐个 `group.invite {groupId, account}`（被拉人须是群主的联系人，否则 `409 对方不是你的联系人`）→ `group.invite_res` 成功；被拉人在线收 `group.added` 推送（`{groupId, name, inviter}`），群内其他在线成员收 `group.member_changed`（`change: "join"`）；被拉人离线时登录后用 `group.list` 发现新群
-3. **群聊**：成员 `msg.send {to: groupId, chatType: "group"}` → `msg.ack`；在线成员收 `msg.recv`（含 `groupId`/`groupName`，发送者不回显），离线成员登录后经 `msg.offline` 补发
+3. **群聊**：成员 `msg.send {to: groupId, chatType: "group"}` → `msg.ack`；在线成员收 `msg.recv`（含 `groupId`/`groupName`，发送者的发起连接不回显；其**其他在线端**会收到自发回显（v2.2 多端一致）），离线成员登录后经 `msg.offline` 补发
 4. **成员/历史**：打开群会话时 `group.members` 拉成员、`group.history` 拉历史（仅加群后可见）；群消息不做已读
 5. **退群**：成员 `group.leave {groupId}` → `group.leave_res`；剩余在线成员收 `group.member_changed`（`change: "leave"`）；群主不能退群（`403 群主不能退群`）
 6. **群管理（v2.0）**：群主 `group.kick` 踢人（被踢者收 `group.removed`、他人收 `group.member_changed(kick)`，见 §5.24）、`group.transfer` 转让群主（收 `group.owner_changed`，见 §5.25）、`group.dissolve` 解散群（收 `group.dissolved`，见 §5.26）、`group.rename` 改群名（收 `group.renamed`，见 §5.27）、`group.announce` 发群公告（收 `group.announced` 后用 `group.list` 拉正文，见 §5.28）

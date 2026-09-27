@@ -224,6 +224,8 @@ def main():
     r = send_msg(d, bob, "via token", "tok1")
     check("token session send ok", r["data"]["code"] == 0)
     json.loads(b.recv())
+    # v2.2：d 是 A 的第二端，其发送的消息回显到 A 的其他端（a）；消费之
+    json.loads(a.recv())
     # 无效 token
     d.send(env("auth.token", {"token": "bogus"}))
     r = json.loads(d.recv())
@@ -233,6 +235,7 @@ def main():
 
     # 消息收发
     r = send_msg(a, bob, "hello bob", "m1")
+    print("DEBUG m1 r:", json.dumps(r)[:250])
     check("alice ack ok", r["type"] == "msg.ack" and r["data"]["code"] == 0
           and r["data"]["clientMsgId"] == "m1")
     r = json.loads(b.recv())
@@ -343,16 +346,15 @@ def main():
     check("self chat.create by own account", r["type"] == "chat.create_res"
           and r["data"]["code"] == 0 and r["data"]["data"]["userId"] == carol
           and r["data"]["data"]["account"] == C)
-    # 发给别人的消息不回显给自己：发给 bob 后，自己（c1/c2）不应收到
+    # 发给别人的消息回显到自己的其他端（v2.2 多端一致）：c1 发给 bob，c2 应收到
     c1.send(env("msg.send", {"to": bob, "content": "no echo", "clientMsgId": "self3"}))
     r = json.loads(c1.recv())
     check("no echo ack ok", r["data"]["code"] == 0)
     json.loads(b.recv())  # bob 收到
-    try:
-        echo = c2.recv(0.5)
-    except socket.timeout:
-        echo = None
-    check("no echo to self sessions", echo is None)
+    echo = json.loads(c2.recv())
+    check("self echo to other sessions (v2.2)", echo is not None
+          and echo["type"] == "msg.recv" and echo["data"]["from"] == C
+          and echo["data"]["content"] == "no echo")
     c2.close()
     c1.close()
 
@@ -500,7 +502,8 @@ def main():
     time.sleep(3)  # 测试环境 IM_OFFLINE_PURGE_INTERVAL=2，等一轮清理
     n = sql_q("SELECT COUNT(*) FROM messages WHERE message_id LIKE 'purge-old-%'")
     check("expired offline purged", n == "0")
-    nf = sql_q("SELECT COUNT(*) FROM messages WHERE client_msg_id='purge-new-1'")
+    nf = sql_q("SELECT COUNT(*) FROM messages WHERE client_msg_id='purge-new-1'"
+               " AND from_user=%d AND to_user=%d" % (alice, bob))
     check("fresh offline kept", nf == "1")
     b4 = WS()
     r = login(b4, B, "pw1234")
@@ -605,6 +608,25 @@ def main():
     check("contact send ok", r["data"]["code"] == 0)
     r = json.loads(e.recv())
     check("contact recv ok", r["type"] == "msg.recv" and r["data"]["from"] == D)
+
+    # v2.2：多端一致性——D 第二端登录；d 发消息，d2 收到自发回显；
+    # d 已读，d2 收到 msg.read_notify
+    d2 = WS()
+    login(d2, D, "pw1234")
+    r = send_msg(d, E, "echo probe", "md1")
+    check("multi-device send ok", r["data"]["code"] == 0)
+    json.loads(e.recv())  # e 消费 msg.recv（接收方）
+    r = json.loads(d2.recv())
+    check("self echo to other device", r["type"] == "msg.recv"
+          and r["data"]["from"] == D and r["data"]["content"] == "echo probe"
+          and r["data"]["chatType"] == "single")
+    d.send(env("msg.read", {"from": E}))
+    r = json.loads(d.recv())
+    check("multi-device read ok", r["type"] == "msg.read_res" and r["data"]["code"] == 0)
+    r = json.loads(d2.recv())
+    check("read notify to other device", r["type"] == "msg.read_notify"
+          and r["data"]["from"] == E and "readTs" in r["data"])
+    d2.close()
 
     # 已是联系人：再次 request → 409
     d.send(env("contact.request", {"account": E}))
@@ -835,6 +857,21 @@ def main():
     mmap = {x["account"]: x for x in r["data"]["data"]["members"]}
     check("group members online true", all(m.get("online") is True
                                            for m in mmap.values()))
+    # v2.2：群自发回显到其他端——A 第二端登录，a 群发，a3 收到、发起端仍不回显
+    # token 重连做第二端（A 的登录已被错密码用例限流锁定，login 会 429）
+    a3 = WS()
+    a3.send(env("auth.token", {"token": alice_token}))
+    lr3 = json.loads(a3.recv())
+    a.send(env("msg.send", {"to": gid, "content": "grp echo", "clientMsgId": "g-echo",
+                            "chatType": "group"}))
+    r = json.loads(a.recv())
+    check("group echo send ok", r["type"] == "msg.ack" and r["data"]["code"] == 0)
+    json.loads(b.recv())  # b 消费群消息
+    r = json.loads(a3.recv())
+    check("group self echo to other device", r["type"] == "msg.recv"
+          and r["data"]["from"] == A and r["data"]["groupId"] == gid
+          and r["data"]["content"] == "grp echo" and r["data"]["chatType"] == "group")
+    a3.close()
     # 退群：b 退群后发消息 403；b 可查在群期间历史；群主 a 退群 403
     b.send(env("group.leave", {"groupId": gid}))
     r = json.loads(b.recv())
