@@ -1,4 +1,4 @@
-# IM 客户端接入标准（client_api）
+# IM 客户端接入标准（client_api，协议 v2.2）
 
 > 面向 **Qt 客户端（QWebSocket）** 与 **Web 客户端（浏览器 WebSocket）** 的开发接入文档。
 > 客户端实现只依赖本文件即可；协议正文（字段细则、时序、变更历史）见 [protocol.md](./protocol.md)。
