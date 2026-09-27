@@ -2,11 +2,11 @@
 
 本文基于当前工作区源码整理，面向已经学习过 Reactor、希望深入 WebSocket、并发模型和生产化架构的读者。
 
-> **源码状态说明：** 文中的源码行号以当前工作区为准。所述能力（Origin / Host 校验、PBKDF2-HMAC-SHA256、消息限流、协议文档与测试脚本等）均已随版本提交至 `HEAD`（截至 v2.0，群聊管理）。
+> **源码状态说明：** 文中的源码行号以当前工作区为准。所述能力（Origin / Host 校验、PBKDF2-HMAC-SHA256、消息限流、协议文档与测试脚本等）均已随版本提交至 `HEAD`（截至 v2.2，多端一致性）。
 
 ## 1. 项目定位
 
-当前项目是一个单进程的 C++17 WebSocket IM 服务端，主要用于学习 Linux 网络编程、WebSocket 协议、线程池和 IM 业务建模。**用户账号与消息已持久化到 MySQL**（`users` / `messages` 表：登录账号 `account` 为 10-11 位数字、`username` 为昵称、PBKDF2 密码哈希；消息含 offline/delivered/read 状态机）；**token 可选存储到 Redis**（`IM_REDIS_ENABLED=1`，重启后免密重连不失效，未启用则内存）；在线状态（Presence）仍为进程内存。
+当前项目是一个单进程的 C++17 WebSocket IM 服务端，主要用于学习 Linux 网络编程、WebSocket 协议、线程池和 IM 业务建模。**用户账号与消息已持久化到 MySQL**（`users` / `messages` 表：登录账号 `account` 为 10-11 位数字、`username` 为昵称、PBKDF2 密码哈希；消息含 offline/delivered/read 状态机，超 7 天未领取的离线消息由后台 TTL 线程清理）；**token、发送限流、消息幂等、在线状态（Presence）均可选存储到 Redis**（`IM_REDIS_ENABLED=1`，重启后免密重连不失效、在线状态可外部观察，未启用则全内存）。
 
 当前已经具备的能力：
 
@@ -681,6 +681,15 @@ sequenceDiagram
 
 路由位置：`src/appserver.cpp`（onEnvelope 路由）+ `src/app_group.cpp`（群处理函数）。
 
+补充（v2.1/v2.2 非指令层改动）：
+- **在线状态（Presence）**：`src/online_manager.cpp` 聚合 `PresenceStore`（`src/presence_store.hpp`
+  内存 / `src/redis_presence_store.cpp` Redis INCR+TTL），登录/断开时同步计数；
+  `contact.list` / `group.members` 条目带 `online` 字段（批量查询：Redis 一次 MGET）。
+- **多端一致性**：`msg.recv` 除投递接收方全部端外，还回显到发送者的其他在线端
+  （发起连接不回显）；`msg.read` 触发 `msg.read_notify` 推送该用户其他端。
+- **离线 TTL 清理**：`src/appserver.cpp` 的 `purgeLoop` 后台线程定期调
+  `MySqlMessageRepository::purgeExpiredOffline` 删除超 7 天未领取的单聊离线消息。
+
 ### 12.2 密码
 
 当前工作区使用：
@@ -880,10 +889,12 @@ Connection::send()
 
 ### 15.2 业务可靠性边界
 
-- 仅剩内存状态：在线状态（Presence）、内存模式的 Token/限流/幂等记录（Redis 启用时跨重启保留）。
-- `OfflineStore::take()` 后立即删除消息，后续发送失败可能丢失。
+- 仅剩内存状态：内存模式的 Token/限流/幂等/在线状态（Redis 启用时跨重启保留）。
+- 离线消息为非破坏性补发（`offline_ack` 确认后不再下发）；超 7 天未领取由 TTL 线程清理
+  （`IM_OFFLINE_PURGE_INTERVAL` 控制间隔，注意 `chrono::hours` 换算秒的历史单位坑）。
 - `msg.ack` 只表示服务端接受，不表示对方已收到或已读。
-- 幂等记录发生在限流之前。
+- Redis 调用带 1 秒超时且在锁外执行：Redis 宕机时主业务（消息收发）不受影响，
+  仅在线显示与免密重连降级（2026-09-27 审计加固）。
 - `AppServer` 同时承担路由、鉴权、业务协调和响应封装。
 
 ### 15.3 文档和代码差异
