@@ -5,7 +5,9 @@ cd "$(dirname "$0")/.."
 source scripts/db_env.sh
 
 # IM_OFFLINE_PURGE_INTERVAL=2：离线 TTL 清理间隔压到 2 秒以便用例验证（生产默认 1800）
-IM_OFFLINE_PURGE_INTERVAL=2 ./build/imserver 9191 </dev/null >server.log 2>&1 &
+# IM_SERVER_BIN 可指向 sanitizer 构建的服务端（如 build-asan/imserver）
+IM_SERVER_BIN="${IM_SERVER_BIN:-./build/imserver}"
+IM_OFFLINE_PURGE_INTERVAL=2 "$IM_SERVER_BIN" 9191 </dev/null >server.log 2>&1 &
 SRV=$!
 
 cleanup() {

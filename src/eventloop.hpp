@@ -45,6 +45,9 @@ public:
 
   bool isInLoopThread() const;
   std::thread::id threadId() const { return threadId_; }
+  // 由所属线程在进入事件循环前调用：必须在 EventLoopThread 的互斥锁内执行，
+  // 使线程身份的发布与 startLoop 的条件等待构成 happens-before（TSan 竞争修复）
+  void publishThisThread() { threadId_ = std::this_thread::get_id(); }
 
   // 注册一个周期定时器，interval 毫秒触发一次。回调在本 loop 线程执行。
   // 必须由本 loop 线程调用。返回定时器 ID。

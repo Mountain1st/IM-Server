@@ -456,7 +456,7 @@ ACK 只能确认已经完成的事情。
 | P0-5 认证安全 | ✅ | PBKDF2 + token 摘要 + 登录限流（含洗表加固） |
 | P0-6 幂等、限流、ACK | ✅ | 双后端（内存/Redis），顺序修正 |
 | P0-7 离线和写入可靠性 | ✅ | MySQL 状态机 + 非破坏性补发 + offline_ack + TTL 清理（v2.1） |
-| P1-1 生命周期和线程边界 | ◐ | 优雅关闭/停止顺序已做；TSan 常态验证未做 |
+| P1-1 生命周期和线程边界 | ✅ | 优雅关闭/停止顺序已做；TSan 全链路通过（修复 2 处 EventLoopThread 线程身份发布竞争，2026-09-27） |
 | P1-2 协议契约统一 | ✅ | v1.3-v2.0 统一 envelope，字段校验齐全 |
 | P1-3 测试和 CI | ◐ | 7 单测 + 205 biz 双模式；CI/模糊/Sanitizer 未做 |
 | P1-4 日志、指标和追踪 | ◐ | LOG_* + /health 指标；结构化/导出/告警未做 |
@@ -813,7 +813,7 @@ Message Queue Adapter
 
 - [x] 完成 Session 生命周期和线程边界治理。
 - [x] 完成单元、集成、负向测试（7 单测 + 188 biz）。
-- [ ] 启用 ASan、UBSan、TSan。
+- [x] 启用 ASan、UBSan、TSan（2026-09-27 全链路零报告；CMake `IM_SANITIZE`/`IM_TSAN` 选项）。
 - [x] 增加结构化日志和核心指标（LOG_* + /health）。
 - [ ] 增加 CI、配置校验和 clean checkout 构建。
 - [ ] 增加 TLS Gateway 部署文档。

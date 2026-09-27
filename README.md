@@ -37,6 +37,12 @@ cmake -B build && cmake --build build -j4
 ctest --test-dir build                 # 7 个单元测试
 bash scripts/test_biz.sh               # 205 个业务回归用例（WebSocket 全链路）
 IM_REDIS_ENABLED=1 IM_REDIS_PORT=6379 bash scripts/test_biz.sh   # Redis 模式
+
+# Sanitizer（已通过 ASan/UBSan/LSan/TSan 全链路，修复过 2 处线程身份发布竞争）
+cmake -B build-asan -DIM_SANITIZE=ON && cmake --build build-asan -j4
+IM_SERVER_BIN=./build-asan/imserver bash scripts/test_biz.sh     # ASan 全链路
+cmake -B build-tsan -DIM_TSAN=ON && cmake --build build-tsan -j4
+IM_SERVER_BIN=./build-tsan/imserver bash scripts/test_biz.sh     # TSan 全链路
 ```
 
 ## 架构（一图）

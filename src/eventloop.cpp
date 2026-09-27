@@ -74,7 +74,8 @@ EventLoop::~EventLoop() {
 }
 
 void EventLoop::run() {
-  threadId_ = std::this_thread::get_id();
+  // 线程身份由 EventLoopThread 在锁内经 publishThisThread() 发布（勿在此赋值：
+  // 此处写入与主线程 isInLoopThread 的读缺乏同步边，TSan 报数据竞争）
   running_ = true;
   std::vector<struct epoll_event> events(256);
   while (running_) {
