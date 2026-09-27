@@ -125,7 +125,10 @@ void AppServer::onGroupLeave(const std::shared_ptr<Session>& session, const json
     return;
   }
   const int64_t now = static_cast<int64_t>(std::time(nullptr));
-  groupRepo_->removeMember(groupId, session->userId(), now);
+  if (!groupRepo_->removeMember(groupId, session->userId(), now)) {
+    session->reply(makeResult("group.leave_res", 500, "服务器内部错误", json::object()));
+    return;
+  }
   session->reply(makeResult("group.leave_res", 0, "ok", json::object()));
   // 通知剩余在线成员
   std::string account;
@@ -182,7 +185,11 @@ void AppServer::onGroupKick(const std::shared_ptr<Session>& session, const json&
     return;
   }
   const int64_t now = static_cast<int64_t>(std::time(nullptr));
-  groupRepo_->removeMember(groupId, target, now);  // 同退群：left_ts=now，窗口保留，可重拉
+  // 同退群：left_ts=now，窗口保留，可重拉；失败须回 500（避免缓存/DB 状态分叉还照发事件）
+  if (!groupRepo_->removeMember(groupId, target, now)) {
+    session->reply(makeResult("group.kick_res", 500, "服务器内部错误", json::object()));
+    return;
+  }
   session->reply(makeResult("group.kick_res", 0, "ok", json::object()));
   // 被踢者（在线）收 group.removed，其余在线成员收 member_changed(kick)
   json removed = {{"groupId", groupId}, {"name", name}};

@@ -15,6 +15,10 @@ MySqlClient::MySqlClient(const std::string& host, unsigned port, const std::stri
     return;
   }
   mysql_options(conn_, MYSQL_SET_CHARSET_NAME, "utf8mb4");
+  // 读写超时（秒）：MySQL 停顿时避免永久阻塞（如停机时 purge 线程 join 挂死）
+  const unsigned kMySqlIoTimeoutSec = 5;
+  mysql_options(conn_, MYSQL_OPT_READ_TIMEOUT, &kMySqlIoTimeoutSec);
+  mysql_options(conn_, MYSQL_OPT_WRITE_TIMEOUT, &kMySqlIoTimeoutSec);
   if (!mysql_real_connect(conn_, host.c_str(), user.c_str(), password.c_str(),
                           db.c_str(), port, nullptr, 0)) {
     LOG_E("[mysql] 连接失败: " << mysql_error(conn_));

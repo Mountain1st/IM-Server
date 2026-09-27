@@ -222,7 +222,7 @@ def main():
           and r["data"]["code"] == 0 and r["data"]["data"]["userId"] == alice)
     # 重连后可正常收发
     r = send_msg(d, bob, "via token", "tok1")
-    check("token session send ok", r["data"]["code"] == 0)
+    check("token session send ok", r["type"] == "msg.ack" and r["data"]["code"] == 0)
     json.loads(b.recv())
     # v2.2：d 是 A 的第二端，其发送的消息回显到 A 的其他端（a）；消费之
     json.loads(a.recv())
@@ -324,7 +324,7 @@ def main():
           and r["data"]["code"] == 0)
     c1.send(env("msg.send", {"to": carol, "content": "multi self", "clientMsgId": "self2"}))
     r = json.loads(c1.recv())
-    check("self multi ack ok", r["data"]["code"] == 0)
+    check("self multi ack ok", r["type"] == "msg.ack" and r["data"]["code"] == 0)
     try:
         r1 = c1.recv(0.5)
     except socket.timeout:
@@ -349,7 +349,7 @@ def main():
     # 发给别人的消息回显到自己的其他端（v2.2 多端一致）：c1 发给 bob，c2 应收到
     c1.send(env("msg.send", {"to": bob, "content": "no echo", "clientMsgId": "self3"}))
     r = json.loads(c1.recv())
-    check("no echo ack ok", r["data"]["code"] == 0)
+    check("no echo ack ok", r["type"] == "msg.ack" and r["data"]["code"] == 0)
     json.loads(b.recv())  # bob 收到
     echo = json.loads(c2.recv())
     check("self echo to other sessions (v2.2)", echo is not None
@@ -372,12 +372,12 @@ def main():
     # clientMsgId 幂等去重：同 id 重发只投递一次
     a.send(env("msg.send", {"to": bob, "content": "dup", "clientMsgId": "dup1"}))
     r = json.loads(a.recv())
-    check("dup first ack ok", r["data"]["code"] == 0)
+    check("dup first ack ok", r["type"] == "msg.ack" and r["data"]["code"] == 0)
     r = json.loads(b.recv())
     check("dup first delivered", r["data"]["clientMsgId"] == "dup1")
     a.send(env("msg.send", {"to": bob, "content": "dup", "clientMsgId": "dup1"}))
     r = json.loads(a.recv())
-    check("dup second ack ok", r["data"]["code"] == 0)
+    check("dup second ack ok", r["type"] == "msg.ack" and r["data"]["code"] == 0)
     b.s.settimeout(0.5)
     try:
         dup = b.recv()
@@ -613,7 +613,7 @@ def main():
     check("contact online self true", emap.get(D, {}).get("online") is True)
     # 成为联系人后互发消息成功
     r = send_msg(d, E, "hi contact", "ct1")
-    check("contact send ok", r["data"]["code"] == 0)
+    check("contact send ok", r["type"] == "msg.ack" and r["data"]["code"] == 0)
     r = json.loads(e.recv())
     check("contact recv ok", r["type"] == "msg.recv" and r["data"]["from"] == D)
 
@@ -622,7 +622,7 @@ def main():
     d2 = WS()
     login(d2, D, "pw1234")
     r = send_msg(d, E, "echo probe", "md1")
-    check("multi-device send ok", r["data"]["code"] == 0)
+    check("multi-device send ok", r["type"] == "msg.ack" and r["data"]["code"] == 0)
     json.loads(e.recv())  # e 消费 msg.recv（接收方）
     r = json.loads(d2.recv())
     check("self echo to other device", r["type"] == "msg.recv"
