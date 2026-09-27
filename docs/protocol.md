@@ -367,9 +367,9 @@ docker compose up -d --build
    只有绕过服务器手工写库且超过 2048 字节才会截
 4. 测试脚本清理失败看不见报错（低）：`test_biz.sh` 的清理错了也不显示，不影响功能
 5. 个别测试只验了结果码没验类型（低）：测试写得不够严，功能本身没问题
-6. **Redis 无超时 + 锁内 IO 级联（中，2026-09-27 审计）**：Redis 停顿时（OOM/fork/网络黑洞）
-   全服阻塞（登录/断开在锁内做 Redis IO，消息扇出共享该锁）；Redis 只在本机/容器网络时风险低
-7. **列表接口 N+1 查询（低）**：`contact.list`/`group.members` 每条目一次在线查询（Redis 模式
-   逐条往返）；`group.members` 循环内还重复查群信息
+6. ~~Redis 无超时 + 锁内 IO 级联~~ **已修复**：Redis 读写/连接超时 1 秒（假 Redis 实测登录 1.2s、
+   列表 1.0s 降级返回不挂死）；在线标记调用移出互斥锁；失败统一按离线降级
+7. ~~列表接口 N+1 查询~~ **已修复**：`contact.list`/`group.members` 在线状态改批量查询
+   （Redis 一次 MGET / 内存单锁）；`group.members` 群信息提出循环只查一次
 8. **read_notify 账号枚举（低）**：双端自收 `msg.read` 回执可把数字 userId 映射为账号
   （穿透 `searchable=0`）；account 本为准公开标识，影响有限

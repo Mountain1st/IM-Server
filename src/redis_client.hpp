@@ -28,6 +28,10 @@ public:
   int64_t commandInt(const std::vector<std::string>& args);
   // 执行返回字符串的命令（GET 等）。成功返回 true 并写出 value（不存在则 value 为空）。
   bool commandString(const std::vector<std::string>& args, std::string* value);
+  // 执行返回字符串数组的命令（MGET）。成功返回 true 且 out 与请求 key 一一对应
+  // （不存在的 key 对应空串）。失败返回 false（调用方按降级处理）。
+  bool commandStringArray(const std::vector<std::string>& args,
+                          std::vector<std::string>* out);
   // 执行返回整数状态码的布尔命令（SET NX：1=成功 0=已存在，失败=-2）。
   int64_t commandStatus(const std::vector<std::string>& args);
 

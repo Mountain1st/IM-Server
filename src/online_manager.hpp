@@ -31,6 +31,8 @@ public:
   bool isOnline(int64_t userId);
   // 在线状态查询（PresenceStore 后端；未注入时退化为本地会话表判断）
   bool isOnlinePresence(int64_t userId);
+  // 批量在线查询（列表接口用：Redis 一次 MGET，内存单锁收集）
+  std::vector<bool> isOnlinePresenceBatch(const std::vector<int64_t>& userIds);
 
 private:
   std::mutex mutex_;

@@ -432,21 +432,21 @@ void AppServer::onGroupMembers(const std::shared_ptr<Session>& session, const js
     return;
   }
   const auto ids = groupRepo_->listMemberIds(groupId);
+  // 批量在线查询（N+1 优化：原循环内逐成员 isOnlinePresence）；ownerId 已在上文查出
+  const auto onlineFlags = onlineMgr_.isOnlinePresenceBatch(ids);
   json arr = json::array();
+  size_t oi = 0;
   for (const int64_t uid : ids) {
     std::string account, username;
     int64_t joined = 0, left = 0;
     userStore_->accountOf(uid, &account);
     userStore_->nickname(uid, &username);
     groupRepo_->memberPeriod(groupId, uid, &joined, nullptr);
-    std::string gname;
-    int64_t ownerId = 0;
-    groupRepo_->getGroup(groupId, &gname, &ownerId);
     arr.push_back(json{{"account", account},
                        {"username", username},
                        {"joinedTs", joined},
                        {"isOwner", uid == ownerId},
-                       {"online", onlineMgr_.isOnlinePresence(uid)}});
+                       {"online", onlineFlags[oi++]}});
   }
   session->reply(makeResult("group.members_res", 0, "ok", json{{"members", arr}}));
 }

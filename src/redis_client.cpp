@@ -17,13 +17,18 @@ void RedisClient::connect() {
     redisFree(ctx_);
     ctx_ = nullptr;
   }
-  ctx_ = redisConnect(host_.c_str(), port_);
+  // 带连接与读写超时：Redis 停顿（OOM 拒答/fork 卡顿/网络黑洞）时最多等 1 秒，
+  // 防止无超时阻塞沿锁传导拖垮业务线程（2026-09-27 审计中危项）
+  const timeval kConnTimeout{1, 0};   // 连接 1 秒
+  const timeval kIoTimeout{1, 0};     // 每次读/写 1 秒
+  ctx_ = redisConnectWithTimeout(host_.c_str(), port_, kConnTimeout);
   if (!ctx_ || ctx_->err) {
     errStr_ = ctx_ ? ctx_->errstr : "allocation failure";
     ok_ = false;
     if (ctx_) { redisFree(ctx_); ctx_ = nullptr; }
     return;
   }
+  redisSetTimeout(ctx_, kIoTimeout);
   if (!password_.empty()) {
     redisReply* r = static_cast<redisReply*>(redisCommand(ctx_, "AUTH %s", password_.c_str()));
     if (!r || r->type == REDIS_REPLY_ERROR) {
@@ -98,6 +103,29 @@ bool RedisClient::commandString(const std::vector<std::string>& args,
   }
   if (r->type == REDIS_REPLY_STRING) {
     *value = std::string(r->str, r->len);
+    freeReplyObject(r);
+    return true;
+  }
+  freeReplyObject(r);
+  return false;
+}
+
+bool RedisClient::commandStringArray(const std::vector<std::string>& args,
+                                     std::vector<std::string>* out) {
+  std::lock_guard<std::mutex> lock(mutex_);
+  redisReply* r = execLocked(args);
+  if (!r) return false;
+  out->clear();
+  if (r->type == REDIS_REPLY_ARRAY) {
+    out->reserve(r->elements);
+    for (size_t i = 0; i < r->elements; ++i) {
+      const redisReply* e = r->element[i];
+      if (e && e->type == REDIS_REPLY_STRING) {
+        out->emplace_back(e->str, e->len);
+      } else {
+        out->emplace_back(); // NIL 或异常元素按空串
+      }
+    }
     freeReplyObject(r);
     return true;
   }

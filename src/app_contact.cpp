@@ -131,19 +131,28 @@ void AppServer::onContactList(const std::shared_ptr<Session>& session, const jso
   json arr = json::array();
   const int64_t self = session->userId();
   // "自己"联系人恒排第一位（contact_id == 自己 userId）
+  std::vector<int64_t> otherIds;
   for (const int64_t id : ids) {
-    if (id == self) continue;
+    if (id != self) otherIds.push_back(id);
+  }
+  // 批量在线查询（N+1 优化：Redis 一次 MGET / 内存单锁）
+  std::vector<int64_t> queryIds = otherIds;
+  queryIds.push_back(self);
+  const auto onlineFlags = onlineMgr_.isOnlinePresenceBatch(queryIds);
+  const bool selfOnline = onlineFlags.back();
+  size_t oi = 0;
+  for (const int64_t id : otherIds) {
     std::string account, username;
     userStore_->accountOf(id, &account);
     userStore_->nickname(id, &username);
     arr.push_back(json{{"account", account}, {"username", username},
-                       {"online", onlineMgr_.isOnlinePresence(id)}});
+                       {"online", onlineFlags[oi++]}});
   }
   std::string selfAccount, selfNick;
   userStore_->accountOf(self, &selfAccount);
   userStore_->nickname(self, &selfNick);
   json selfEntry = json{{"account", selfAccount}, {"username", selfNick},
-                        {"online", onlineMgr_.isOnlinePresence(self)}};
+                        {"online", selfOnline}};
   json out = json::array();
   out.push_back(selfEntry);
   for (const auto& e : arr) out.push_back(e);

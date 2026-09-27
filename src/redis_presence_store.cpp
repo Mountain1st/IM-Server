@@ -27,9 +27,29 @@ void RedisPresenceStore::offline(int64_t userId) {
 }
 
 bool RedisPresenceStore::isOnline(int64_t userId) {
-  // commandInt 失败返回 -2（连接错误）：按"未知/离线"处理
+  // commandInt 失败返回 -2（连接错误/超时）：按"未知/离线"处理
   return client_.commandInt(
              {"EXISTS", "p:online:" + std::to_string(userId)}) == 1;
+}
+
+std::vector<bool> RedisPresenceStore::isOnlineBatch(
+    const std::vector<int64_t>& userIds) {
+  // 一次 MGET 替代 N 次 EXISTS：列表接口（contact.list/group.members）N+1 优化。
+  // 失败（连接错误/超时）统一按离线降级，不影响主业务。
+  const std::vector<bool> kAllOffline(userIds.size(), false);
+  if (userIds.empty()) return {};
+  std::vector<std::string> args{"MGET"};
+  args.reserve(userIds.size() + 1);
+  for (int64_t uid : userIds) args.push_back("p:online:" + std::to_string(uid));
+  std::vector<std::string> vals;
+  if (!client_.commandStringArray(args, &vals)) return kAllOffline;
+  if (vals.size() != userIds.size()) return kAllOffline; // 长度不符按降级
+  std::vector<bool> out;
+  out.reserve(vals.size());
+  for (const std::string& v : vals) {
+    out.push_back(!v.empty() && v != "0");
+  }
+  return out;
 }
 
 } // namespace im

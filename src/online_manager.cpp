@@ -8,9 +8,13 @@ OnlineManager::OnlineManager(std::shared_ptr<PresenceStore> presence)
     : presence_(std::move(presence)) {}
 
 void OnlineManager::add(int64_t userId, const std::weak_ptr<Session>& ws) {
-  std::lock_guard<std::mutex> lock(mutex_);
-  map_[userId].insert(ws);
-  // 同步维护在线标记（锁外调用会与 remove 的时序交错，锁内串行更稳）
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    map_[userId].insert(ws);
+  }
+  // Redis 调用放锁外：presence 后端可能阻塞（远程 Redis/停顿），
+  // 锁内等待会把消息扇出等共享本锁的路径一并拖死（2026-09-27 审计）。
+  // 锁外与 remove 的交错仅影响 Presence 计数的瞬时一致性，由 TTL/下次事件自愈。
   if (presence_) presence_->online(userId);
 }
 
@@ -34,25 +38,41 @@ bool OnlineManager::isOnlinePresence(int64_t userId) {
   return isOnline(userId);
 }
 
-std::vector<std::shared_ptr<Session>> OnlineManager::sessions(int64_t userId) {
+std::vector<bool> OnlineManager::isOnlinePresenceBatch(
+    const std::vector<int64_t>& userIds) {
+  if (presence_) return presence_->isOnlineBatch(userIds);
+  // 内存退化：单锁收集条目存在性（列表展示容忍弱引用瞬时误差）
   std::lock_guard<std::mutex> lock(mutex_);
-  std::vector<std::shared_ptr<Session>> out;
-  auto it = map_.find(userId);
-  if (it == map_.end()) return out;
-  // 顺手清除过期条目，防止 onLogin 的 close 竞态等场景残留弱引用导致表膨胀
-  int expired = 0;
-  for (auto w = it->second.begin(); w != it->second.end();) {
-    if (auto s = w->lock()) {
-      out.push_back(std::move(s));
-      ++w;
-    } else {
-      w = it->second.erase(w);
-      ++expired;
-    }
+  std::vector<bool> out;
+  out.reserve(userIds.size());
+  for (int64_t uid : userIds) {
+    auto it = map_.find(uid);
+    out.push_back(it != map_.end() && !it->second.empty());
   }
-  if (it->second.empty()) map_.erase(it);
+  return out;
+}
+
+std::vector<std::shared_ptr<Session>> OnlineManager::sessions(int64_t userId) {
+  std::vector<std::shared_ptr<Session>> out;
+  int expired = 0;
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    auto it = map_.find(userId);
+    if (it == map_.end()) return out;
+    // 顺手清除过期条目，防止 onLogin 的 close 竞态等场景残留弱引用导致表膨胀
+    for (auto w = it->second.begin(); w != it->second.end();) {
+      if (auto s = w->lock()) {
+        out.push_back(std::move(s));
+        ++w;
+      } else {
+        w = it->second.erase(w);
+        ++expired;
+      }
+    }
+    if (it->second.empty()) map_.erase(it);
+  }
+  // 锁外补偿：每个被清除的过期会话对称减一（对应 add 时的 online）
   if (expired > 0 && presence_) {
-    // 过期弱引用兜底清理：每个被清除的会话对称减一（对应 add 时的 online）
     for (int i = 0; i < expired; ++i) presence_->offline(userId);
   }
   return out;

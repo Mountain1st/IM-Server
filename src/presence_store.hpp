@@ -8,6 +8,7 @@
 #include <cstdint>
 #include <mutex>
 #include <unordered_map>
+#include <vector>
 
 namespace im {
 
@@ -21,6 +22,14 @@ class PresenceStore {
   virtual void offline(int64_t userId) = 0;
   // 该用户当前是否在线（至少一个存活连接）。
   virtual bool isOnline(int64_t userId) = 0;
+  // 批量在线查询（列表接口用，避免 N+1 逐条往返）。
+  // 返回与 userIds 等长的布尔向量；默认逐条实现，后端可覆写为批量协议（如 MGET）。
+  virtual std::vector<bool> isOnlineBatch(const std::vector<int64_t>& userIds) {
+    std::vector<bool> out;
+    out.reserve(userIds.size());
+    for (int64_t uid : userIds) out.push_back(isOnline(uid));
+    return out;
+  }
 };
 
 // 内存后端：userId -> 连接计数。单实例下的权威实现。

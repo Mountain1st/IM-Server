@@ -25,6 +25,8 @@ class RedisPresenceStore : public PresenceStore {
   void online(int64_t userId) override;
   void offline(int64_t userId) override;
   bool isOnline(int64_t userId) override;
+  // 批量查询：一次 MGET 取回全部计数（非空且非 "0" 即在线）
+  std::vector<bool> isOnlineBatch(const std::vector<int64_t>& userIds) override;
 
  private:
   RedisClient client_;
