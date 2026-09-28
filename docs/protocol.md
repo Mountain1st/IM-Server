@@ -323,6 +323,10 @@ imserver [端口] [IO线程数] [工作线程数] [最大连接数] [允许Origi
 | `IM_REDIS_PASSWORD` / `IM_REDIS_DB` | 空 / `0` | Redis 认证与库号 |
 | `IM_MAX_PER_IP_CONN` | `100` | 单 IP 并发连接上限（`0` 表示不限） |
 | `IM_OFFLINE_PURGE_INTERVAL` | `1800` | 离线消息 TTL 清理间隔（秒）；离线消息保留 7 天，超期由后台任务删除 |
+| `IM_LOG_FILE` | 空（stderr） | 日志输出文件（追加） |
+| `IM_LOG_LEVEL` | `INFO` | 日志级别：`DEBUG` / `INFO` / `WARN` / `ERROR` |
+| `IM_LOG_ROTATE_BYTES` | `52428800` | 日志按大小轮转阈值（字节，50MB；`0` 不轮转） |
+| `IM_LOG_KEEP` | `5` | 轮转保留份数（`app.log.1` … `.5`） |
 
 MySQL 连接失败启动报错退出；`IM_REDIS_ENABLED=1` 且连接失败同样报错退出。
 
