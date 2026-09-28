@@ -34,6 +34,7 @@ cmake -B build && cmake --build build -j4
 ## 测试
 
 ```bash
+bash scripts/ci.sh                     # 本地 CI 一键：构建+单测+双模式回归（--full 加 ASan）
 ctest --test-dir build                 # 7 个单元测试
 bash scripts/test_biz.sh               # 205 个业务回归用例（WebSocket 全链路）
 IM_REDIS_ENABLED=1 IM_REDIS_PORT=6379 bash scripts/test_biz.sh   # Redis 模式

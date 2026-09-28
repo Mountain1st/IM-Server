@@ -1,0 +1,77 @@
+name: CI
+
+on: [push, pull_request]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    services:
+      mysql:
+        image: mysql:8.4
+        env:
+          MYSQL_ROOT_PASSWORD: 520010
+          MYSQL_DATABASE: IMS_reactor_db
+          MYSQL_USER: IMS_jack
+          MYSQL_PASSWORD: 520010
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd="mysqladmin ping -proot_520010"
+          --health-interval=10s
+          --health-timeout=5s
+          --health-retries=10
+      redis:
+        image: redis:8-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd="redis-cli ping"
+          --health-interval=10s
+          --health-timeout=5s
+          --health-retries=10
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 安装依赖
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y default-libmysqlclient-dev libhiredis-dev
+
+      - name: 等待并初始化数据库
+        run: |
+          # 等待 MySQL 服务就绪（容器 health 后仍需几秒完成初始化）
+          for i in $(seq 1 30); do
+            MYSQL_PWD=520010 mysql -h 127.0.0.1 -u IMS_jack IMS_reactor_db \
+              -e "SELECT 1" >/dev/null 2>&1 && break
+            sleep 2
+          done
+          MYSQL_PWD=520010 mysql -h 127.0.0.1 -u IMS_jack IMS_reactor_db < db/schema.sql
+          # 建业务回归所需表外环境（真实数据表结构以 schema.sql 为准）
+          MYSQL_PWD=520010 mysql -h 127.0.0.1 -u IMS_jack IMS_reactor_db \
+            -e "SELECT COUNT(*) FROM users"
+
+      - name: 构建
+        run: |
+          cmake -B build -DCMAKE_BUILD_TYPE=Release
+          cmake --build build -j"$(nproc)"
+
+      - name: 单元测试
+        run: ctest --test-dir build --output-on-failure
+
+      - name: 业务回归（内存模式）
+        run: IM_SERVER_BIN=./build/imserver bash scripts/test_biz.sh
+
+      - name: 业务回归（Redis 模式）
+        run: |
+          IM_REDIS_ENABLED=1 IM_REDIS_PORT=6379 \
+            IM_SERVER_BIN=./build/imserver bash scripts/test_biz.sh
+
+      - name: Sanitizer（ASan+UBSan）
+        run: |
+          cmake -B build-asan -DIM_SANITIZE=ON
+          cmake --build build-asan -j"$(nproc)"
+          ctest --test-dir build-asan --output-on-failure
+          IM_SERVER_BIN=./build-asan/imserver ASAN_OPTIONS=detect_leaks=1 \
+            bash scripts/test_biz.sh
+          ! grep -qE 'AddressSanitizer|runtime error' server.log
