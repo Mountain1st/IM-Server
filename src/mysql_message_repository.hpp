@@ -28,6 +28,8 @@ public:
   std::vector<StoredMessage> fetchHistory(int64_t userA, int64_t userB,
                                           int limit) override;
   void markRead(int64_t toUser, int64_t fromUser, int64_t readTs) override;
+  // 两用户间是否存在单聊消息记录（任一方向）
+  bool hasConversation(int64_t userA, int64_t userB) override;
   std::vector<StoredMessage> fetchGroupMessages(int64_t groupId,
                                                 int64_t sinceTs,
                                                 int64_t untilTs,

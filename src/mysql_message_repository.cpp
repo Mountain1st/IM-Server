@@ -154,8 +154,36 @@ std::vector<StoredMessage> MySqlMessageRepository::fetchHistory(int64_t userA,
   return out;
 }
 
-void MySqlMessageRepository::markRead(int64_t toUser, int64_t fromUser, int64_t readTs) {
+bool MySqlMessageRepository::hasConversation(int64_t userA, int64_t userB) {
+  // 任一方向存在单聊记录即视为有往来（群消息不算：群内非联系人互见属正常语义）
   std::lock_guard<std::mutex> lock(mutex_);
+  if (!client_.ok() || userA <= 0 || userB <= 0) return false;
+  int errNo = 0;
+  MYSQL_STMT* stmt = mysqlStmtExec(client_.handle(),
+      "SELECT 1 FROM messages WHERE group_id = 0 AND "
+      "((from_user = ? AND to_user = ?) OR (from_user = ? AND to_user = ?)) LIMIT 1",
+      {std::to_string(userA), std::to_string(userB),
+       std::to_string(userB), std::to_string(userA)},
+      &errNo);
+  if (!stmt) {
+    LOG_E("[mysql] 会话关系查询失败 errno=" << errNo);
+    return false; // 查询失败按无往来处理（fail-closed，不泄露）
+  }
+  MYSQL_BIND res[1];
+  int dummy = 0;
+  memset(res, 0, sizeof res);
+  res[0].buffer_type = MYSQL_TYPE_LONG;
+  res[0].buffer = &dummy;
+  bool found = false;
+  if (!mysql_stmt_bind_result(stmt, res) && !mysql_stmt_store_result(stmt) &&
+      mysql_stmt_fetch(stmt) == 0) {
+    found = true;
+  }
+  mysql_stmt_close(stmt);
+  return found;
+}
+
+void MySqlMessageRepository::markRead(int64_t toUser, int64_t fromUser, int64_t readTs) {  std::lock_guard<std::mutex> lock(mutex_);
   if (!client_.ok()) return;
   int errNo = 0;
   MYSQL_STMT* stmt = mysqlStmtExec(client_.handle(),

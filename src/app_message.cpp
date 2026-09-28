@@ -279,13 +279,17 @@ void AppServer::onRead(const std::shared_ptr<Session>& session, const json& data
   msgRepo_->markRead(session->userId(), from, ts);
   session->reply(makeResult("msg.read_res", 0, "ok", json::object()));
   // 多端一致性（v2.2）：已读同步——通知该用户其他在线端刷新未读状态（免 ACK，
-  // 丢失靠重登补发与 chat.history 拉取兜底）
-  std::string fromAccount;
-  if (userStore_->accountOf(from, &fromAccount)) {
-    json rd = {{"from", fromAccount}, {"readTs", ts}};
-    for (auto& t : onlineMgr_.sessions(session->userId())) {
-      if (t.get() == session.get()) continue;
-      t->reply(makeEnvelopeText("msg.read_notify", rd));
+  // 丢失靠重登补发与 chat.history 拉取兜底）。
+  // 推送门槛（v2.2.1 收紧）：仅当与目标确有单聊往来才推——防数字 userId 经
+  // 回显枚举账号（2026-09-27 审计低危）；查询失败按无往来（fail-closed 不泄露）
+  if (msgRepo_->hasConversation(session->userId(), from)) {
+    std::string fromAccount;
+    if (userStore_->accountOf(from, &fromAccount)) {
+      json rd = {{"from", fromAccount}, {"readTs", ts}};
+      for (auto& t : onlineMgr_.sessions(session->userId())) {
+        if (t.get() == session.get()) continue;
+        t->reply(makeEnvelopeText("msg.read_notify", rd));
+      }
     }
   }
 }

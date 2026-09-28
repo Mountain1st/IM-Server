@@ -54,6 +54,9 @@ public:
                                                   int limit) = 0;
   // 把接收方 toUser 与 fromUser 之间、readTs 之前未读的消息标记为已读。
   virtual void markRead(int64_t toUser, int64_t fromUser, int64_t readTs) = 0;
+  // 两用户之间是否存在单聊消息记录（任一方向）。read_notify 推送门槛用：
+  // 无往来目标不推送，防 userId→account 枚举（2026-09-27 审计低危）。
+  virtual bool hasConversation(int64_t userA, int64_t userB) = 0;
   // 拉取某群在时间窗内的消息：ts > sinceTs（水位线），untilTs==0 表示无上界；
   // asc=true 按 ts 升序（补发），false 按 ts 倒序（历史）；limit 条。
   virtual std::vector<StoredMessage> fetchGroupMessages(int64_t groupId,

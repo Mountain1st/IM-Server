@@ -399,5 +399,5 @@ docker compose up -d --build
    列表 1.0s 降级返回不挂死）；在线标记调用移出互斥锁；失败统一按离线降级
 7. ~~列表接口 N+1 查询~~ **已修复**：`contact.list`/`group.members` 在线状态改批量查询
    （Redis 一次 MGET / 内存单锁）；`group.members` 群信息提出循环只查一次
-8. **read_notify 账号枚举（低）**：双端自收 `msg.read` 回执可把数字 userId 映射为账号
-  （穿透 `searchable=0`）；account 本为准公开标识，影响有限
+8. ~~read_notify 账号枚举（低）~~ **已修复**：`msg.read_notify` 仅在双方确有单聊往来时
+  推送（查询失败按无往来 fail-closed），数字 userId 枚举账号的回显通道关闭

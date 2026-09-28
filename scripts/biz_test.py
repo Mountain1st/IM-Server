@@ -634,6 +634,16 @@ def main():
     r = json.loads(d2.recv())
     check("read notify to other device", r["type"] == "msg.read_notify"
           and r["data"]["from"] == E and "readTs" in r["data"])
+    # v2.2.1 收紧：与 D 无任何消息往来的目标（数字 userId）不应触发 read_notify
+    # （防止双端自收回执把 userId 枚举成账号，穿透 searchable=0）
+    d.send(env("msg.read", {"from": sink_id}))
+    r = json.loads(d.recv())
+    check("read no-relation ok", r["type"] == "msg.read_res" and r["data"]["code"] == 0)
+    try:
+        leaked = d2.recv(0.5)
+    except socket.timeout:
+        leaked = None
+    check("read notify not leaked for stranger", leaked is None)
     d2.close()
 
     # 已是联系人：再次 request → 409
