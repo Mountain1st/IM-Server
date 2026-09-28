@@ -16,6 +16,8 @@ MySQL 持久化 + Redis 可选双后端，覆盖注册登录、单聊、联系�
 - **多端**：一账号多设备同时在线，自发消息回显 + 已读同步（msg.read_notify）
 - **存储**：MySQL 六表全参数化 SQL；Redis 可选（token/限流/幂等/在线状态，调用带超时且锁外执行——Redis 宕机不影响消息收发）
 - **可靠性**：clientMsgId 幂等、滑动窗口限流、离线消息 TTL 清理（7 天）、优雅停机
+- **部署**：Docker Compose 四件套（mysql+redis+imserver+**nginx 反代**）；
+  `X-Forwarded-For` 真实 IP 信任链、TLS（wss）终结位、日志按大小轮转
 
 ## 快速开始
 

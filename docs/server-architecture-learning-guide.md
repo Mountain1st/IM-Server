@@ -689,6 +689,10 @@ sequenceDiagram
   （发起连接不回显）；`msg.read` 触发 `msg.read_notify` 推送该用户其他端。
 - **离线 TTL 清理**：`src/appserver.cpp` 的 `purgeLoop` 后台线程定期调
   `MySqlMessageRepository::purgeExpiredOffline` 删除超 7 天未领取的单聊离线消息。
+- **Nginx 反向代理**（部署面）：`nginx/im.conf` + compose 第四服务；真实 IP 走
+  `X-Forwarded-For` 信任链（`ws::firstForwardedIp` 白名单字符过滤 → `Session`
+  可信代理判定，`IM_TRUSTED_PROXIES` 未配置即忽略头防伪造），部署细节见
+  `docs/nginx-deploy.md`。
 
 ### 12.2 密码
 

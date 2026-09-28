@@ -32,6 +32,9 @@
 - WebSocket Ping / Pong 心跳，多端同时在线，单 IP 连接数上限。
 - 离线消息 TTL 清理（超 7 天未领取后台删除，间隔可配）。
 - `/health` 指标端点，统一 `LOG_*` 日志，MySQL 读写超时。
+- **Nginx 反向代理接入**（v2.2 后）：`nginx/im.conf` + compose 第四服务（WebSocket
+  升级/90s 超时/每 IP 50 连接）；`X-Forwarded-For` 真实 IP 信任链
+  （`IM_TRUSTED_PROXIES`，未配置即忽略防伪造）；过代理 207 用例全量验证。
 - 7 个 CTest 单元测试 + 205 个业务回归用例（内存/Redis 双模式）。
 - 安全加固：offline_ack 上限、clientMsgId 上限、登录洗表防护、TTL 单位修复、
   Redis 级联防护（2026-09-09 / 2026-09-27 两轮审计闭环）。
@@ -836,13 +839,17 @@ MySQL 超时、弱断言、迁移幂等、清理告警、heartbeat 文档）。
 
 已完成追加（2026-09-27/28 第二轮）：B 区三项全部落地（Sanitizer 首跑修 2 处线程身份竞态、
 日志轮转 50MB×5、CI 本地一键 + GitHub Actions 工作流）；D 区三项（client/ 与本文档入库、
-README、read_notify 收紧 fail-closed）；A 区六项打磨；clean checkout 构建验证通过。
+README、read_notify 收紧 fail-closed）；A 区六项打磨；clean checkout 构建验证通过；
+**Nginx 反向代理落地**（真实 IP 信任链 + 207 用例过代理全量验证，见
+`docs/nginx-deploy.md`）；**Windows 客户端已按设计文档实现**（Qt6，含重连拉 history
+对齐多端视图）。
 
-下一步（2026-09-28 审计后，按价值排序）：
+下一步（2026-09-28 更新，按价值排序）：
 
-1. **Windows 客户端落地**（最大价值方向）：按 `docs/client_design.md` 实施（Qt6），
-   重连流程含"拉 history 对齐多端视图"——恰好覆盖下述已知边界，项目由此端到端可用
-2. **推送 GitHub**：仓库当前无 remote；推送后 `.github/workflows/ci.yml` 生效
+1. **推送 GitHub**：仓库当前无 remote；推送后 `.github/workflows/ci.yml` 生效，
+   项目对外可访问（唯一待办）
+2. **端到端联调**（可选）：Windows 客户端 ↔ 本服务端经 Nginx（wss）实测一轮，
+   将联调问题回馈协议文档
 3. **多端消息漫游：明确不做**（2026-09-28 决策）：等同微信登录时"同步聊天记录"
    选项的漫游机制；本项目保持"不勾选"模式——离线端重登后由客户端拉
    `chat.history` / `group.history` 对齐视图（服务端全量可查），见 §11.3
