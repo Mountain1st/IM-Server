@@ -327,6 +327,7 @@ imserver [端口] [IO线程数] [工作线程数] [最大连接数] [允许Origi
 | `IM_LOG_LEVEL` | `INFO` | 日志级别：`DEBUG` / `INFO` / `WARN` / `ERROR` |
 | `IM_LOG_ROTATE_BYTES` | `52428800` | 日志按大小轮转阈值（字节，50MB；`0` 不轮转） |
 | `IM_LOG_KEEP` | `5` | 轮转保留份数（`app.log.1` … `.5`） |
+| `IM_TRUSTED_PROXIES` | 空 | 可信反向代理 IP 列表（逗号分隔）；对端在列表内时握手日志显示 `X-Forwarded-For` 真实客户端 IP，未配置则忽略该头（防伪造）。见 `docs/nginx-deploy.md` |
 
 MySQL 连接失败启动报错退出；`IM_REDIS_ENABLED=1` 且连接失败同样报错退出。
 
@@ -339,6 +340,8 @@ docker compose up -d --build
 - 容器内 imserver 通过服务名连接：`IM_MYSQL_HOST=mysql`、`IM_REDIS_HOST=redis`（端口 6379）
 - `mysql_data` / `redis_data` 命名卷持久化数据
 - `docker compose` 启用 Redis（`IM_REDIS_ENABLED=1`），token 免密重连跨容器重启不失效
+- 第四个服务 **nginx**（`nginx/im.conf`，8080 反代 9191）：WebSocket 升级头、90s 读超时、
+  每真实 IP 50 连接限流、`X-Forwarded-For` 传递；TLS/域名见 `docs/nginx-deploy.md`
 
 ### 10.4 云服务器部署（以阿里云 2 核 2G 为例）
 

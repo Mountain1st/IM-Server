@@ -32,6 +32,15 @@ services:
     volumes:
       - redis_data:/data
 
+  nginx:
+    image: nginx:1.27-alpine
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./nginx/im.conf:/etc/nginx/conf.d/im.conf:ro
+    depends_on:
+      - imserver
+
   imserver:
     build: .
     ports:

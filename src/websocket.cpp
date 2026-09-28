@@ -112,6 +112,27 @@ std::string getRequestHeader(const std::string& request, const char* name) {
   return {};
 }
 
+std::string firstForwardedIp(const std::string& request) {
+  const std::string v = getRequestHeader(request, "X-Forwarded-For");
+  // 取第一段（逗号前）
+  const size_t comma = v.find(',');
+  std::string ip = v.substr(0, comma == std::string::npos ? v.size() : comma);
+  // 去首尾空格
+  const size_t b = ip.find_first_not_of(" \t");
+  if (b == std::string::npos) return {};
+  const size_t e = ip.find_last_not_of(" \t");
+  ip = ip.substr(b, e - b + 1);
+  if (ip.empty()) return {};
+  // 字符白名单（IPv4 点分数字 / IPv6 冒号与十六进制）：含其他字符即整体丢弃，
+  // 防止伪造头往日志注入换行等内容
+  for (const char c : ip) {
+    const bool ok = (c >= '0' && c <= '9') || c == '.' || c == ':' ||
+                    (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F');
+    if (!ok) return {};
+  }
+  return ip;
+}
+
 bool originAllowed(const std::string& origin, const std::vector<std::string>& allow) {
   std::string originHost = extractHostLower(origin);
   if (originHost.empty()) return false;

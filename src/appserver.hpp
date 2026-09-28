@@ -46,10 +46,13 @@ public:
   // redisConfig：Redis 连接配置（IM_REDIS_ENABLED=1 启用 token 等存储到 Redis；
   // 连接失败则启动报错退出）
   // maxPerIpConnections：单 IP 并发连接上限（0 表示不限；缺省见 server_config）
+  // trustedProxies：可信反向代理 IP（IM_TRUSTED_PROXIES，逗号分隔）——对端在列表
+  // 内时握手日志显示 X-Forwarded-For 的真实客户端 IP；空则忽略该头（默认）
   AppServer(uint16_t port, size_t ioThreads, size_t workThreads, size_t maxConnections,
             std::vector<std::string> allowedOrigins, UserStoreConfig userConfig,
             RedisStoreConfig redisConfig,
-            size_t maxPerIpConnections = config::kMaxPerIpConnections);
+            size_t maxPerIpConnections = config::kMaxPerIpConnections,
+            std::vector<std::string> trustedProxies = {});
   ~AppServer();
 
   void start();
@@ -112,6 +115,7 @@ private:
   std::shared_ptr<TcpServer> tcpServer_;
   ThreadPool workPool_;
   std::vector<std::string> allowedOrigins_; // 握手 Origin/Host 允许列表；空=不校验
+  std::vector<std::string> trustedProxies_; // 可信代理 IP；空=忽略 X-Forwarded-For
   std::unique_ptr<UserStore> userStore_;    // MySQL 用户存储（连接失败时构造抛错）
   std::unique_ptr<MessageRepository> msgRepo_; // MySQL 消息存储（离线/历史/已读）
   std::unique_ptr<ContactRepository> contactRepo_; // 联系人/请求/设置存储

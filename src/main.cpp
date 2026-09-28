@@ -107,13 +107,38 @@ int main(int argc, char* argv[]) {
     maxPerIpConn = static_cast<size_t>(std::atoi(v));
   }
 
+  // 可信反向代理列表：IM_TRUSTED_PROXIES（逗号分隔 IP）。对端在列表内时，
+  // 握手日志显示 X-Forwarded-For 的真实客户端 IP；缺省为空 = 忽略该头（防伪造）。
+  std::vector<std::string> trustedProxies;
+  if (const char* v = std::getenv("IM_TRUSTED_PROXIES")) {
+    std::string list = v;
+    size_t pos = 0;
+    for (;;) {
+      size_t comma = list.find(',', pos);
+      std::string item = list.substr(
+          pos, comma == std::string::npos ? std::string::npos : comma - pos);
+      size_t start = item.find_first_not_of(" \t");
+      size_t end = item.find_last_not_of(" \t");
+      if (start != std::string::npos) {
+        trustedProxies.push_back(item.substr(start, end - start + 1));
+      }
+      if (comma == std::string::npos) break;
+      pos = comma + 1;
+    }
+    if (!trustedProxies.empty()) {
+      std::string joined;
+      for (const auto& p : trustedProxies) joined += p + " ";
+      LOG_I("[server] 可信代理（信任 X-Forwarded-For）: " << joined);
+    }
+  }
+
   // 业务层：内部启动工作线程并通知 TcpServer（其负责主从 eventloop）。
   // 用户存储为 MySQL：配置缺失或连接失败时抛异常，这里捕获并明确报错退出。
   std::shared_ptr<im::AppServer> server;
   try {
     server = std::make_shared<im::AppServer>(
         port, ioThreads, workThreads, maxConnections, allowedOrigins, userConfig, redisConfig,
-        maxPerIpConn);
+        maxPerIpConn, trustedProxies);
   } catch (const std::exception& e) {
     LOG_E("[server] 启动失败: " << e.what());
     return 1;

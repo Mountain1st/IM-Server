@@ -239,6 +239,7 @@ void TcpServer::deviceNewConnection(int cfd, const std::string& peerIp) {
   EventLoop* ioLoop = (n > 0) ? ioPool_->getLoop(static_cast<size_t>(cfd) % n) : nullptr;
   if (!ioLoop) ioLoop = &acceptLoop_;
   auto conn = std::make_shared<Connection>(ioLoop, cfd);
+  conn->setPeerIp(peerIp); // 供会话层做 X-Forwarded-For 真实 IP 判定
   {
     std::lock_guard<std::mutex> lock(mutex_);
     connections_.insert(conn);

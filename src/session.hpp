@@ -28,6 +28,13 @@ public:
   Session(EventLoop* loop, ThreadPool* pool,
       const std::shared_ptr<Connection>& conn,
       std::vector<std::string> allowedOrigins);
+  // trustedProxies：可信反向代理 IP 列表（IM_TRUSTED_PROXIES）。
+  // 对端 IP 在列表内时，取 X-Forwarded-For 首段为"真实 IP"（日志显示）；
+  // 为空则忽略 XFF 头（默认行为完全不变，防伪造）。
+  Session(EventLoop* loop, ThreadPool* pool,
+      const std::shared_ptr<Connection>& conn,
+      std::vector<std::string> allowedOrigins,
+      std::vector<std::string> trustedProxies);
   ~Session();
 
   void start();
@@ -38,6 +45,8 @@ public:
   void onHeartbeat();
 
   EventLoop* loop() { return loop_; }
+  // 真实客户端 IP（配置可信代理且 XFF 合法时非空；否则取对端 IP/空）
+  const std::string& realIp() const { return realIp_; }
   // 向客户端发送文本帧（线程安全）
   void reply(const std::string& text);
   const std::shared_ptr<Connection>& conn() const { return conn_; }
@@ -82,6 +91,8 @@ private:
   std::shared_ptr<Connection> conn_;
   int fd_; // 连接 fd，预先缓存供日志使用（连接关闭后 fd 会被置 -1）
   std::vector<std::string> allowedOrigins_; // 允许的 Origin/Host；空表示不校验
+  std::vector<std::string> trustedProxies_; // 可信代理 IP；空表示忽略 XFF
+  std::string realIp_; // 对端属可信代理时取 X-Forwarded-For 首段；否则空
   std::function<void()> closedHandler_;
   TextHandler textHandler_; // 业务回调（不持有，由上层注入）
 

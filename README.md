@@ -21,7 +21,7 @@ MySQL 持久化 + Redis 可选双后端，覆盖注册登录、单聊、联系�
 
 ```bash
 # 方式一：Docker 全家桶（推荐）
-docker compose up -d --build
+docker compose up -d --build   # mysql+redis+imserver+nginx（8080 反代入口）
 
 # 方式二：本地构建（需 libmysqlclient-dev，可选 libhiredis-dev）
 cmake -B build && cmake --build build -j4

@@ -4,6 +4,7 @@
 #include "eventloop.hpp"
 #include "log.hpp"
 #include "metrics.hpp"
+#include "websocket.hpp"
 #include "server_config.hpp"
 #include "threadpool.hpp"
 
@@ -31,6 +32,14 @@ Session::Session(EventLoop* loop, ThreadPool* pool,
         std::vector<std::string> allowedOrigins)
   : loop_(loop), pool_(pool), conn_(conn), fd_(conn->fd()),
     allowedOrigins_(std::move(allowedOrigins)) {}
+
+Session::Session(EventLoop* loop, ThreadPool* pool,
+        const std::shared_ptr<Connection>& conn,
+        std::vector<std::string> allowedOrigins,
+        std::vector<std::string> trustedProxies)
+  : loop_(loop), pool_(pool), conn_(conn), fd_(conn->fd()),
+    allowedOrigins_(std::move(allowedOrigins)),
+    trustedProxies_(std::move(trustedProxies)) {}
 
 Session::~Session() {
   LOG_I("[session] 会话销毁");
@@ -289,12 +298,23 @@ void Session::handleHandshake(const std::string& request) {
     << "\r\n";
   conn_->send(oss.str());
   handshaked_ = true;
+  // 真实 IP（Nginx 反代场景）：对端属可信代理时取 X-Forwarded-For 首段。
+  // 未配置可信代理则忽略头（默认行为不变，防客户端伪造）。
+  if (!trustedProxies_.empty()) {
+    for (const auto& p : trustedProxies_) {
+      if (p == conn_->peerIp()) {
+        realIp_ = ws::firstForwardedIp(request);
+        break;
+      }
+    }
+  }
   // 握手完成，取消握手截止定时器（跨线程安全，投递到 loop 执行）
   if (handshakeTimer_ != 0) {
     loop_->cancelTimer(handshakeTimer_);
     handshakeTimer_ = 0;
   }
-  LOG_I("[session] WebSocket 握手成功");
+  LOG_I("[session] WebSocket 握手成功"
+        << (realIp_.empty() ? "" : " 真实IP=" + realIp_));
 }
 
 void Session::handle(const ws::Frame& frame) {

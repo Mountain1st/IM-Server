@@ -116,11 +116,13 @@ std::unique_ptr<MsgDedupStore> makeMsgDedup(const RedisStoreConfig& c) {
 
 AppServer::AppServer(uint16_t port, size_t ioThreads, size_t workThreads, size_t maxConnections,
                      std::vector<std::string> allowedOrigins, UserStoreConfig userConfig,
-                     RedisStoreConfig redisConfig, size_t maxPerIpConnections)
+                     RedisStoreConfig redisConfig, size_t maxPerIpConnections,
+                     std::vector<std::string> trustedProxies)
     : tcpServer_(std::make_shared<TcpServer>(port, ioThreads, maxConnections,
                                              maxPerIpConnections)),
       workPool_(workThreads),
       allowedOrigins_(std::move(allowedOrigins)),
+      trustedProxies_(std::move(trustedProxies)),
       userStore_(std::make_unique<UserStore>(makeUserRepository(userConfig),
                                              makeTokenStore(redisConfig))),
       msgDedup_(makeMsgDedup(redisConfig)),
@@ -215,7 +217,8 @@ void AppServer::requestStop() {
 }
 
 void AppServer::onNewConnection(EventLoop* ioLoop, const TcpServer::ConnectionPtr& conn) {
-  auto session = std::make_shared<Session>(ioLoop, &workPool_, conn, allowedOrigins_);
+  auto session = std::make_shared<Session>(ioLoop, &workPool_, conn, allowedOrigins_,
+                                           trustedProxies_);
   auto self = shared_from_this();
   // 会话关闭：先从在线表摘除，再通知网络层移除连接。
   // 注意：closedHandler 是 Session 成员，必须捕获弱引用，避免 Session 自引用循环泄漏。

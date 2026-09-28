@@ -27,6 +27,10 @@ public:
   int fd() const { return fd_; }
   EventLoop* loop() { return loop_; }
 
+  // 对端 IP（TcpServer accept 时注入；真实 IP 判定用）
+  void setPeerIp(const std::string& ip) { peerIp_ = ip; }
+  const std::string& peerIp() const { return peerIp_; }
+
   void setMessageCallback(std::function<void(const std::shared_ptr<Connection>&, std::string)> cb) {
     messageCb_ = std::move(cb);
   }
@@ -64,6 +68,7 @@ private:
 
   EventLoop* loop_;
   int fd_;
+  std::string peerIp_; // 对端 IP（accept 时注入）
   Channel channel_;
   std::atomic<bool> closed_{false};
 
