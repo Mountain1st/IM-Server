@@ -58,6 +58,8 @@ private:
 2. 连上后先 `auth.token`（token 从 TokenBox 取，7 天有效）
 3. token 失效（401）→ 通知 UI 弹登录窗
 4. 登录成功后服务端自动补发离线消息（`msg.offline`），客户端逐条入会话模型后回 `msg.offline_ack`（单次 ≤1000 条）
+5. **多端视图对齐**：离线期间本账号其他端发的消息不在 `msg.offline` 里（服务端已知边界），
+   登录后对各活跃会话拉一次 `chat.history` / `group.history` 合并去重（按 `messageId`）
 
 ## 4. 业务层接口
 

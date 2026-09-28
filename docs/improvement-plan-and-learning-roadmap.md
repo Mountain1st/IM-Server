@@ -834,20 +834,22 @@ Message Queue Adapter
 多端回显与已读同步、Redis 超时/锁外化/批量 MGET、A 区打磨六项（removeMember 校验、
 MySQL 超时、弱断言、迁移幂等、清理告警、heartbeat 文档）。
 
-下一步（按投入产出排序）：
+已完成追加（2026-09-27/28 第二轮）：B 区三项全部落地（Sanitizer 首跑修 2 处线程身份竞态、
+日志轮转 50MB×5、CI 本地一键 + GitHub Actions 工作流）；D 区三项（client/ 与本文档入库、
+README、read_notify 收紧 fail-closed）；A 区六项打磨；clean checkout 构建验证通过。
 
-1. **B 区工程完备（推荐先做）**：
-   - CI 流水线（build + ctest + biz 内存模式），半天
-   - Sanitizer 常态化（ASan/TSan 跑一轮，从未跑过是盲区），1 小时
-   - 日志轮转（server.log 无限追加），1 小时
-2. **D 区交付资产**：
-   - `client/` 测试客户端与本文档入库（简历"客户端+服务端"目前客户端在版本控制外）
-   - README 重写（面向面试官：架构图/技术决策/规模数据）
-   - `read_notify` 账号枚举收紧（onRead 加关系校验），低危
-3. **C 区性能预留**（规模到了再做）：MySQL 连接池、群发 setWatermark 批量合并、
+下一步（2026-09-28 审计后，按价值排序）：
+
+1. **Windows 客户端落地**（最大价值方向）：按 `docs/client_design.md` 实施（Qt6），
+   重连流程含"拉 history 对齐多端视图"——恰好覆盖下述已知边界，项目由此端到端可用
+2. **推送 GitHub**：仓库当前无 remote；推送后 `.github/workflows/ci.yml` 生效
+3. **多端消息漫游（可选）**：发送方水位线 + 离线补发含自发消息（2026-09-28 实证的
+   视图不一致缺口，当前靠 history 自愈；完整漫游约 1-2 天，见 §11.3）
+4. **C 区性能预留**（规模到了再做）：MySQL 连接池、群发 setWatermark 批量合并、
    仓库层 shared_mutex
-4. **保持现状的已知取舍**（有记录、有自愈路径，不修）：群管理事件离线不补发（拉列表自愈）、
-   公告 2048 截断（正道不可达）、INCR/EXPIRE 微秒窗口（TTL 兜底）、read_notify 枚举（若 D 区做了收紧则消除）
+5. **保持现状的已知取舍**：多端离线自发消息不补发（history 自愈，本轮实证）、
+   群管理事件离线不补发（拉列表自愈）、公告 2048 截断（正道不可达）、
+   INCR/EXPIRE 微秒窗口（TTL 兜底）
 
 ## 10. 阶段验收标准
 

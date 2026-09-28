@@ -149,8 +149,8 @@
 | `auth.login_res` | `{ "code": 0, "msg": "ok", "data": { "userId": 1, "account": "...", "username": "昵称", "token": "..." } }` | 登录结果；成功时返回用户信息与 token（token 用于断线免密重连） |
 | `auth.token_res` | `{ "code": 0, "msg": "ok", "data": { "userId": 1, "username": "昵称", "token": "..." } }` | 免密重连结果；成功时返回用户信息与当前 token |
 | `auth.logout_res` | `{ "code": 0, "msg": "ok", "data": {} }` | 登出结果 |
-| `msg.recv` | `{ "from": "<account>", "fromNick": "发送方昵称", "content": "...", "ts": 1720000000, "clientMsgId": "...", "messageId": "全局消息ID", "chatType": "single" }` | 收到的新消息（单聊推送）；`from` 为发送方登录账号（v1.7）；`fromNick` 供直接展示；`messageId` 为服务器生成的全局唯一 ID（v1.4 起，客户端可忽略）；**群聊推送结构相同，另含 `groupId`（数字群标识）/`groupName` 且 `chatType` 为 `"group"`（v1.9）**；**v2.2 多端一致：发送者自己的其他在线端也会收到该消息（发起连接不回显），多设备会话视图一致** |
-| `msg.read_notify` | `{ "from": "<account>", "readTs": 1720000000 }` | 已读同步（v2.2）：该用户某一端调用 `msg.read` 后，其**其他在线端**收到此推送（`from` 为会话对方账号），客户端应将对应会话未读清零；免 ACK，丢失靠离线补发与 `chat.history` 拉取自愈 |
+| `msg.recv` | `{ "from": "<account>", "fromNick": "发送方昵称", "content": "...", "ts": 1720000000, "clientMsgId": "...", "messageId": "全局消息ID", "chatType": "single" }` | 收到的新消息（单聊推送）；`from` 为发送方登录账号（v1.7）；`fromNick` 供直接展示；`messageId` 为服务器生成的全局唯一 ID（v1.4 起，客户端可忽略）；**群聊推送结构相同，另含 `groupId`（数字群标识）/`groupName` 且 `chatType` 为 `"group"`（v1.9）**；**v2.2 多端一致：发送者自己的其他在线端也会收到该消息（发起连接不回显），多设备会话视图一致**。注意边界：**仅覆盖在线端**——某端离线期间本账号其他端发的消息不会经 `msg.offline` 补发给该端（消息已落库），客户端重登后应拉 `chat.history` / `group.history` 对齐视图 |
+| `msg.read_notify` | `{ "from": "<account>", "readTs": 1720000000 }` | 已读同步（v2.2）：该用户某一端调用 `msg.read` 后，其**其他在线端**收到此推送（`from` 为会话对方账号），客户端应将对应会话未读清零；免 ACK，且仅推在线端（离线端重登不补，靠 `chat.history` 拉取自愈） |
 | `msg.ack` | `{ "code": 0, "msg": "ok", "clientMsgId": "..." }` | 服务端已接收消息的回执，`clientMsgId` 对齐发送端 |
 | `msg.offline` | `{ "msgs": [ { "from": "<account>", "fromNick": "...", "content": "...", "ts": 1720000000, "clientMsgId": "...", "messageId": "...", "chatType": "single" }, ... ] }` | 登录后补发的离线消息列表；`msgs[]` 元素结构与 `msg.recv` 相同（`from` 为发送方登录账号；**群消息元素另含 `groupId`/`groupName` 且 `chatType` 为 `"group"`（v1.9，单聊与群按水位线合并补发）**）；**非破坏性补发**（v1.5：确认前保留，收到后应发 `msg.offline_ack`，确认后不再补发） |
 | `chat.create_res` | `{ "code": 0, "msg": "ok", "data": { "userId": 1, "account": "登录账号", "username": "昵称" } }` | 新建对话结果；成功返回目标用户 `userId`、**`account`** 与昵称；`404` 表示账号不存在 |
@@ -384,6 +384,10 @@ docker compose up -d --build
 - ~~`heartbeat` 指令发了会报错~~ 已从协议文档移除：保活用的是 WebSocket 自带的 Ping/Pong，够用了，业务层就不做了
 - 被踢/解散这类通知，离线收不到：比如你断网时被踢出群，重登不会补这条通知，
   自己拉一下群列表就知道了，消息历史不受影响
+- 多端"同步"只覆盖在线端：你用电脑发消息时，如果手机那会儿离线，
+  手机重新登录后**不会自动收到你电脑上发的那条**——消息没丢（在历史里），
+  但要自己拉一次聊天记录才能看到（2026-09-27 审计实证；做成全自动漫游需引入
+  发送方水位线，属可选后续项）
 - 大群拉成员列表有点慢：50 人大约查 50 次数据库，能用，以后优化
 
 ### 11.4 待修的缺陷（直白版，2026-09-16 审计；2026-09-27 更新）
