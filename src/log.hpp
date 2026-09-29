@@ -144,7 +144,12 @@ inline void Log::write(Level lv, const char* path, int line, const std::string& 
   std::time_t t = std::time(nullptr);
   char ts[32] = {0};
   std::tm tmv{};
-  localtime_r(&t, &tmv);
+  // 日志时间固定 UTC+8（北京时间），不依赖系统/容器时区：
+  // 部署容器默认 UTC，localtime_r 会让日志时间慢 8 小时。
+  // 显式加 8 小时偏移后用 gmtime_r，任何环境（本地 WSL / Docker /
+  // 云主机任意时区）日志时间恒为北京时间
+  const std::time_t tBeijing = t + 8 * 3600;
+  gmtime_r(&tBeijing, &tmv);
   std::strftime(ts, sizeof ts, "%Y-%m-%d %H:%M:%S", &tmv);
   const char* base = std::strrchr(path, '/');
   base = (base != nullptr) ? base + 1 : path;

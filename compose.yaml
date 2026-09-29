@@ -7,6 +7,8 @@ services:
     image: redis:8-alpine
     container_name: ims-redis
     restart: unless-stopped
+    environment:
+      TZ: Asia/Shanghai
     ports:
       - "127.0.0.1:6380:6379"
     volumes:
@@ -17,6 +19,7 @@ services:
     container_name: ims-mysql
     restart: unless-stopped
     environment:
+      TZ: Asia/Shanghai
       MYSQL_ROOT_PASSWORD: ${IM_MYSQL_PASSWORD:-change-me}
       MYSQL_DATABASE: IMS_reactor_db
       MYSQL_USER: IMS_jack

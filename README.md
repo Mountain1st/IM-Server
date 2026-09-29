@@ -21,7 +21,8 @@ MySQL 持久化 + Redis 可选双后端，覆盖注册登录、单聊、联系�
   compose restart 策略兜底启动顺序
 - **工程**：`-Wall -Wextra` 零警告基线；ASan/UBSan/LSan/TSan 全矩阵通过
 - **部署**：Docker Compose 四件套（mysql+redis+imserver+**nginx 反代**）；
-  `X-Forwarded-For` 真实 IP 信任链、TLS（wss）终结位、日志按大小轮转
+  `X-Forwarded-For` 真实 IP 信任链、TLS（wss）终结位、日志按大小轮转；
+  时间显示统一北京时间 UTC+8（日志固定偏移不依赖容器时区，MySQL/nginx 容器 TZ）
 
 ## 快速开始
 

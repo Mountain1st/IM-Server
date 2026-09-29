@@ -7,6 +7,10 @@ services:
   mysql:
     image: mysql:8.4
     environment:
+      # 时区统一 UTC+8：NOW()/CURRENT_TIMESTAMP（users.created_at 等
+      # TIMESTAMP 列）按北京时间求值；TIMESTAMP 物理存 UTC、读取随
+      # 会话时区，改 TZ 后旧数据读取自动偏移为北京时间（修正历史错位）
+      TZ: Asia/Shanghai
       MYSQL_ROOT_PASSWORD: ${IM_MYSQL_PASSWORD:-change-me}
       MYSQL_DATABASE: IMS_reactor_db
       MYSQL_USER: IMS_jack
@@ -28,12 +32,17 @@ services:
   redis:
     image: redis:8-alpine
     # 预留：Redis 接入（token/presence/限流/幂等）后由 imserver 通过服务名连接
+    environment:
+      TZ: Asia/Shanghai
     command: ["redis-server", "--appendonly", "yes"]
     volumes:
       - redis_data:/data
 
   nginx:
     image: nginx:1.27-alpine
+    # 访问日志时间按北京时间（与 imserver 日志/MySQL NOW() 一致）
+    environment:
+      TZ: Asia/Shanghai
     ports:
       - "8080:8080"
     volumes:
@@ -46,6 +55,8 @@ services:
     # 自动拉起：MySQL 启动慢/闪断时 imserver fail-fast 退出后自动重试
     # 直到连上（配合 depends_on healthy 消除启动顺序问题）
     restart: unless-stopped
+    environment:
+      TZ: Asia/Shanghai
     ports:
       - "9191:9191"
     environment:
