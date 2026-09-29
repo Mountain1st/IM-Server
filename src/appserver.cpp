@@ -141,9 +141,9 @@ AppServer::AppServer(uint16_t port, size_t ioThreads, size_t workThreads, size_t
       trustedProxies_(std::move(trustedProxies)),
       userStore_(std::make_unique<UserStore>(makeUserRepository(userConfig),
                                              makeTokenStore(redisConfig))),
-      msgDedup_(makeMsgDedup(redisConfig)),
-      msgLimiter_(makeRateLimiter(redisConfig, "发送限流")),
-      queryLimiter_(makeRateLimiter(redisConfig, "查询限流", "qrate:")),
+      // 初始化列表须与头文件成员声明顺序一致（-Wreorder）：
+      // msgRepo/contactRepo/groupRepo → presence → onlineMgr(presence_) →
+      // msgDedup/msgLimiter/queryLimiter
       msgRepo_(std::make_unique<MySqlMessageRepository>(
           userConfig.mysqlHost, userConfig.mysqlPort, userConfig.mysqlUser,
           userConfig.mysqlPassword, userConfig.mysqlDb)),
@@ -154,7 +154,10 @@ AppServer::AppServer(uint16_t port, size_t ioThreads, size_t workThreads, size_t
           userConfig.mysqlHost, userConfig.mysqlPort, userConfig.mysqlUser,
           userConfig.mysqlPassword, userConfig.mysqlDb)),
       presence_(makePresenceStore(redisConfig)),
-      onlineMgr_(presence_) {
+      onlineMgr_(presence_),
+      msgDedup_(makeMsgDedup(redisConfig)),
+      msgLimiter_(makeRateLimiter(redisConfig, "发送限流")),
+      queryLimiter_(makeRateLimiter(redisConfig, "查询限流", "qrate:")) {
   if (!msgRepo_->ok()) {
     throw std::runtime_error("消息存储连接失败");
   }

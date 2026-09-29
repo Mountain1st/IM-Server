@@ -4,6 +4,11 @@ project(imserver CXX)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
+# 代码规范：警告全开（零警告基线，新代码不得引入警告）
+add_compile_options(-Wall -Wextra)
+# 三方头（nlohmann/json.hpp）警告不干净，隔离
+add_compile_options(-Wno-unused-parameter)
+
 # Sanitizer 构建：cmake -DIM_SANITIZE=ON（address,undefined；可选 TSan）
 option(IM_SANITIZE "Enable AddressSanitizer + UndefinedBehaviorSanitizer" OFF)
 option(IM_TSAN "Enable ThreadSanitizer" OFF)

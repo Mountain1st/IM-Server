@@ -837,6 +837,14 @@ Message Queue Adapter
 多端回显与已读同步、Redis 超时/锁外化/批量 MGET、A 区打磨六项（removeMember 校验、
 MySQL 超时、弱断言、迁移幂等、清理告警、heartbeat 文档）。
 
+已完成追加（2026-09-29 第五轮，生产故障根治）：MySQL 断线自愈（生产 4031：
+闲置 19h>wait_timeout 被踢后登录全挂到重启；MySqlClient::stmtExec/query 于
+errno 2006/2013/4031 时原 handle 重建重试一次，47 处调用点迁移全覆盖；biz
+KILL 真连接 4 用例验证 221/221）；Redis 断线自愈确认（execLocked 命令前检查
+重建，既有能力）；compose imserver 补 restart: unless-stopped（启动连不上
+DB 自动拉起）；代码规范：-Wall -Wextra 零警告（修 7 处：unused×3、
+-Wreorder 初始化列表重排声明序）；运行期自愈能力总表入协议文档 §11.6。
+
 已完成追加（2026-09-29 第四轮，架构四项收敛）：指令路由表化（29 层 if-else 改
 `routes_` 哈希表 O(1) 查表）；联系人/群成员缓存低频比对自愈（清理线程每轮对库
 COUNT，漂移即全量重建、失败保旧，biz 7 用例验证直改库 2 秒自愈）；IO 线程分配

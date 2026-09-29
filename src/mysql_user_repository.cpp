@@ -73,7 +73,6 @@ int MySqlUserRepository::fetchUser(const std::string& account, int64_t* userId,
                                    std::string* username, std::string* salt,
                                    std::string* passwordHash) {
   if (!client_.ok()) return 2;
-  MYSQL* c = client_.handle();
   const std::string sql =
       "SELECT id, username, salt, password_hash FROM users WHERE account = ? LIMIT 1";
   int errNo = 0;
@@ -154,7 +153,6 @@ bool MySqlUserRepository::fetchAccountById(int64_t userId, std::string* account)
 int MySqlUserRepository::fetchSettings(int64_t userId, int* allowTempChat, int* searchable,
                                        int* allowAdd) {
   if (!client_.ok()) return 2;
-  MYSQL* c = client_.handle();
   const std::string sql = "SELECT allow_temp_chat, searchable, allow_add FROM users WHERE id = ? LIMIT 1";
   int errNo = 0;
   MYSQL_STMT* stmt = client_.stmtExec(sql, {std::to_string(userId)}, &errNo);

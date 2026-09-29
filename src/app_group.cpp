@@ -478,7 +478,7 @@ void AppServer::onGroupMembers(const std::shared_ptr<Session>& session, const js
   size_t oi = 0;
   for (const int64_t uid : ids) {
     std::string account, username;
-    int64_t joined = 0, left = 0;
+    int64_t joined = 0;
     userStore_->accountOf(uid, &account);
     userStore_->nickname(uid, &username);
     groupRepo_->memberPeriod(groupId, uid, &joined, nullptr);
@@ -606,7 +606,6 @@ void AppServer::onGroupSend(const std::shared_ptr<Session>& session, const json&
                    {"clientMsgId", clientMsgId},
                    {"messageId", messageId},
                    {"chatType", "group"}};
-  int64_t maxTs = now;
   for (const int64_t uid : groupRepo_->listMemberIds(groupId)) {
     bool pushed = false;
     for (auto& t : onlineMgr_.sessions(uid)) {
