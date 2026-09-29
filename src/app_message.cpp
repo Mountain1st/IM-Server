@@ -228,6 +228,12 @@ void AppServer::onOfflineAck(const std::shared_ptr<Session>& session, const json
 void AppServer::onHistory(const std::shared_ptr<Session>& session, const json& data) {
   // 拉取与目标用户的单聊历史（按 ts 倒序，最新在前）。
   // to 为目标登录账号 account（协议 v1.7；兼容旧 userId 数字与 0=自己对话框）。
+  // 重查询限流：单次最多 200 条 DB 扫描，防高频刷历史拖垮工作线程
+  if (!queryLimiter_->allow(session->userId(), kQueryLimitPerWindow, kQueryWindow)) {
+    session->reply(makeResult("chat.history_res", 429, "查询过于频繁，请稍后再试",
+                              json::object()));
+    return;
+  }
   const int64_t to = resolveTarget(userStore_.get(), data, "to");
   if (to == -1) {
     session->reply(makeResult("chat.history_res", 400, "参数错误", json::object()));

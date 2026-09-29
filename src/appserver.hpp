@@ -124,9 +124,11 @@ private:
   OnlineManager onlineMgr_;
   std::unique_ptr<MsgDedupStore> msgDedup_;    // 消息幂等去重（内存/Redis 双后端）
   std::unique_ptr<RateLimiterStore> msgLimiter_; // msg.send 限流（内存/Redis 双后端）
+  std::unique_ptr<RateLimiterStore> queryLimiter_; // 重查询限流（history/members；Redis 键前缀 qrate: 独立额度桶）
   std::atomic<uint64_t> msgSeq_{0}; // 全局消息序列（生成 messageId）
   // 离线 TTL 清理线程（间隔秒由 IM_OFFLINE_PURGE_INTERVAL 覆盖，缺省 1800）
   int purgeIntervalSec_ = config::kOfflinePurgeIntervalSec;
+  int msgRetentionDays_ = config::kMsgRetentionDays; // 已消费消息保留天数；0=不清理
   std::thread purgeThread_;
   std::mutex purgeMutex_;
   std::condition_variable purgeCv_;

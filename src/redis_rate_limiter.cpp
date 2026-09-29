@@ -2,13 +2,15 @@
 
 namespace im {
 
-RedisRateLimiter::RedisRateLimiter(const RedisStoreConfig& cfg)
-  : client_(cfg.redisHost, cfg.redisPort, cfg.redisPassword, cfg.redisDb) {}
+RedisRateLimiter::RedisRateLimiter(const RedisStoreConfig& cfg,
+                                   const std::string& keyPrefix)
+  : client_(cfg.redisHost, cfg.redisPort, cfg.redisPassword, cfg.redisDb),
+    keyPrefix_(keyPrefix) {}
 
 bool RedisRateLimiter::allow(int64_t userId, size_t maxCalls,
                              std::chrono::milliseconds window) {
   if (maxCalls == 0) return false;
-  const std::string key = "rate:" + std::to_string(userId);
+  const std::string key = keyPrefix_ + std::to_string(userId);
   const int64_t now = static_cast<int64_t>(
       std::chrono::duration_cast<std::chrono::milliseconds>(
           std::chrono::steady_clock::now().time_since_epoch()).count());

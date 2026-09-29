@@ -514,6 +514,23 @@ def main():
     nm = sql_q("SELECT COUNT(*) FROM messages WHERE message_id='purge-mid'"
                " AND from_user=%d AND to_user=%d" % (alice, bob))
     check("10min offline kept (TTL=7d)", nm == "1")
+    # 保留期二期：已送达/已读的单聊与群消息超 90 天删除；89 天的保留
+    old91 = int(time.time()) - 91 * 86400
+    old89 = int(time.time()) - 89 * 86400
+    sql_q("INSERT INTO messages (message_id,from_user,to_user,content,ts,client_msg_id,"
+          "chat_type,group_id,status) VALUES ('purge-h91',%d,%d,'aged',%d,'','single',0,2)"
+          % (alice, bob, old91))
+    sql_q("INSERT INTO messages (message_id,from_user,to_user,content,ts,client_msg_id,"
+          "chat_type,group_id,status) VALUES ('purge-h89',%d,%d,'near',%d,'','single',0,2)"
+          % (alice, bob, old89))
+    sql_q("INSERT INTO messages (message_id,from_user,to_user,content,ts,client_msg_id,"
+          "chat_type,group_id,status) VALUES ('purge-g91',%d,0,'grp',%d,'','group',%d,1)"
+          % (alice, old91, 1))
+    time.sleep(3)  # 再等一轮清理
+    n91 = sql_q("SELECT COUNT(*) FROM messages WHERE message_id IN ('purge-h91','purge-g91')")
+    check("aged history purged (90d)", n91 == "0")
+    n89 = sql_q("SELECT COUNT(*) FROM messages WHERE message_id='purge-h89'")
+    check("89d history kept", n89 == "1")
     nf = sql_q("SELECT COUNT(*) FROM messages WHERE client_msg_id='purge-new-1'"
                " AND from_user=%d AND to_user=%d" % (alice, bob))
     check("fresh offline kept", nf == "1")
@@ -879,6 +896,19 @@ def main():
     mmap = {x["account"]: x for x in r["data"]["data"]["members"]}
     check("group members online true", all(m.get("online") is True
                                            for m in mmap.values()))
+    # v2.3：重查询限流——连续拉群历史超 20 次/10s 触发 429
+    # （G1 曾被拒入群，用 group.history 对不存在群拉取也会先消耗查询额度）
+    h = WS(); login(h, G1, "pw1234")
+    got_429 = False
+    for i in range(25):
+        h.send(env("group.history", {"groupId": gid}))
+        r = json.loads(h.recv())
+        if r["type"] == "group.history_res" and r["data"]["code"] == 429:
+            got_429 = True
+            break
+    check("query rate limit 429", got_429)
+    h.close()
+
     # v2.2：群自发回显到其他端——A 第二端登录，a 群发，a3 收到、发起端仍不回显
     # token 重连做第二端（A 的登录已被错密码用例限流锁定，login 会 429）
     a3 = WS()

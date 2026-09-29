@@ -837,6 +837,12 @@ Message Queue Adapter
 多端回显与已读同步、Redis 超时/锁外化/批量 MGET、A 区打磨六项（removeMember 校验、
 MySQL 超时、弱断言、迁移幂等、清理告警、heartbeat 文档）。
 
+已完成追加（2026-09-29 第三轮）：消息保留期清理（`IM_MSG_RETENTION_DAYS`，默认 90 天，
+已消费消息含群消息归档删除，TDD 209→210 用例）；重查询限流（chat/group.history 与
+group.members 共享额度桶 20 次/10s，Redis 键前缀 qrate: 独立）；性能压测基线
+（`scripts/bench.py`：2000 连接全保持、建连 1300+/s、RSS 23MB、吞吐 43 msg/s
+受单用户限流口径、p50 25ms/p99 37ms，数字入 README 规模节）。
+
 已完成追加（2026-09-27/28 第二轮）：B 区三项全部落地（Sanitizer 首跑修 2 处线程身份竞态、
 日志轮转 50MB×5、CI 本地一键 + GitHub Actions 工作流）；D 区三项（client/ 与本文档入库、
 README、read_notify 收紧 fail-closed）；A 区六项打磨；clean checkout 构建验证通过；

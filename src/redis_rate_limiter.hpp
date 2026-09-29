@@ -13,7 +13,9 @@ namespace im {
 // 先剔除窗口外记录再计数。跨实例共享、重启后计数保留。
 class RedisRateLimiter : public RateLimiterStore {
 public:
-  explicit RedisRateLimiter(const RedisStoreConfig& cfg);
+  // keyPrefix：Redis 键前缀（默认 "rate:"；查询类限流用 "qrate:" 隔离额度桶）
+  explicit RedisRateLimiter(const RedisStoreConfig& cfg,
+                            const std::string& keyPrefix = "rate:");
   bool ok() const { return client_.ok(); }
   std::string errStr() const { return client_.errStr(); }
 
@@ -22,6 +24,7 @@ public:
 
 private:
   RedisClient client_;
+  const std::string keyPrefix_;
 };
 
 } // namespace im

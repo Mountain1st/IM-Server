@@ -87,16 +87,18 @@ std::shared_ptr<TokenStore> makeTokenStore(const RedisStoreConfig& c) {
 }
 
 // msg.send 限流：Redis 启用则用 ZSET 滑动窗口（跨重启/多实例），否则内存
-std::unique_ptr<RateLimiterStore> makeRateLimiter(const RedisStoreConfig& c) {
+std::unique_ptr<RateLimiterStore> makeRateLimiter(const RedisStoreConfig& c,
+                                                const std::string& label,
+                                                const std::string& keyPrefix = "rate:") {
   if (!c.enabled) {
-    LOG_I("[db] 发送限流: 内存");
+    LOG_I("[db] " << label << ": 内存");
     return std::make_unique<MemoryRateLimiter>();
   }
-  auto rs = std::make_unique<RedisRateLimiter>(c);
+  auto rs = std::make_unique<RedisRateLimiter>(c, keyPrefix);
   if (!rs->ok()) {
     throw std::runtime_error("Redis 连接失败: " + rs->errStr());
   }
-  LOG_I("[db] 发送限流: Redis (host=" << c.redisHost << ":" << c.redisPort << ")");
+  LOG_I("[db] " << label << ": Redis (host=" << c.redisHost << ":" << c.redisPort << ")");
   return rs;
 }
 
@@ -126,7 +128,8 @@ AppServer::AppServer(uint16_t port, size_t ioThreads, size_t workThreads, size_t
       userStore_(std::make_unique<UserStore>(makeUserRepository(userConfig),
                                              makeTokenStore(redisConfig))),
       msgDedup_(makeMsgDedup(redisConfig)),
-      msgLimiter_(makeRateLimiter(redisConfig)),
+      msgLimiter_(makeRateLimiter(redisConfig, "发送限流")),
+      queryLimiter_(makeRateLimiter(redisConfig, "查询限流", "qrate:")),
       msgRepo_(std::make_unique<MySqlMessageRepository>(
           userConfig.mysqlHost, userConfig.mysqlPort, userConfig.mysqlUser,
           userConfig.mysqlPassword, userConfig.mysqlDb)),
@@ -158,10 +161,15 @@ AppServer::AppServer(uint16_t port, size_t ioThreads, size_t workThreads, size_t
     const int n = std::atoi(v);
     if (n > 0) purgeIntervalSec_ = n;
   }
-  LOG_I("[purge] 离线消息 TTL 清理线程已启动（间隔 " << purgeIntervalSec_
-        << " 秒，保留 "
+  // 历史保留天数（已消费消息含群消息）：环境变量可覆盖；0 = 不清理
+  if (const char* v = std::getenv("IM_MSG_RETENTION_DAYS")) {
+    const int n = std::atoi(v);
+    if (n >= 0) msgRetentionDays_ = n;
+  }
+  LOG_I("[purge] 消息清理线程已启动（间隔 " << purgeIntervalSec_
+        << " 秒；离线 TTL "
         << std::chrono::duration_cast<std::chrono::hours>(config::kOfflineTtl).count()
-        << " 天）");
+        << " 天；历史保留 " << msgRetentionDays_ << " 天）");
   purgeThread_ = std::thread([this] { purgeLoop(); });
 }
 
@@ -182,10 +190,14 @@ void AppServer::purgeLoop() {
                       [this] { return purgeStop_.load(); });
     if (purgeStop_.load()) break;
     lk.unlock();
-    const int64_t removed = msgRepo_->purgeExpiredOffline(
-        static_cast<int64_t>(std::time(nullptr)));
+    const int64_t now = static_cast<int64_t>(std::time(nullptr));
+    const int64_t removed = msgRepo_->purgeExpiredOffline(now);
     if (removed > 0) {
       LOG_I("[purge] 已清理 " << removed << " 条过期离线消息");
+    }
+    const int64_t aged = msgRepo_->purgeAgedHistory(now, msgRetentionDays_);
+    if (aged > 0) {
+      LOG_I("[purge] 已归档清理 " << aged << " 条超期历史消息");
     }
   }
 }

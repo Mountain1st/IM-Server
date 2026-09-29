@@ -46,6 +46,9 @@ public:
   virtual std::vector<StoredMessage> fetchOffline(int64_t toUser) = 0;
   // 删除超过 TTL 仍未领取的单聊离线消息（ts < nowSec - 7 天）。返回删除条数。
   virtual int64_t purgeExpiredOffline(int64_t nowSec) = 0;
+  // 保留期清理：删除超期的已送达/已读消息与全部群消息（ts < nowSec - 保留天数，
+  // pending 状态不在此列——由 TTL 负责）。返回删除条数。
+  virtual int64_t purgeAgedHistory(int64_t nowSec, int retentionDays) = 0;
   // 批量标记离线消息为 delivered（客户端 msg.offline_ack 确认）。
   virtual void markDelivered(int64_t toUser,
                              const std::vector<std::string>& messageIds) = 0;

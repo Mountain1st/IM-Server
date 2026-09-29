@@ -438,6 +438,12 @@ void AppServer::onGroupMembers(const std::shared_ptr<Session>& session, const js
     session->reply(makeResult("group.members_res", 403, "非群成员", json::object()));
     return;
   }
+  // 重查询限流：成员列表为逐成员查询（重），与历史共用额度桶
+  if (!queryLimiter_->allow(session->userId(), kQueryLimitPerWindow, kQueryWindow)) {
+    session->reply(makeResult("group.members_res", 429, "查询过于频繁，请稍后再试",
+                              json::object()));
+    return;
+  }
   const auto ids = groupRepo_->listMemberIds(groupId);
   // 批量在线查询（N+1 优化：原循环内逐成员 isOnlinePresence）；ownerId 已在上文查出
   const auto onlineFlags = onlineMgr_.isOnlinePresenceBatch(ids);
@@ -464,6 +470,12 @@ void AppServer::onGroupHistory(const std::shared_ptr<Session>& session, const js
     groupId = data["groupId"].get<int64_t>();
   } else {
     session->reply(makeResult("group.history_res", 400, "参数错误", json::object()));
+    return;
+  }
+  // 重查询限流（与 chat.history 同一额度桶）
+  if (!queryLimiter_->allow(session->userId(), kQueryLimitPerWindow, kQueryWindow)) {
+    session->reply(makeResult("group.history_res", 429, "查询过于频繁，请稍后再试",
+                              json::object()));
     return;
   }
   int64_t joined = 0, left = 0;

@@ -57,6 +57,9 @@ inline constexpr size_t kMaxPasswordLen = 32;
 inline constexpr std::chrono::seconds kSendWindow(10);
 inline constexpr size_t kMaxSendPerWindow = 30;
 inline constexpr size_t kMaxSendNoIdPerWindow = 5;
+// 重查询限流（chat.history / group.history / group.members）：滑动窗口内每用户次数
+inline constexpr std::chrono::seconds kQueryWindow(10);
+inline constexpr size_t kQueryLimitPerWindow = 20;
 // clientMsgId 长度上限（64，与 messages.client_msg_id 列宽对齐，防 Redis 大 key）
 inline constexpr size_t kMaxClientMsgIdBytes = 64;
 // msg.offline_ack 单次确认数量上限（防单包触发海量 DB 更新）
@@ -69,6 +72,9 @@ inline constexpr size_t kOfflineMaxPerUser = 100;
 inline constexpr std::chrono::hours kOfflineTtl = std::chrono::hours(7 * 24);
 // 离线 TTL 清理的默认间隔（秒）；环境变量 IM_OFFLINE_PURGE_INTERVAL 可覆盖（测试用小值）
 inline constexpr int kOfflinePurgeIntervalSec = 1800;
+// 已送达/已读消息（含群消息）的保留天数：超期删除（历史归档语义）。
+// 环境变量 IM_MSG_RETENTION_DAYS 可覆盖；0 = 不清理。
+inline constexpr int kMsgRetentionDays = 90;
 // 幂等去重窗口与每用户 id 上限
 inline constexpr std::chrono::minutes kDedupWindow = std::chrono::minutes(5);
 inline constexpr size_t kDedupMaxPerUser = 1024;

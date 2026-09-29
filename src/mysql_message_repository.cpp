@@ -62,6 +62,24 @@ bool MySqlMessageRepository::saveMessage(const std::string& messageId, int64_t f
   return true;
 }
 
+int64_t MySqlMessageRepository::purgeAgedHistory(int64_t nowSec, int retentionDays) {
+  // 保留期清理（历史归档语义）：超期已消费消息删除。
+  // pending 不在此列（更短的 7 天 TTL 负责）；群消息无 pending 概念，超期即删。
+  if (retentionDays <= 0) return 0;
+  std::lock_guard<std::mutex> lock(mutex_);
+  if (!client_.ok()) return 0;
+  const int64_t expireBefore =
+      nowSec - static_cast<int64_t>(retentionDays) * 86400;
+  const std::string sql =
+      "DELETE FROM messages WHERE ts < " + std::to_string(expireBefore) +
+      " AND (group_id != 0 OR status != " + std::to_string(kMsgOfflinePending) + ")";
+  if (mysql_query(client_.handle(), sql.c_str())) {
+    LOG_E("[mysql] 保留期清理失败: " << client_.errStr());
+    return 0;
+  }
+  return static_cast<int64_t>(mysql_affected_rows(client_.handle()));
+}
+
 int64_t MySqlMessageRepository::purgeExpiredOffline(int64_t nowSec) {
   // TTL 清理：删除超期未领取的单聊离线消息（群消息不走 pending 状态，不在此列）。
   // 注意 kOfflineTtl 是 hours 单位，须显式换算为秒（历史 bug：直接 .count() 把

@@ -23,6 +23,8 @@ public:
   std::vector<StoredMessage> fetchOffline(int64_t toUser) override;
   // 删除超过 TTL 仍未领取的单聊离线消息。返回删除条数。
   int64_t purgeExpiredOffline(int64_t nowSec) override;
+  // 保留期清理：删除超期已消费消息与群消息。返回删除条数。
+  int64_t purgeAgedHistory(int64_t nowSec, int retentionDays) override;
   void markDelivered(int64_t toUser,
                      const std::vector<std::string>& messageIds) override;
   std::vector<StoredMessage> fetchHistory(int64_t userA, int64_t userB,

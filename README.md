@@ -75,8 +75,12 @@ TCP → Connection(IO线程,epoll ET,背压) → Session(握手/心跳/8MB队列
 | [docs/server-architecture-learning-guide.md](docs/server-architecture-learning-guide.md) | 架构与源码学习指南 |
 | [docs/improvement-plan-and-learning-roadmap.md](docs/improvement-plan-and-learning-roadmap.md) | 改进计划与学习路线（含当前状态表） |
 
-## 规模与边界
+## 规模与边界（含实测基线）
 
-- 代码 ~7500 行（46 文件），7 单测 + 205 业务用例，MySQL 六表，Redis 四类键
-- 单机容量（2C2G 调优后）：约 2000-5000 在线连接、500-1000 msg/s（瓶颈为仓库层单 MySQL 连接）
-- 明确非目标：多实例水平扩展、消息队列、TLS 网关（见改进计划文档）
+- 代码 ~7600 行（47 文件），8 单测 + 210 业务用例，MySQL 六表，Redis 四类键
+- **实测基线**（`scripts/bench.py`，2026-09-29，本地 3 工作线程 + 临时 MySQL）：
+  - 连接：**2000 并发连接 30 秒全保持**，建连速率 **1300+/s**；服务端 RSS 仅 **23MB**
+  - 吞吐：40 用户并发 **43 msg/s、p50 25ms / p99 37ms**（受单用户限流 30 条/10s 的
+    生产语义约束，非服务端上限；单条落库 ~3ms，单 MySQL 连接串行理论容量约
+    300-500 msg/s，扩容路径见改进计划 C 区）
+- 明确非目标：多实例水平扩展、消息队列、TLS 网关、多端消息漫游（见改进计划文档）
