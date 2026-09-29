@@ -83,6 +83,10 @@ services:
       # 信任 Nginx 反代的 X-Forwarded-For（网桥 IP；不同机器网段核对方式
       # 见文件头注释）
       IM_TRUSTED_PROXIES: 172.19.0.1
+      # 经 Nginx 反代时对端 IP 恒为网桥（全体用户共享同一"单 IP"额度），
+      # 服务端单 IP 限连关闭；入口限流交给 Nginx perip 50（im.conf 已含）。
+      # 总量仍有 command 的连接上限 50 兜底
+      IM_MAX_PER_IP_CONN: "0"
     # 仅绑 127.0.0.1：不经 Nginx 的直连通道不暴露公网（对外入口只有
     # Nginx 的 8080）
     ports:

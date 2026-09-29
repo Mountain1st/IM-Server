@@ -339,15 +339,22 @@ imserver [端口] [IO线程数] [工作线程数] [最大连接数] [允许Origi
 MySQL 连接失败启动报错退出；`IM_REDIS_ENABLED=1` 且连接失败同样报错退出。
 
 ### 10.3 Docker 部署
-仓库含 `Dockerfile` 与 `docker-compose.yml`：`mysql:8.4` + `redis:8-alpine` + `imserver` 三服务编排。
+仓库含 `Dockerfile` 与 `docker-compose.yml`：`mysql:8.4` + `redis:8-alpine` +
+`imserver` + `nginx` 四服务编排（部署标准，按远程生产机固化）。
 ```
 docker compose up -d --build
 ```
-- imserver 等 MySQL 健康后再启动（`depends_on + service_healthy`）
+- **部署标准**：连接上限 50（2C2G）、imserver 仅绑 `127.0.0.1:9191`
+  （对外唯一入口 Nginx 8080）、`IM_TRUSTED_PROXIES=网桥 IP`（换机器核对
+  网段）、MySQL buffer pool 128M、密码经 `.env` 注入（compose 自动读取
+  同目录 `.env`）、`IM_MAX_PER_IP_CONN=0`（经 Nginx 对端恒为网桥 IP，
+  入口限流交给 Nginx perip 50）
+- imserver 等 MySQL 健康后再启动（`depends_on + service_healthy`），并带
+  `restart: unless-stopped`（启动连不上 DB 自动重试拉起）
 - 容器内 imserver 通过服务名连接：`IM_MYSQL_HOST=mysql`、`IM_REDIS_HOST=redis`（端口 6379）
 - `mysql_data` / `redis_data` 命名卷持久化数据
 - `docker compose` 启用 Redis（`IM_REDIS_ENABLED=1`），token 免密重连跨容器重启不失效
-- 第四个服务 **nginx**（`nginx/im.conf`，8080 反代 9191）：WebSocket 升级头、90s 读超时、
+- **nginx**（`nginx/im.conf`，8080 反代 9191）：WebSocket 升级头、90s 读超时、
   每真实 IP 50 连接限流、`X-Forwarded-For` 传递；TLS/域名见 `docs/nginx-deploy.md`
 
 ### 10.4 云服务器部署（以阿里云 2 核 2G 为例）

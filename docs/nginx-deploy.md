@@ -30,8 +30,8 @@ docker compose up -d --build      # 起 mysql + redis + imserver + nginx
 | 项 | 处理 |
 |---|---|
 | 单 IP 限连误伤 | 反代后服务端看到的来源全是 Nginx，**全体用户共享额度**：设 `IM_MAX_PER_IP_CONN=0` 关闭，入口限流交给 Nginx `limit_conn perip 50`（conf 已含） |
-| 真实 IP | `IM_TRUSTED_PROXIES=<Nginx 的 IP>`（逗号分隔）。对端在列表内时握手日志显示 `X-Forwarded-For` 真实客户端 IP；**未配置则忽略该头（防客户端伪造）**；头值含非 IP 字符整体丢弃（防日志注入） |
-| Host 校验 | 需要时启动第 5 参数加白名单：`./imserver 9191 2 3 500 im.example.com` |
+| 真实 IP | `IM_TRUSTED_PROXIES=<Nginx 的 IP>`（逗号分隔；compose 部署标准已固化网桥 IP，**换机器/重建网络后用 `docker network inspect <网络名>` 核对 Gateway**）。对端在列表内时握手日志显示 `X-Forwarded-For` 真实客户端 IP；**未配置则忽略该头（防客户端伪造）**；头值含非 IP 字符整体丢弃（防日志注入） |
+| Host 校验 | 需要时启动第 5 参数加白名单：`./imserver 9191 2 3 50 im.example.com` |
 | 超时 | conf 已设 `proxy_read_timeout 90s`（服务端心跳 30s/僵尸 60s，留余量） |
 
 ## 4. TLS（wss://，公网正式）
