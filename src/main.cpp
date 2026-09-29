@@ -11,12 +11,14 @@
 // ============================================================
 #include "appserver.hpp"
 
+#include <chrono>
 #include <csignal>
 #include <cstdlib>
 #include <exception>
 #include <iostream>
 #include <memory>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include "log.hpp"
@@ -169,6 +171,17 @@ int main(int argc, char* argv[]) {
   server->run();
   // run() 返回即表示收到停止请求，在主线程执行完整优雅关闭：
   // 停止接入 → 向在线会话发 Close(1001) → 工作队列排水（带超时）→ 兜底关闭
+  // 看门狗：优雅停机各环节均有超时，理论上 15 秒内必然完成；若出现
+  // 未预见的挂点（历史事件：ASan 轮疑似挂 31 分钟），15 秒后硬退
+  // 保证进程可退出（compose restart 依赖进程退出才能拉起）
+  {
+    std::thread watchdog([] {
+      std::this_thread::sleep_for(std::chrono::seconds(15));
+      LOG_E("[server] 停机看门狗超时，硬退出（优雅关闭未在 15 秒内完成）");
+      ::_exit(0);
+    });
+    watchdog.detach();
+  }
   server->stop();
   LOG_I("[server] 已退出");
   return 0;

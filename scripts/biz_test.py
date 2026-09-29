@@ -614,6 +614,30 @@ def main():
           r["type"] == "contact.list_res" and r["data"]["code"] == 0)
     c5.close()
 
+    # 可靠性二期：MySQL 整体宕机 → 期间查询失败（自愈重连也不可达）→
+    # 恢复后服务必须自动跟上（不因连接状态被关门而瘫痪到重启）。
+    # 需本机 docker 控制 mysql 容器；CI（GitHub services mysql）无 docker 跳过
+    import shutil
+    import subprocess as sp_mod
+    if shutil.which("docker"):
+        probe = sp_mod.run(["docker", "inspect", "-f", "1", "ims-mysql"],
+                           capture_output=True)
+        if probe.returncode == 0:
+            sp_mod.run(["docker", "stop", "ims-mysql"], capture_output=True)
+            time.sleep(1)
+            r = send_msg(a, A, "during-outage", "mysql-outage-1")
+            check("send during mysql outage fails gracefully",
+                  r["type"] == "msg.ack" and r["data"]["code"] == 500)
+            sp_mod.run(["docker", "start", "ims-mysql"], capture_output=True)
+            time.sleep(15)  # 等 MySQL 完全就绪（启动+网络）
+            r = send_msg(a, A, "after-recovery", "mysql-outage-2")
+            check("send after mysql recovery auto-resumes",
+                  r["type"] == "msg.ack" and r["data"]["code"] == 0)
+        else:
+            print("SKIP mysql outage/recovery probe (ims-mysql not a local container)")
+    else:
+        print("SKIP mysql outage/recovery probe (no docker)")
+
     # v1.8：chat.history 的 to 为登录账号 account；自己对话框（to==自己账号）已落库，
     # 历史可查（见 self history persisted 用例）；与无历史的其他账号返回空列表
     a.send(env("chat.history", {"to": B}))

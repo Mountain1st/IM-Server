@@ -19,6 +19,46 @@
 
 namespace im {
 
+namespace {
+// 内部执行（不自愈）：参数化 SQL 预处理执行。成功返回 stmt
+// （由调用方读取结果后关闭），失败返回 nullptr 并写出 errno。
+// 调用方须已持有连接访问锁（单连接非线程安全）
+MYSQL_STMT* mysqlStmtExec(MYSQL* c, const std::string& sql,
+                          const std::vector<std::string>& params, int* errNo) {
+  MYSQL_STMT* stmt = mysql_stmt_init(c);
+  if (!stmt) {
+    *errNo = static_cast<int>(mysql_errno(c));
+    return nullptr;
+  }
+  if (mysql_stmt_prepare(stmt, sql.c_str(), sql.size())) {
+    *errNo = static_cast<int>(mysql_stmt_errno(stmt));
+    mysql_stmt_close(stmt);
+    return nullptr;
+  }
+  std::vector<MYSQL_BIND> binds(params.size());
+  std::vector<unsigned long> lens(params.size());
+  for (size_t i = 0; i < params.size(); ++i) {
+    memset(&binds[i], 0, sizeof binds[i]);
+    lens[i] = static_cast<unsigned long>(params[i].size());
+    binds[i].buffer_type = MYSQL_TYPE_STRING;
+    binds[i].buffer = const_cast<char*>(params[i].data());
+    binds[i].buffer_length = lens[i];
+    binds[i].length = &lens[i];
+  }
+  if (!params.empty() && mysql_stmt_bind_param(stmt, binds.data())) {
+    *errNo = static_cast<int>(mysql_stmt_errno(stmt));
+    mysql_stmt_close(stmt);
+    return nullptr;
+  }
+  if (mysql_stmt_execute(stmt)) {
+    *errNo = static_cast<int>(mysql_stmt_errno(stmt));
+    mysql_stmt_close(stmt);
+    return nullptr;
+  }
+  return stmt;
+}
+} // namespace
+
 MySqlClient::MySqlClient(const std::string& host, unsigned port, const std::string& user,
                          const std::string& password, const std::string& db)
     : host_(host), port_(port), user_(user), password_(password), db_(db) {
@@ -28,8 +68,11 @@ MySqlClient::MySqlClient(const std::string& host, unsigned port, const std::stri
     return;
   }
   mysql_options(conn_, MYSQL_SET_CHARSET_NAME, "utf8mb4");
-  // 读写超时（秒）：MySQL 停顿时避免永久阻塞（如停机时 purge 线程 join 挂死）
+  // 读写/连接超时（秒）：MySQL 停顿（或容器重启期 DNS/端口未就绪）时
+  // 调用方最多阻塞数秒返回失败，不再无限等待（如停机时 purge 线程
+  // join 挂死；部署机连服务名 mysql，容器重启期 connect 可能长等）
   const unsigned kMySqlIoTimeoutSec = 5;
+  mysql_options(conn_, MYSQL_OPT_CONNECT_TIMEOUT, &kMySqlIoTimeoutSec);
   mysql_options(conn_, MYSQL_OPT_READ_TIMEOUT, &kMySqlIoTimeoutSec);
   mysql_options(conn_, MYSQL_OPT_WRITE_TIMEOUT, &kMySqlIoTimeoutSec);
   if (!mysql_real_connect(conn_, host.c_str(), user.c_str(), password.c_str(),
@@ -67,15 +110,19 @@ bool MySqlClient::reconnect() {
   // 仍生效，但保险起见重设（超时/字符集）
   mysql_options(conn_, MYSQL_SET_CHARSET_NAME, "utf8mb4");
   const unsigned kMySqlIoTimeoutSec = 5;
+  mysql_options(conn_, MYSQL_OPT_CONNECT_TIMEOUT, &kMySqlIoTimeoutSec);
   mysql_options(conn_, MYSQL_OPT_READ_TIMEOUT, &kMySqlIoTimeoutSec);
   mysql_options(conn_, MYSQL_OPT_WRITE_TIMEOUT, &kMySqlIoTimeoutSec);
   if (!mysql_real_connect(conn_, host_.c_str(), user_.c_str(), password_.c_str(),
                           db_.c_str(), port_, nullptr, 0)) {
+    // 注意：此处不置 ok_=false——各仓库方法开头有 `if (!client_.ok())`
+    // 短路守卫，一旦置 false，MySQL 恢复后也不会再进 stmtExec/query
+    // 触发重连，服务将瘫痪到重启（自愈反而退化为不可恢复）。
+    // ok_ 只表达"构造时连接成功"（启动 fail-fast 语义）；本次失败
+    // 由调用方按查询失败处理（errStr() 实时读 mysql_error）
     LOG_E("[mysql] 自愈重连失败: " << mysql_error(conn_));
-    ok_ = false;
     return false;
   }
-  ok_ = true;
   LOG_I("[mysql] 连接已自愈重建");
   return true;
 }
@@ -99,41 +146,6 @@ bool MySqlClient::query(const std::string& sql) {
   LOG_W("[mysql] 连接已断（errno=" << e << "），自愈重连后重试");
   if (!reconnect()) return false;
   return mysql_query(conn_, sql.c_str()) == 0;
-}
-
-MYSQL_STMT* mysqlStmtExec(MYSQL* c, const std::string& sql,
-                          const std::vector<std::string>& params, int* errNo) {
-  MYSQL_STMT* stmt = mysql_stmt_init(c);
-  if (!stmt) {
-    *errNo = mysql_errno(c);
-    return nullptr;
-  }
-  if (mysql_stmt_prepare(stmt, sql.c_str(), sql.size())) {
-    *errNo = mysql_stmt_errno(stmt);
-    mysql_stmt_close(stmt);
-    return nullptr;
-  }
-  std::vector<MYSQL_BIND> binds(params.size());
-  std::vector<unsigned long> lens(params.size());
-  for (size_t i = 0; i < params.size(); ++i) {
-    memset(&binds[i], 0, sizeof binds[i]);
-    lens[i] = static_cast<unsigned long>(params[i].size());
-    binds[i].buffer_type = MYSQL_TYPE_STRING;
-    binds[i].buffer = const_cast<char*>(params[i].data());
-    binds[i].buffer_length = lens[i];
-    binds[i].length = &lens[i];
-  }
-  if (!params.empty() && mysql_stmt_bind_param(stmt, binds.data())) {
-    *errNo = mysql_stmt_errno(stmt);
-    mysql_stmt_close(stmt);
-    return nullptr;
-  }
-  if (mysql_stmt_execute(stmt)) {
-    *errNo = mysql_stmt_errno(stmt);
-    mysql_stmt_close(stmt);
-    return nullptr;
-  }
-  return stmt;
 }
 
 } // namespace im
