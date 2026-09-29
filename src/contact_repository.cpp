@@ -26,7 +26,7 @@ bool ContactRepository::fetchAllContacts(std::unordered_set<std::string>* out) {
   // 调用方须持有 mutex_（构造加载与重建共用同一查询）
   if (!client_.ok()) return false;
   MYSQL* c = client_.handle();
-  if (mysql_query(c, "SELECT user_id, contact_id FROM contacts")) {
+  if (!client_.query("SELECT user_id, contact_id FROM contacts")) {
     LOG_E("[mysql] 查询联系人失败: " << client_.errStr());
     return false;
   }
@@ -47,7 +47,7 @@ bool ContactRepository::dbContactCount(size_t* out) {
   std::lock_guard<std::mutex> lock(mutex_);
   if (!client_.ok()) return false;
   MYSQL* c = client_.handle();
-  if (mysql_query(c, "SELECT COUNT(*) FROM contacts")) {
+  if (!client_.query("SELECT COUNT(*) FROM contacts")) {
     LOG_E("[mysql] 统计联系人行数失败: " << client_.errStr());
     return false;
   }
@@ -95,7 +95,7 @@ bool ContactRepository::addContactPair(int64_t a, int64_t b) {
   const std::string sql =
       "INSERT IGNORE INTO contacts (user_id, contact_id) VALUES (?, ?), (?, ?)";
   int errNo = 0;
-  MYSQL_STMT* stmt = mysqlStmtExec(client_.handle(), sql,
+  MYSQL_STMT* stmt = client_.stmtExec(sql,
       {std::to_string(a), std::to_string(b), std::to_string(b), std::to_string(a)}, &errNo);
   if (!stmt) {
     LOG_E("[mysql] 添加联系人失败 errno=" << errNo);
@@ -111,7 +111,7 @@ void ContactRepository::addSelfContact(int64_t userId) {
   std::lock_guard<std::mutex> lock(mutex_);
   if (!client_.ok()) return;
   int errNo = 0;
-  MYSQL_STMT* stmt = mysqlStmtExec(client_.handle(),
+  MYSQL_STMT* stmt = client_.stmtExec(
       "INSERT IGNORE INTO contacts (user_id, contact_id) VALUES (?, ?)",
       {std::to_string(userId), std::to_string(userId)}, &errNo);
   if (!stmt) {
@@ -126,7 +126,7 @@ bool ContactRepository::deleteContactPair(int64_t a, int64_t b) {
   std::lock_guard<std::mutex> lock(mutex_);
   if (!client_.ok()) return false;
   int errNo = 0;
-  MYSQL_STMT* stmt = mysqlStmtExec(client_.handle(),
+  MYSQL_STMT* stmt = client_.stmtExec(
       "DELETE FROM contacts WHERE (user_id = ? AND contact_id = ?) "
       "OR (user_id = ? AND contact_id = ?)",
       {std::to_string(a), std::to_string(b), std::to_string(b), std::to_string(a)}, &errNo);
@@ -136,7 +136,7 @@ bool ContactRepository::deleteContactPair(int64_t a, int64_t b) {
   }
   mysql_stmt_close(stmt);
   // 解除关系同时将双向好友请求置为 rejected，允许后续重新发起添加
-  MYSQL_STMT* req = mysqlStmtExec(client_.handle(),
+  MYSQL_STMT* req = client_.stmtExec(
       "UPDATE friend_requests SET status = 2 WHERE (from_user = ? AND to_user = ?) "
       "OR (from_user = ? AND to_user = ?)",
       {std::to_string(a), std::to_string(b), std::to_string(b), std::to_string(a)}, &errNo);
@@ -152,7 +152,7 @@ std::vector<int64_t> ContactRepository::listContactIds(int64_t userId) {
   std::vector<int64_t> out;
   if (!client_.ok()) return out;
   int errNo = 0;
-  MYSQL_STMT* stmt = mysqlStmtExec(client_.handle(),
+  MYSQL_STMT* stmt = client_.stmtExec(
       "SELECT contact_id FROM contacts WHERE user_id = ?", {std::to_string(userId)}, &errNo);
   if (!stmt) {
     LOG_E("[mysql] 查询联系人列表失败 errno=" << errNo);
@@ -179,7 +179,7 @@ int ContactRepository::addRequest(int64_t from, int64_t to) {
   int errNo = 0;
   // 仅当已有行处于 rejected(2) 时重置为 pending(0)（允许重新发起）；
   // pending/accepted 保持原状（409 已存在/已是联系人由上层处理）。
-  MYSQL_STMT* stmt = mysqlStmtExec(client_.handle(),
+  MYSQL_STMT* stmt = client_.stmtExec(
       "INSERT INTO friend_requests (from_user, to_user, status) VALUES (?, ?, 0) "
       "ON DUPLICATE KEY UPDATE status = IF(status = 2, 0, status)",
       {std::to_string(from), std::to_string(to)}, &errNo);
@@ -198,7 +198,7 @@ int ContactRepository::acceptRequest(int64_t to, int64_t from) {
   std::lock_guard<std::mutex> lock(mutex_);
   if (!client_.ok()) return 2;
   int errNo = 0;
-  MYSQL_STMT* stmt = mysqlStmtExec(client_.handle(),
+  MYSQL_STMT* stmt = client_.stmtExec(
       "UPDATE friend_requests SET status = 1 WHERE from_user = ? AND to_user = ? AND status = 0",
       {std::to_string(from), std::to_string(to)}, &errNo);
   if (!stmt) {
@@ -210,12 +210,12 @@ int ContactRepository::acceptRequest(int64_t to, int64_t from) {
   if (affected <= 0) return 1; // 无 pending 请求
   // 反向请求一并置为 accepted：互相添加场景下，双方既已成为联系人，
   // 反向待处理请求不再有意义，避免残留（如 B 接受 A 后 A 列表仍显示 B 的请求）。
-  MYSQL_STMT* srev = mysqlStmtExec(client_.handle(),
+  MYSQL_STMT* srev = client_.stmtExec(
       "UPDATE friend_requests SET status = 1 WHERE from_user = ? AND to_user = ? AND status = 0",
       {std::to_string(to), std::to_string(from)}, &errNo);
   if (srev) mysql_stmt_close(srev);
   // 建立联系人关系（双向）
-  MYSQL_STMT* s2 = mysqlStmtExec(client_.handle(),
+  MYSQL_STMT* s2 = client_.stmtExec(
       "INSERT IGNORE INTO contacts (user_id, contact_id) VALUES (?, ?), (?, ?)",
       {std::to_string(to), std::to_string(from), std::to_string(from), std::to_string(to)},
       &errNo);
@@ -233,7 +233,7 @@ int ContactRepository::rejectRequest(int64_t to, int64_t from) {
   std::lock_guard<std::mutex> lock(mutex_);
   if (!client_.ok()) return 2;
   int errNo = 0;
-  MYSQL_STMT* stmt = mysqlStmtExec(client_.handle(),
+  MYSQL_STMT* stmt = client_.stmtExec(
       "UPDATE friend_requests SET status = 2 WHERE from_user = ? AND to_user = ? AND status = 0",
       {std::to_string(from), std::to_string(to)}, &errNo);
   if (!stmt) {
@@ -252,7 +252,7 @@ std::vector<ContactRepository::PendingRequest> ContactRepository::listPendingReq
   const std::string sql =
       "SELECT from_user, UNIX_TIMESTAMP(created_at) FROM friend_requests WHERE to_user = " +
       std::to_string(to) + " AND status = 0 ORDER BY id ASC";
-  if (mysql_query(client_.handle(), sql.c_str())) {
+  if (!client_.query(sql.c_str())) {
     LOG_E("[mysql] 查询好友请求失败: " << client_.errStr());
     return out;
   }
@@ -273,7 +273,7 @@ bool ContactRepository::requestTime(int64_t from, int64_t to, int64_t* ts) {
   std::lock_guard<std::mutex> lock(mutex_);
   if (!client_.ok() || ts == nullptr) return false;
   int errNo = 0;
-  MYSQL_STMT* stmt = mysqlStmtExec(client_.handle(),
+  MYSQL_STMT* stmt = client_.stmtExec(
       "SELECT UNIX_TIMESTAMP(created_at) FROM friend_requests "
       "WHERE from_user = ? AND to_user = ? LIMIT 1",
       {std::to_string(from), std::to_string(to)}, &errNo);

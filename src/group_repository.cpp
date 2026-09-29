@@ -24,7 +24,7 @@ bool GroupRepository::fetchActiveMembers(std::unordered_set<std::string>* out) {
   // 调用方须持有 mutex_（构造加载与重建共用同一查询）
   if (!client_.ok()) return false;
   MYSQL* c = client_.handle();
-  if (mysql_query(c, "SELECT group_id, user_id FROM group_members WHERE left_ts = 0")) {
+  if (!client_.query("SELECT group_id, user_id FROM group_members WHERE left_ts = 0")) {
     LOG_E("[mysql] 查询群成员失败: " << client_.errStr());
     return false;
   }
@@ -45,7 +45,7 @@ bool GroupRepository::dbMemberCount(size_t* out) {
   std::lock_guard<std::mutex> lock(mutex_);
   if (!client_.ok()) return false;
   MYSQL* c = client_.handle();
-  if (mysql_query(c, "SELECT COUNT(*) FROM group_members WHERE left_ts = 0")) {
+  if (!client_.query("SELECT COUNT(*) FROM group_members WHERE left_ts = 0")) {
     LOG_E("[mysql] 统计群成员行数失败: " << client_.errStr());
     return false;
   }
@@ -87,8 +87,7 @@ int64_t GroupRepository::createGroup(const std::string& name, int64_t ownerId,
   std::lock_guard<std::mutex> lock(mutex_);
   if (!client_.ok()) return 0;
   int errNo = 0;
-  MYSQL_STMT* stmt = mysqlStmtExec(
-      client_.handle(),
+  MYSQL_STMT* stmt = client_.stmtExec(
       "INSERT INTO `groups` (name, owner_id, created_ts, announcement, announce_ts, "
       "dissolved, dissolved_ts) VALUES (?, ?, ?, '', 0, 0, 0)",
       {name, std::to_string(ownerId), std::to_string(now)}, &errNo);
@@ -100,8 +99,7 @@ int64_t GroupRepository::createGroup(const std::string& name, int64_t ownerId,
   mysql_stmt_close(stmt);
   if (gid <= 0) return 0;
   // 建群者自动入群
-  MYSQL_STMT* s2 = mysqlStmtExec(
-      client_.handle(),
+  MYSQL_STMT* s2 = client_.stmtExec(
       "INSERT INTO group_members (group_id, user_id, joined_ts) VALUES (?, ?, ?)",
       {std::to_string(gid), std::to_string(ownerId), std::to_string(now)}, &errNo);
   if (!s2) {
@@ -117,7 +115,7 @@ bool GroupRepository::groupExists(int64_t groupId) {
   std::lock_guard<std::mutex> lock(mutex_);
   if (!client_.ok() || groupId <= 0) return false;
   int errNo = 0;
-  MYSQL_STMT* stmt = mysqlStmtExec(client_.handle(),
+  MYSQL_STMT* stmt = client_.stmtExec(
                                    "SELECT 1 FROM `groups` WHERE group_id = ? LIMIT 1",
                                    {std::to_string(groupId)}, &errNo);
   if (!stmt) return false;
@@ -140,8 +138,7 @@ bool GroupRepository::getGroup(int64_t groupId, std::string* name, int64_t* owne
   std::lock_guard<std::mutex> lock(mutex_);
   if (!client_.ok() || groupId <= 0) return false;
   int errNo = 0;
-  MYSQL_STMT* stmt = mysqlStmtExec(
-      client_.handle(),
+  MYSQL_STMT* stmt = client_.stmtExec(
       "SELECT name, owner_id, announcement, announce_ts, dissolved FROM `groups` "
       "WHERE group_id = ? LIMIT 1",
       {std::to_string(groupId)}, &errNo);
@@ -197,8 +194,7 @@ bool GroupRepository::setOwner(int64_t groupId, int64_t newOwnerId) {
   std::lock_guard<std::mutex> lock(mutex_);
   if (!client_.ok()) return false;
   int errNo = 0;
-  MYSQL_STMT* stmt = mysqlStmtExec(
-      client_.handle(),
+  MYSQL_STMT* stmt = client_.stmtExec(
       "UPDATE `groups` SET owner_id = ? WHERE group_id = ? AND dissolved = 0",
       {std::to_string(newOwnerId), std::to_string(groupId)}, &errNo);
   if (!stmt) {
@@ -215,8 +211,7 @@ bool GroupRepository::dissolveGroup(int64_t groupId, int64_t now) {
   std::lock_guard<std::mutex> lock(mutex_);
   if (!client_.ok()) return false;
   int errNo = 0;
-  MYSQL_STMT* stmt = mysqlStmtExec(
-      client_.handle(),
+  MYSQL_STMT* stmt = client_.stmtExec(
       "UPDATE `groups` SET dissolved = 1, dissolved_ts = ? WHERE group_id = ? "
       "AND dissolved = 0",
       {std::to_string(now), std::to_string(groupId)}, &errNo);
@@ -234,8 +229,7 @@ bool GroupRepository::renameGroup(int64_t groupId, const std::string& name) {
   std::unique_lock<std::mutex> lock(mutex_);
   if (!client_.ok()) return false;
   int errNo = 0;
-  MYSQL_STMT* stmt = mysqlStmtExec(
-      client_.handle(), "UPDATE `groups` SET name = ? WHERE group_id = ? AND dissolved = 0",
+  MYSQL_STMT* stmt = client_.stmtExec( "UPDATE `groups` SET name = ? WHERE group_id = ? AND dissolved = 0",
       {name, std::to_string(groupId)}, &errNo);
   if (!stmt) {
     LOG_E("[mysql] 群改名失败 errno=" << errNo);
@@ -256,8 +250,7 @@ bool GroupRepository::setAnnouncement(int64_t groupId, const std::string& text,
   std::unique_lock<std::mutex> lock(mutex_);
   if (!client_.ok()) return false;
   int errNo = 0;
-  MYSQL_STMT* stmt = mysqlStmtExec(
-      client_.handle(),
+  MYSQL_STMT* stmt = client_.stmtExec(
       "UPDATE `groups` SET announcement = ?, announce_ts = ? WHERE group_id = ? "
       "AND dissolved = 0",
       {text, std::to_string(now), std::to_string(groupId)}, &errNo);
@@ -285,8 +278,7 @@ bool GroupRepository::memberPeriod(int64_t groupId, int64_t userId, int64_t* joi
   std::lock_guard<std::mutex> lock(mutex_);
   if (!client_.ok()) return false;
   int errNo = 0;
-  MYSQL_STMT* stmt = mysqlStmtExec(
-      client_.handle(),
+  MYSQL_STMT* stmt = client_.stmtExec(
       "SELECT joined_ts, left_ts FROM group_members WHERE group_id = ? AND user_id = ? LIMIT 1",
       {std::to_string(groupId), std::to_string(userId)}, &errNo);
   if (!stmt) return false;
@@ -313,8 +305,7 @@ bool GroupRepository::addMember(int64_t groupId, int64_t userId, int64_t now) {
   if (!client_.ok()) return false;
   int errNo = 0;
   // 新加或重入：重入时 joined_ts=now、left_ts=0（旧时段自然不可见）
-  MYSQL_STMT* stmt = mysqlStmtExec(
-      client_.handle(),
+  MYSQL_STMT* stmt = client_.stmtExec(
       "INSERT INTO group_members (group_id, user_id, joined_ts) VALUES (?, ?, ?) "
       "ON DUPLICATE KEY UPDATE joined_ts = VALUES(joined_ts), left_ts = 0",
       {std::to_string(groupId), std::to_string(userId), std::to_string(now)}, &errNo);
@@ -331,8 +322,7 @@ bool GroupRepository::removeMember(int64_t groupId, int64_t userId, int64_t now)
   std::lock_guard<std::mutex> lock(mutex_);
   if (!client_.ok()) return false;
   int errNo = 0;
-  MYSQL_STMT* stmt = mysqlStmtExec(
-      client_.handle(),
+  MYSQL_STMT* stmt = client_.stmtExec(
       "UPDATE group_members SET left_ts = ? WHERE group_id = ? AND user_id = ? "
       "AND left_ts = 0",
       {std::to_string(now), std::to_string(groupId), std::to_string(userId)}, &errNo);
@@ -350,7 +340,7 @@ size_t GroupRepository::activeCount(int64_t groupId) {
   if (!client_.ok()) return 0;
   const std::string sql = "SELECT COUNT(*) FROM group_members WHERE group_id = " +
                           std::to_string(groupId) + " AND left_ts = 0";
-  if (mysql_query(client_.handle(), sql.c_str())) return 0;
+  if (!client_.query(sql.c_str())) return 0;
   MYSQL_RES* res = mysql_store_result(client_.handle());
   if (!res) return 0;
   size_t n = 0;
@@ -366,8 +356,7 @@ std::vector<int64_t> GroupRepository::listMemberIds(int64_t groupId) {
   std::vector<int64_t> out;
   if (!client_.ok()) return out;
   int errNo = 0;
-  MYSQL_STMT* stmt = mysqlStmtExec(
-      client_.handle(),
+  MYSQL_STMT* stmt = client_.stmtExec(
       "SELECT user_id FROM group_members WHERE group_id = ? AND left_ts = 0",
       {std::to_string(groupId)}, &errNo);
   if (!stmt) return out;
@@ -388,8 +377,7 @@ std::vector<int64_t> GroupRepository::listUserGroups(int64_t userId) {
   std::vector<int64_t> out;
   if (!client_.ok()) return out;
   int errNo = 0;
-  MYSQL_STMT* stmt = mysqlStmtExec(
-      client_.handle(),
+  MYSQL_STMT* stmt = client_.stmtExec(
       "SELECT group_id FROM group_members WHERE user_id = ? AND left_ts = 0",
       {std::to_string(userId)}, &errNo);
   if (!stmt) return out;
@@ -409,8 +397,7 @@ int64_t GroupRepository::getWatermark(int64_t groupId, int64_t userId) {
   std::lock_guard<std::mutex> lock(mutex_);
   if (!client_.ok()) return 0;
   int errNo = 0;
-  MYSQL_STMT* stmt = mysqlStmtExec(
-      client_.handle(),
+  MYSQL_STMT* stmt = client_.stmtExec(
       "SELECT last_delivered_ts FROM group_members WHERE group_id = ? AND user_id = ? "
       "LIMIT 1",
       {std::to_string(groupId), std::to_string(userId)}, &errNo);
@@ -432,8 +419,7 @@ void GroupRepository::setWatermark(int64_t groupId, int64_t userId, int64_t ts) 
   std::lock_guard<std::mutex> lock(mutex_);
   if (!client_.ok()) return;
   int errNo = 0;
-  MYSQL_STMT* stmt = mysqlStmtExec(
-      client_.handle(),
+  MYSQL_STMT* stmt = client_.stmtExec(
       "UPDATE group_members SET last_delivered_ts = ? WHERE group_id = ? AND user_id = ?",
       {std::to_string(ts), std::to_string(groupId), std::to_string(userId)}, &errNo);
   if (!stmt) {

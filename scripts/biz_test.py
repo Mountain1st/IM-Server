@@ -582,6 +582,38 @@ def main():
     cx.close()
     cy.close()
 
+    # 可靠性：MySQL 连接被服务端踢掉后自动重连自愈。
+    # 场景来自生产（2026-09-29）：闲置 19 小时 > wait_timeout(8h)，服务端
+    # 踢连接（errno 4031/2006），单连接无自愈导致登录全挂直到重启。
+    # 此处用 KILL 模拟连接被踢，验证下一次查询自动重建并成功
+    kill = sql_q("SELECT GROUP_CONCAT(id) FROM information_schema.processlist "
+                 "WHERE user='IMS_jack' AND command='Sleep' AND id <> CONNECTION_ID()")
+    n_killed = 0
+    for kid in (kill or "").split(","):
+        kid = kid.strip()
+        if kid.isdigit():
+            sql_q("KILL %s" % kid)
+            n_killed += 1
+    check("mysql conn kick executed", n_killed >= 1)
+    time.sleep(0.5)  # 等 TCP 断开传播到服务端
+    # 登录换干净账号 X（缓存用例注册且仅成功登录过——A 在前段用例里
+    # 有故意失败尝试，guard 计数未过期会 429，与本用例无关）
+    c5 = WS()
+    r = login(c5, X, "pw1234")
+    check("login after mysql kick self-heals",
+          r["type"] == "auth.login_res" and r["data"]["code"] == 0)
+    # 发消息走 msgRepo 落库自愈：发给 A 自己（自己对话框跳权限、
+    # 只落库不推送——避免给已关闭的 b 产生 pending 污染后续 B 重登）
+    r = send_msg(a, A, "post-kick", "mysql-kick-1")
+    check("send after mysql kick self-heals",
+          r["type"] == "msg.ack" and r["data"]["code"] == 0)
+    # 联系人列表走 contactRepo 查询自愈
+    c5.send(env("contact.list", {}))
+    r = json.loads(c5.recv())
+    check("contact list after kick self-heals",
+          r["type"] == "contact.list_res" and r["data"]["code"] == 0)
+    c5.close()
+
     # v1.8：chat.history 的 to 为登录账号 account；自己对话框（to==自己账号）已落库，
     # 历史可查（见 self history persisted 用例）；与无历史的其他账号返回空列表
     a.send(env("chat.history", {"to": B}))

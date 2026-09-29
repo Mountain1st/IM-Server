@@ -35,7 +35,7 @@
 - **Nginx 反向代理接入**（v2.2 后）：`nginx/im.conf` + compose 第四服务（WebSocket
   升级/90s 超时/每 IP 50 连接）；`X-Forwarded-For` 真实 IP 信任链
   （`IM_TRUSTED_PROXIES`，未配置即忽略防伪造）；过代理 207 用例全量验证。
-- 9 个 CTest 单元测试 + 217 个业务回归用例（内存/Redis 双模式）。
+- 9 个 CTest 单元测试 + 221 个业务回归用例（内存/Redis 双模式，含 MySQL 断线自愈用例）。
 - 安全加固：offline_ack 上限、clientMsgId 上限、登录洗表防护、TTL 单位修复、
   Redis 级联防护（2026-09-09 / 2026-09-27 两轮审计闭环）。
 

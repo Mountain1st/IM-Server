@@ -30,7 +30,7 @@ MySqlUserRepository::MySqlUserRepository(const std::string& host, unsigned port,
 void MySqlUserRepository::loadIdCache() {
   if (!client_.ok()) return;
   MYSQL* c = client_.handle();
-  if (mysql_query(c, "SELECT id, account, username FROM users")) {
+  if (!client_.query("SELECT id, account, username FROM users")) {
     LOG_E("[mysql] 加载用户 id 缓存失败: " << client_.errStr());
     return;
   }
@@ -55,7 +55,7 @@ int MySqlUserRepository::insertUser(const std::string& account, const std::strin
   int errNo = 0;
   const std::string sql =
       "INSERT INTO users (account, username, salt, password_hash) VALUES (?, ?, ?, ?)";
-  MYSQL_STMT* stmt = mysqlStmtExec(client_.handle(), sql,
+  MYSQL_STMT* stmt = client_.stmtExec(sql,
                               {account, username, salt, passwordHash}, &errNo);
   if (!stmt) {
     if (errNo == static_cast<int>(kErrDupEntry)) return 409;
@@ -77,7 +77,7 @@ int MySqlUserRepository::fetchUser(const std::string& account, int64_t* userId,
   const std::string sql =
       "SELECT id, username, salt, password_hash FROM users WHERE account = ? LIMIT 1";
   int errNo = 0;
-  MYSQL_STMT* stmt = mysqlStmtExec(c, sql, {account}, &errNo);
+  MYSQL_STMT* stmt = client_.stmtExec(sql, {account}, &errNo);
   if (!stmt) {
     LOG_E("[mysql] SELECT 准备/执行失败 errno=" << errNo);
     return 2; // 数据库错误
@@ -157,7 +157,7 @@ int MySqlUserRepository::fetchSettings(int64_t userId, int* allowTempChat, int* 
   MYSQL* c = client_.handle();
   const std::string sql = "SELECT allow_temp_chat, searchable, allow_add FROM users WHERE id = ? LIMIT 1";
   int errNo = 0;
-  MYSQL_STMT* stmt = mysqlStmtExec(c, sql, {std::to_string(userId)}, &errNo);
+  MYSQL_STMT* stmt = client_.stmtExec(sql, {std::to_string(userId)}, &errNo);
   if (!stmt) {
     LOG_E("[mysql] 查询设置失败 errno=" << errNo);
     return 2;
@@ -193,7 +193,7 @@ int MySqlUserRepository::updateSettings(int64_t userId, int allowTempChat, int s
       "searchable = CASE WHEN ? < 0 THEN searchable ELSE ? END, "
       "allow_add = CASE WHEN ? < 0 THEN allow_add ELSE ? END WHERE id = ?";
   int errNo = 0;
-  MYSQL_STMT* stmt = mysqlStmtExec(client_.handle(), sql,
+  MYSQL_STMT* stmt = client_.stmtExec(sql,
       {std::to_string(allowTempChat), std::to_string(allowTempChat),
        std::to_string(searchable), std::to_string(searchable),
        std::to_string(allowAdd), std::to_string(allowAdd),
@@ -222,7 +222,7 @@ void MySqlUserRepository::searchUsers(const std::string& keyword, int64_t exclud
   }
   const std::string like = "%" + esc + "%";
   int errNo = 0;
-  MYSQL_STMT* stmt = mysqlStmtExec(client_.handle(),
+  MYSQL_STMT* stmt = client_.stmtExec(
       "SELECT account, username FROM users WHERE searchable = 1 AND id != ? "
       "AND (account LIKE ? ESCAPE '\\\\' OR username LIKE ? ESCAPE '\\\\') ORDER BY id ASC LIMIT ?",
       {std::to_string(excludeUserId), like, like, std::to_string(limit)}, &errNo);

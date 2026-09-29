@@ -16,7 +16,8 @@ MySQL 持久化 + Redis 可选双后端，覆盖注册登录、单聊、联系�
 - **多端**：一账号多设备同时在线，自发消息回显 + 已读同步（msg.read_notify）
 - **存储**：MySQL 六表全参数化 SQL；Redis 可选（token/限流/幂等/在线状态，调用带超时且锁外执行——Redis 宕机不影响消息收发）
 - **可靠性**：clientMsgId 幂等、滑动窗口限流、离线消息 TTL 清理（7 天）、
-  优雅停机（Close 1001 通知 + 工作队列排水）；联系人/群成员缓存低频比对自愈
+  优雅停机（Close 1001 通知 + 工作队列排水）；联系人/群成员缓存低频比对自愈；
+  MySQL 断线自愈（wait_timeout 被踢/网络中断后透明重建重试）
 - **部署**：Docker Compose 四件套（mysql+redis+imserver+**nginx 反代**）；
   `X-Forwarded-For` 真实 IP 信任链、TLS（wss）终结位、日志按大小轮转
 
@@ -39,7 +40,7 @@ cmake -B build && cmake --build build -j4
 ```bash
 bash scripts/ci.sh                     # 本地 CI 一键：构建+单测+双模式回归（--full 加 ASan）
 ctest --test-dir build                 # 9 个单元测试
-bash scripts/test_biz.sh               # 217 个业务回归用例（WebSocket 全链路）
+bash scripts/test_biz.sh               # 221 个业务回归用例（WebSocket 全链路，含 MySQL 断线自愈）
 IM_REDIS_ENABLED=1 IM_REDIS_PORT=6379 bash scripts/test_biz.sh   # Redis 模式
 
 # Sanitizer（已通过 ASan/UBSan/LSan/TSan 全链路，修复过 2 处线程身份发布竞争）

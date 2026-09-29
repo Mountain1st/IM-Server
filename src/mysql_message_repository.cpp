@@ -62,7 +62,7 @@ bool MySqlMessageRepository::saveMessage(const std::string& messageId, int64_t f
       "INSERT INTO messages (message_id, from_user, to_user, content, ts, "
       "client_msg_id, chat_type, status, group_id) VALUES (?,?,?,?,?,?,?,?,?)";
   int errNo = 0;
-  MYSQL_STMT* stmt = mysqlStmtExec(client_.handle(), sql,
+  MYSQL_STMT* stmt = client_.stmtExec(sql,
       {messageId, std::to_string(fromUser), std::to_string(toUser), content,
        std::to_string(ts), clientMsgId, chatType, std::to_string(status),
        std::to_string(groupId)},
@@ -86,7 +86,7 @@ int64_t MySqlMessageRepository::purgeAgedHistory(int64_t nowSec, int retentionDa
   const std::string sql =
       "DELETE FROM messages WHERE ts < " + std::to_string(expireBefore) +
       " AND (group_id != 0 OR status != " + std::to_string(kMsgOfflinePending) + ")";
-  if (mysql_query(client_.handle(), sql.c_str())) {
+  if (!client_.query(sql.c_str())) {
     LOG_E("[mysql] 保留期清理失败: " << client_.errStr());
     return 0;
   }
@@ -105,7 +105,7 @@ int64_t MySqlMessageRepository::purgeExpiredOffline(int64_t nowSec) {
   const std::string sql =
       "DELETE FROM messages WHERE status = " + std::to_string(kMsgOfflinePending) +
       " AND group_id = 0 AND ts < " + std::to_string(expireBefore);
-  if (mysql_query(client_.handle(), sql.c_str())) {
+  if (!client_.query(sql.c_str())) {
     LOG_E("[mysql] 清理过期离线消息失败: " << client_.errStr());
     return 0;
   }
@@ -122,7 +122,7 @@ std::vector<StoredMessage> MySqlMessageRepository::fetchOffline(int64_t toUser) 
       " AND status = " + std::to_string(kMsgOfflinePending) +
       " AND group_id = 0 ORDER BY ts ASC, id ASC LIMIT " +
       std::to_string(config::kOfflineMaxPerUser);
-  if (mysql_query(client_.handle(), sql.c_str())) {
+  if (!client_.query(sql.c_str())) {
     LOG_E("[mysql] 查询离线消息失败: " << client_.errStr());
     return out;
   }
@@ -145,7 +145,7 @@ void MySqlMessageRepository::markDelivered(int64_t toUser,
   int64_t now = static_cast<int64_t>(std::time(nullptr));
   for (const auto& mid : messageIds) {
     int errNo = 0;
-    MYSQL_STMT* stmt = mysqlStmtExec(client_.handle(),
+    MYSQL_STMT* stmt = client_.stmtExec(
         "UPDATE messages SET status = ?, delivered_ts = ? "
         "WHERE to_user = ? AND message_id = ? AND status = ?",
         {std::to_string(kMsgDelivered), std::to_string(now),
@@ -170,7 +170,7 @@ std::vector<StoredMessage> MySqlMessageRepository::fetchHistory(int64_t userA,
       " AND to_user = " + std::to_string(userB) + ") OR (from_user = " +
       std::to_string(userB) + " AND to_user = " + std::to_string(userA) +
       ")) AND group_id = 0 ORDER BY ts DESC, id DESC LIMIT " + std::to_string(limit);
-  if (mysql_query(client_.handle(), sql.c_str())) {
+  if (!client_.query(sql.c_str())) {
     LOG_E("[mysql] 查询历史失败: " << client_.errStr());
     return out;
   }
@@ -190,7 +190,7 @@ bool MySqlMessageRepository::hasConversation(int64_t userA, int64_t userB) {
   std::lock_guard<std::mutex> lock(mutex_);
   if (!client_.ok() || userA <= 0 || userB <= 0) return false;
   int errNo = 0;
-  MYSQL_STMT* stmt = mysqlStmtExec(client_.handle(),
+  MYSQL_STMT* stmt = client_.stmtExec(
       "SELECT 1 FROM messages WHERE group_id = 0 AND "
       "((from_user = ? AND to_user = ?) OR (from_user = ? AND to_user = ?)) LIMIT 1",
       {std::to_string(userA), std::to_string(userB),
@@ -217,7 +217,7 @@ bool MySqlMessageRepository::hasConversation(int64_t userA, int64_t userB) {
 void MySqlMessageRepository::markRead(int64_t toUser, int64_t fromUser, int64_t readTs) {  std::lock_guard<std::mutex> lock(mutex_);
   if (!client_.ok()) return;
   int errNo = 0;
-  MYSQL_STMT* stmt = mysqlStmtExec(client_.handle(),
+  MYSQL_STMT* stmt = client_.stmtExec(
       "UPDATE messages SET status = ?, read_ts = ? "
       "WHERE to_user = ? AND from_user = ? AND status != ? AND ts <= ? AND group_id = 0",
       {std::to_string(kMsgRead), std::to_string(readTs), std::to_string(toUser),
@@ -241,7 +241,7 @@ std::vector<StoredMessage> MySqlMessageRepository::fetchGroupMessages(
   if (untilTs > 0) sql += " AND ts <= " + std::to_string(untilTs);
   sql += asc ? " ORDER BY ts ASC, id ASC LIMIT " : " ORDER BY ts DESC, id DESC LIMIT ";
   sql += std::to_string(limit);
-  if (mysql_query(client_.handle(), sql.c_str())) {
+  if (!client_.query(sql.c_str())) {
     LOG_E("[mysql] 查询群消息失败: " << client_.errStr());
     return out;
   }
