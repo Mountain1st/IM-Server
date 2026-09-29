@@ -1,3 +1,14 @@
+// ============================================================
+// Connection：已建立 TCP 连接的读写与生命周期（网络层）
+// - 读：ET 一次读到 EAGAIN；单次读事件累计上限防洪泛（超限断开）
+// - 写：任意线程 send() 入 writeQueue_（原子计数判背压上限），
+//   loop 线程 flushWrite 消费；写不动登记 EPOLLOUT 等可写继续
+// - 背压：写缓冲超 kMaxWriteBufferBytes 置 queuedTooMuch_ 断开
+//   慢消费/不可达连接（防内存膨胀）
+// - 关闭三级：shutdown（异步关）/ shutdownAfterFlush（写完即关 +
+//   deadline 兜底）/ forceClose（同步关，用于已停 loop 的连接）
+// 线程：除 send/shutdown 系列线程安全外，其余仅所属 loop 线程执行
+// ============================================================
 #include "connection.hpp"
 
 #include "eventloop.hpp"

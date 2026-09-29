@@ -1,3 +1,22 @@
+// ============================================================
+// 业务域：消息收发核心（msg.* / chat.*）——服务端最热路径
+// - onSend：单聊/群聊统一入口。处理顺序（有依赖，勿调整）：
+//   参数校验 → 幂等查询（窗口内同 clientMsgId 直接回 ack 0，不消耗限流额度）
+//   → 限流（30 条/10s；空 clientMsgId 更严 5 条）→ 权限校验
+//   （自己对话框跳过 / 联系人 / allow_temp_chat 临时对话，否则 403）
+//   → 落库（持久化，重启不丢）→ 投递（在线）或记 pending（离线）
+//   → 多端回显（发送者其他在线端，v2.2）
+// - onGroupSend：群发（onSend 按 chatType 分流而来）：成员校验 →
+//   单行落库（to_user=0, group_id=G）→ 逐成员投递/按水位线记 pending
+// - onOfflineAck：客户端确认离线消息已收到（标记 status，防重复补发；
+//   单包 ≤1000 条防海量 UPDATE）
+// - onHistory / onGroupHistory：单聊/群历史拉取（受查询限流 20 次/10s）
+// - onRead：已读回执（更新 read_ts，并推送 msg.read_notify 给其他端，
+//   有会话往来门槛防 userId 枚举）
+// - pushOfflineMessages：登录/重连后离线消息补发（非破坏性）
+// - nextMessageId：全局消息 ID（时间戳前缀 + 进程内自增，防重启碰撞）
+// 线程：工作线程池（AppServer::onEnvelope 分发）
+// ============================================================
 #include "appserver.hpp"
 #include "app_util.hpp"
 #include "log.hpp"
@@ -74,6 +93,14 @@ void AppServer::pushOfflineMessages(int64_t userId,
 }
 
 void AppServer::onSend(const std::shared_ptr<Session>& session, const json& data) {
+  // 统一发送入口（单聊）。处理顺序（顺序有依赖，勿调整）：
+  //   1 参数/内容长度校验 → 2 to 解析（账号/兼容数字 userId/0=自己）
+  //   3 幂等查询（窗口内同 clientMsgId 直接回 ack 0——放在限流前，
+  //     合法重试不消耗配额且不受权限状态影响）
+  //   4 限流（30 条/10s；空 id 更严 5 条；被拒不记幂等防误判）
+  //   5 权限校验（to==自己跳过；联系人；allow_temp_chat）
+  //   6 落库 → 7 在线投递/离线记 pending → 8 多端回显（v2.2）
+  // chatType=group 时分流 onGroupSend（幂等/限流已完成）
   std::string content = data.value("content", "");
   std::string clientMsgId = data.value("clientMsgId", "");
   auto ack = [&](int code, const std::string& msg) {

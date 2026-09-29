@@ -1,3 +1,9 @@
+// ============================================================
+// RedisClient：hiredis 连接封装（单连接）
+// - 连接/读写各 1 秒超时（connectWithTimeout + SetTimeout）：
+//   Redis 宕机时调用方最多阻塞约 1 秒降级返回，业务不挂死
+// - command 系列：返回 redisReply 的浅封装（调用方负责 freeReply）
+// ============================================================
 #include "redis_client.hpp"
 
 namespace im {

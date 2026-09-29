@@ -1,3 +1,11 @@
+// ============================================================
+// MySqlUserRepository：用户表存取（users）
+// - registerUser：注册（账号唯一约束，重复回 409）
+// - login：账号定位 + PBKDF2-SHA256 密码校验（迭代 10 万次防爆破）+
+//   登录失败限流判定（guard 表，见 user_store 洗表防护）
+// - fetchSettings：隐私三开关读取
+// - 修改/查询全部参数化 SQL；单连接 + 内部互斥锁串行化
+// ============================================================
 #include "mysql_user_repository.hpp"
 
 #include "log.hpp"

@@ -15,7 +15,7 @@ namespace im {
 // isMember 用内存缓存（members_ 集合，仅 left_ts==0 的现成员）加速发送热路径，
 // 启动全量加载；加人/退群时同步刷新缓存。
 class GroupRepository {
- public:
+public:
   GroupRepository(const std::string& host, unsigned port, const std::string& user,
                   const std::string& password, const std::string& db);
 
@@ -52,7 +52,7 @@ class GroupRepository {
   int64_t getWatermark(int64_t groupId, int64_t userId);
   void setWatermark(int64_t groupId, int64_t userId, int64_t ts);
 
- private:
+private:
   void loadMembersCache();
   // 锁内全量查询现成员关系到 out；查询失败返回 false（不动 out）
   bool fetchActiveMembers(std::unordered_set<std::string>* out);
@@ -62,7 +62,7 @@ class GroupRepository {
   // 现成员关系缓存；isMember 查 "gid|uid"
   std::unordered_set<std::string> members_;  // 键格式 "gid|uid"
 
- public:
+public:
   // ---- 缓存低频比对（防绕过服务端直改库导致缓存漂移）----
   // 库内现成员（left_ts=0）总行数；查询失败返回 false（调用方跳过本轮比对）
   bool dbMemberCount(size_t* out);

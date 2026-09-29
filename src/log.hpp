@@ -18,7 +18,7 @@ namespace log {
 enum class Level { DEBUG = 0, INFO = 1, WARN = 2, ERROR = 3 };
 
 class Log {
- public:
+public:
   // 读 IM_LOG_FILE / IM_LOG_LEVEL 并初始化（main 启动时调用一次）。
   static void init();
   // 单测用：直接设级别 / 输出文件。
@@ -28,7 +28,7 @@ class Log {
   static void shutdown();
   static void write(Level lv, const char* path, int line, const std::string& msg);
 
- private:
+private:
   static const char* levelName(Level lv);
   static std::mutex& mutex();
   static Level& threshold();

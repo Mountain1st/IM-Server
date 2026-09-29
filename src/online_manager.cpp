@@ -1,3 +1,13 @@
+// ============================================================
+// OnlineManager：userId → 在线会话集合（消息投递权威路由表）
+// - add/remove：连接级登记/摘除（每连接一次；remove 幂等——
+//   重复摘除只减一次计数，对称防泄漏）
+// - sessions：取某用户全部在线会话（多端投递目标）
+// - isOnlinePresence/...Batch：Presence 观测查询（供 contact.list/
+//   group.members 的 online 字段批量拉取——调用方须在锁外执行
+//   以免锁内 IO 级联，Redis 后端失败按离线降级）
+// 设计：单实例内存表是投递权威；Redis Presence 仅为观察面
+// ============================================================
 #include "online_manager.hpp"
 
 #include "session.hpp"

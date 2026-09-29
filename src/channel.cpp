@@ -1,3 +1,8 @@
+// ============================================================
+// Channel：一个 fd 的事件关注与回调分发（epoll 的封装）
+// 只记录"关注什么 + 回调是什么"，实际 epoll_ctl 由 EventLoop 执行。
+// enable/disable Reading/Writing 系列须在所属 loop 线程调用。
+// ============================================================
 #include "channel.hpp"
 
 #include "eventloop.hpp"

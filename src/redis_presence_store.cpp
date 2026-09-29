@@ -1,3 +1,10 @@
+// ============================================================
+// RedisPresenceStore：在线状态的 Redis 后端（观察面）
+// - 键 p:online:<userId> = 连接计数，INCR/DECR；TTL 1 小时兜底
+//   （断连漏减时靠 TTL 自愈归零）
+// - isOnlineBatch：MGET 一次批量判定（列表接口在线字段的数据源）
+// 失败按"全部离线"降级（Presence 仅观测，不影响投递）
+// ============================================================
 #include "redis_presence_store.hpp"
 
 namespace im {

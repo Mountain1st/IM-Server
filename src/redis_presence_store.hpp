@@ -15,7 +15,7 @@ namespace im {
 // 键带 TTL 而非长期存在的原因：单实例崩溃后无法主动撤销，
 // 在线状态允许最多 1 小时的误差换取最终一致。
 class RedisPresenceStore : public PresenceStore {
- public:
+public:
   RedisPresenceStore(const std::string& host, unsigned port,
                      const std::string& password, int db);
 
@@ -28,7 +28,7 @@ class RedisPresenceStore : public PresenceStore {
   // 批量查询：一次 MGET 取回全部计数（非空且非 "0" 即在线）
   std::vector<bool> isOnlineBatch(const std::vector<int64_t>& userIds) override;
 
- private:
+private:
   RedisClient client_;
 };
 

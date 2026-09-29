@@ -1,3 +1,17 @@
+// ============================================================
+// 业务域：联系人与好友体系（user.search / contact.*）
+// - onSearch：按账号/昵称模糊搜索，受目标 searchable 开关控制
+// - onContactRequest：发起好友请求（状态机：无 pending 才新建；
+//   目标在线即时推送 contact.request，离线登录补发）
+// - onContactAccept/Reject：接受（建立双向联系人）/拒绝
+// - onContactList：我的联系人（恒含自己且排首位；条目含 online 字段，
+//   Presence 批量查询）
+// - onContactRequests：收到的 pending 请求列表
+// - onContactDelete：双向删除联系人（同时将双向请求置 rejected，
+//   允许重新发起；被删双方收到 contact.deleted 推送）
+// - pushPendingRequests：登录/重连后补发 pending 请求
+// 线程：工作线程池（AppServer::onEnvelope 分发）
+// ============================================================
 #include "appserver.hpp"
 #include "app_util.hpp"
 #include "log.hpp"
@@ -28,6 +42,10 @@ void AppServer::onSearch(const std::shared_ptr<Session>& session, const json& da
 }
 
 void AppServer::onContactRequest(const std::shared_ptr<Session>& session, const json& data) {
+  // 好友请求状态机：目标存在 → 不可加自己 → 目标 allowAdd 开启 →
+  // 无 pending/accepted 记录（重复请求 409 已请求过）→ 落库 pending。
+  // 目标在线即时推送 contact.request；离线则登录/重连时
+  // pushPendingRequests 补发（不重复：推送后标记）
   const int64_t to = resolveTarget(userStore_.get(), data, "account");
   if (to == -1) {
     session->reply(makeResult("contact.request_res", 400, "参数错误", json::object()));

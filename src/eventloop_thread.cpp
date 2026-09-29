@@ -1,3 +1,13 @@
+// ============================================================
+// EventLoopThread：一个 IO 线程 + 其独占的 EventLoop
+// 线程身份发布协议（UAF/竞争修复的关键）：
+// - startLoop：锁内启动线程 → cv 等待 loop_ 就绪
+// - 线程入口：锁内 new EventLoop → publishThisThread 发布线程身份
+//   → notify 唤醒等待方 → 解锁后 run()（脱离锁保护）
+// - 析构/stopLoop：锁内置空 loop_（与外部读构成同步边）后 join
+// loop_ 指针在 startLoop 返回后对拥有者只读；线程结束前由 stopLoop
+// 锁内置空，杜绝锁外读写竞争（TSan 实证修复）
+// ============================================================
 #include "eventloop_thread.hpp"
 
 #include "log.hpp"

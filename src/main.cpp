@@ -1,3 +1,14 @@
+// ============================================================
+// main：进程入口（启动参数/环境变量解析 → 组装 AppServer → 信号挂接）
+// 启动参数：端口 9191 / IO 线程 3 / 工作线程 5 / 最大连接 0(不限) /
+//           Origin 白名单（逗号分隔，缺省不校验）
+// 环境变量：IM_MYSQL_*（必需，密码无缺省——脱敏改造）/ IM_REDIS_*
+//           （IM_REDIS_ENABLED=1 启用）/ IM_MAX_PER_IP_CONN /
+//           IM_TRUSTED_PROXIES / IM_LOG_*
+// 信号：SIGINT/SIGTERM 处理器只做 async-signal-safe 的两件事
+// （置标志 + requestStop 唤醒主 loop）；完整优雅停机在 run() 返回后
+// 的主线程执行（四步：停接入 → 1001 → 排水 → 兜底）
+// ============================================================
 #include "appserver.hpp"
 
 #include <csignal>

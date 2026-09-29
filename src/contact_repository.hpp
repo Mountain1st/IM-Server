@@ -55,7 +55,7 @@ private:
   // 已加载的 (a,b) 有向关系缓存；isContact(a,b) 查 (a,b)
   std::unordered_set<std::string> contacts_; // 键格式 "a|b"
 
- public:
+public:
   // ---- 缓存低频比对（防绕过服务端直改库导致缓存漂移）----
   // 库内联系人总行数；查询失败返回 false（调用方跳过本轮比对）
   bool dbContactCount(size_t* out);

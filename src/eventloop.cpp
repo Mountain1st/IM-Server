@@ -1,3 +1,17 @@
+// ============================================================
+// EventLoop：epoll ET 事件循环（网络层核心，每个线程一个）
+// 三个自有 fd：
+// - epfd：epoll 实例（所有 Channel 注册于此）
+// - wakeupFd：eventfd，跨线程唤醒（stop/postToLoop/addPendingFlush）
+// - timerFd：timerfd，固定 100ms 小周期扫描（handleTimer 按各定时器
+//   next 判定到期；周期触发避免一次性 arm 的事件丢失）
+// 事件分发的 UAF 防护：同批事件中前面的回调可能已销毁后续 channel，
+// 故用 fd 作键查 channels_ 活跃表再分发，不直接解引用事件指针。
+// 定时器：map<id, entry> 仅 loop 线程修改；cancelTimer 跨线程时投递
+// 到 loop 执行。instanceId 全局编号防跨 loop 误取消。
+// 线程身份 threadId_：由 EventLoopThread 在锁内 publishThisThread 发布
+// （保证与 startLoop 条件等待构成 happens-before，TSan 竞争修复）。
+// ============================================================
 #include "eventloop.hpp"
 
 #include "channel.hpp"

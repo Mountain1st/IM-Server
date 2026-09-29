@@ -1,3 +1,11 @@
+// ============================================================
+// 业务域：隐私三开关（settings.*）
+// - allowTempChat：允许非联系人临时发消息（关 = 非好友发送回 403）
+// - searchable：可被 user.search 搜到
+// - allowAdd：可被添加好友（关 = contact.request 被拒）
+// 读写均直查 MySQL（无缓存，变更即时生效）
+// 线程：工作线程池（AppServer::onEnvelope 分发）
+// ============================================================
 #include "appserver.hpp"
 #include "app_util.hpp"
 #include "log.hpp"

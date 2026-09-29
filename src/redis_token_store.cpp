@@ -1,3 +1,7 @@
+// ============================================================
+// RedisTokenStore：token 存储的 Redis 后端（跨重启/多实例共享）
+// 键 t:<token摘要> → {userId, username}，TTL 7 天
+// ============================================================
 #include "redis_token_store.hpp"
 
 #include <cstdlib>

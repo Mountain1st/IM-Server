@@ -1,3 +1,16 @@
+// ============================================================
+// MySqlMessageRepository：消息表存取（messages，单行存单聊与群消息）
+// - 单聊：from_user/to_user 定位双方；群消息 to_user=0, group_id=G
+// - saveMessage：落库（status=0 未投递）；markAcked 批量标记已投递
+// - fetchOffline：某用户 pending 单聊消息（补发源，非破坏性）
+// - groupPendingSince：群按每成员水位线补发（过滤自发消息）
+// - history/groupHistory：历史拉取（LIMIT 100 封顶）
+// - markRead：已读水位（read_ts）
+// - purgeExpiredOffline：离线 TTL 清理（秒数换算经 duration_cast，
+//   防止 chrono::hours.count() 被当秒的历史单位 bug）
+// - purgeAgedHistory：已消费消息保留期清理（默认 90 天）
+// - hasConversation：双方是否有单聊往来（read_notify 推送门槛）
+// ============================================================
 #include "mysql_message_repository.hpp"
 
 #include "log.hpp"

@@ -1,3 +1,14 @@
+// ============================================================
+// Session：一条 WebSocket 连接上的应用层会话（握手 → 帧 → 业务）
+// - 握手：handleHandshake（严格校验请求行/Host/Key/Origin 白名单，
+//   10 秒超时）；/health HTTP 短路应答（不升级 WS）
+// - 升级后：processFrames 解析 WS 帧（分片重组/控制帧处理）；
+//   Ping 自动回 Pong（保活由协议层承担）；Close 回镜像帧后写完再关
+// - 文本帧：经 ThreadPool 投递到工作线程（enqueueAndDrain，8MB 队列
+//   上限防慢消费堆积——超限断开），业务层再回推（reply 直接 send）
+// - 关闭：onClose 取消定时器 → 通知 AppServer 摘在线表 → 释放自持
+// 线程：帧解析/心跳定时器在 IO loop 线程；文本业务在工作线程池
+// ============================================================
 #include "session.hpp"
 
 #include "connection.hpp"

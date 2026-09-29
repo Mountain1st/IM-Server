@@ -1,3 +1,15 @@
+// ============================================================
+// 业务域：群聊全生命周期（group.*，v1.9 建群 → v2.0 管理闭环）
+// 创建/邀请/退群 + 管理（踢人/转让/解散/改名/公告）+ 查询（列表/成员/历史）
+// - 解散防线：dissolved 标记后除 group.history 外全部群操作回 404；
+//   已解散群不进 group.list；成员可拉历史（到解散为止）
+// - 权限模型：只有群主可管理（无管理员角色，见协议 §11.3）
+// - 成员上限 50：invite 超限回 403 群已满
+// - 群事件（removed/owner_changed/dissolved/renamed/announced）仅推在线端，
+//   离线不补发（客户端拉列表自愈，已知取舍）
+// - onGroupSend 由 onSend 按 chatType=group 分流进入
+// 线程：工作线程池（AppServer::onEnvelope 分发）
+// ============================================================
 #include "appserver.hpp"
 #include "app_util.hpp"
 #include "log.hpp"
@@ -31,6 +43,9 @@ void AppServer::onGroupCreate(const std::shared_ptr<Session>& session, const jso
 }
 
 void AppServer::onGroupInvite(const std::shared_ptr<Session>& session, const json& data) {
+  // 拉人：仅群主可拉。目标须存在且不在群（重入回 409 已在群）；
+  // 满员（50）回 403 群已满。新成员收 group.invited，
+  // 原成员收 member_changed(join)
   int64_t groupId = 0;
   if (data.contains("groupId") && data["groupId"].is_number_integer()) {
     groupId = data["groupId"].get<int64_t>();
@@ -103,6 +118,9 @@ void AppServer::onGroupInvite(const std::shared_ptr<Session>& session, const jso
 }
 
 void AppServer::onGroupLeave(const std::shared_ptr<Session>& session, const json& data) {
+  // 退群：成员自助（群主不能退——须转让或解散）。left_ts=now 行保留
+  // （窗口语义：重拉可入群且历史可见到退群为止），自身收 leave_res，
+  // 其余在线成员收 member_changed(leave)
   int64_t groupId = 0;
   if (data.contains("groupId") && data["groupId"].is_number_integer()) {
     groupId = data["groupId"].get<int64_t>();
@@ -142,6 +160,10 @@ void AppServer::onGroupLeave(const std::shared_ptr<Session>& session, const json
 }
 
 void AppServer::onGroupKick(const std::shared_ptr<Session>& session, const json& data) {
+  // 踢人：参数解析 → 群存在/未解散 → 仅群主 → 目标存在 →
+  // 不能踢群主/须为成员 → removeMember（left_ts 标记，行保留）→
+  // 被踢者收 group.removed、其余在线成员收 member_changed(kick)
+  // 注意事件不回放（离线成员拉列表自愈，协议 §11.3 已知取舍）
   int64_t groupId = 0;
   if (data.contains("groupId") && data["groupId"].is_number_integer()) {
     groupId = data["groupId"].get<int64_t>();
@@ -207,7 +229,9 @@ void AppServer::onGroupKick(const std::shared_ptr<Session>& session, const json&
 }
 
 void AppServer::onGroupTransfer(const std::shared_ptr<Session>& session, const json& data) {
-  // 转让群主：仅群主可操作，目标须是群内他人
+  // 转让群主：校验链同踢人（存在/未解散/仅群主/目标存在/须为成员）。
+  // setOwner 内部带 dissolved 守卫：校验与写入间被并发解散时写入失败
+  // 回 404，防状态穿透（终审修复项）
   int64_t groupId = 0;
   if (data.contains("groupId") && data["groupId"].is_number_integer()) {
     groupId = data["groupId"].get<int64_t>();
@@ -267,6 +291,9 @@ void AppServer::onGroupTransfer(const std::shared_ptr<Session>& session, const j
 }
 
 void AppServer::onGroupDissolve(const std::shared_ptr<Session>& session, const json& data) {
+  // 解散群：仅群主。置 dissolved 标记（行保留，历史可查到解散为止）。
+  // 解散后除 group.history 外全部群操作回 404（6 路防线，
+  // 详见 docs/protocol.md v2.0）
   int64_t groupId = 0;
   if (data.contains("groupId") && data["groupId"].is_number_integer()) {
     groupId = data["groupId"].get<int64_t>();
@@ -507,6 +534,10 @@ void AppServer::onGroupHistory(const std::shared_ptr<Session>& session, const js
 }
 
 void AppServer::onGroupSend(const std::shared_ptr<Session>& session, const json& data,
+  // 群发（onSend 按 chatType=group 分流进入，幂等/限流已在上游完成）：
+  // 群存在/未解散/发送者是现成员 → 落库（单行 to_user=0, group_id=G）→
+  // 逐成员投递：在线端直接推 msg.recv；离线成员按各水位线
+  // （watermark）记 pending，重连补发；发送者其他在线端回显（v2.2）
                             const std::string& content, const std::string& clientMsgId) {
   auto ack = [&](int code, const std::string& msg) {
     session->reply(makeEnvelopeText("msg.ack",

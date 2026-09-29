@@ -1,3 +1,13 @@
+// ============================================================
+// websocket：RFC 6455 协议实现（握手 + 帧编解码，无外部依赖）
+// - 解析（parseFrame）：严格校验 FIN/RSV/opcode/掩码（客户端帧必须
+//   掩码，服务端帧必须不掩码）/长度编码（65535 边界）/UTF-8 合法性
+// - 握手（parseHandshake/acceptKey）：请求行 GET / HTTP/1.1、Host、
+//   Sec-WebSocket-Key 合法 Base64、Header 名大小写不敏感
+// - X-Forwarded-For：firstForwardedIp 只信可信代理链且逐段字符白名单
+//   校验（防日志注入，见 Session 可信代理判定）
+// - 构帧（buildFrame）：服务端发送方向（不掩码）
+// ============================================================
 #include "websocket.hpp"
 
 #include "server_config.hpp"

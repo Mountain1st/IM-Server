@@ -13,7 +13,7 @@
 namespace im {
 
 class PresenceStore {
- public:
+public:
   virtual ~PresenceStore() = default;
 
   // 用户上线一个连接（计数 +1）。多端登录时计数累加。
@@ -34,7 +34,7 @@ class PresenceStore {
 
 // 内存后端：userId -> 连接计数。单实例下的权威实现。
 class MemoryPresenceStore : public PresenceStore {
- public:
+public:
   void online(int64_t userId) override {
     std::lock_guard<std::mutex> lock(mutex_);
     ++counts_[userId];
@@ -51,7 +51,7 @@ class MemoryPresenceStore : public PresenceStore {
     return it != counts_.end() && it->second > 0;
   }
 
- private:
+private:
   std::mutex mutex_;
   std::unordered_map<int64_t, int64_t> counts_;
 };

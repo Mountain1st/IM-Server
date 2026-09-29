@@ -1,3 +1,8 @@
+// ============================================================
+// TokenStore（内存后端）：token 会话存储（7 天 TTL）
+// token → (userId, username)。Redis 后端跨重启保留（见
+// redis_token_store.cpp）
+// ============================================================
 #include "token_store.hpp"
 
 #include <iostream>

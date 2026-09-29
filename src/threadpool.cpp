@@ -1,3 +1,13 @@
+// ============================================================
+// ThreadPool：业务工作线程池（固定线程数）
+// - submit：任意线程投递任务（队列无上限——上游 Session 8MB 队列
+//   与限流已挡住洪泛，这里不再叠加限制）
+// - stop：drain 语义——队列清空才退出；带超时（默认 5s，超时置
+//   abandon 丢弃剩余任务，防个别慢任务拖住停机）。幂等可重入
+// - worker 退出计数 finished_ + doneCv_：stop 等待"全部退出"事件
+// - blockStopSignals：worker 阻塞 SIGINT/SIGTERM（信号只归主线程，
+//   防信号处理器在工作线程触发 self-join 死锁）
+// ============================================================
 #include "threadpool.hpp"
 
 #include "log.hpp"

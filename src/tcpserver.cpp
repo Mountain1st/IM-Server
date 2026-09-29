@@ -1,3 +1,16 @@
+// ============================================================
+// TcpServer：网络层服务器（主从 reactor）
+// - 主 loop（acceptLoop_）：只做 accept（IPv6+IPv4 双 socket 监听，
+//   兼容 localhost 双栈解析）
+// - 从 loop 池（ioPool_）：各连接的实际读写；新连接按最少连接优先
+//   分配（per-loop 原子计数，替代 fd % N 防倾斜）
+// - 连接治理：总上限/单 IP 上限（超限 accept 即拒并 close）
+// - 停机：requestStop（async-signal-safe 唤醒主 loop）→
+//   gracefulShutdown（对在线连接发 Close(1001) 后写完即关，barrier
+//   等下发完成）→ stop（残余 forceClose + 停从 loop，barrier 防竞态）
+// 线程：accept 在主 loop；连接回调在各自从 loop；本类互斥锁保护
+// 连接表/计数
+// ============================================================
 #include "tcpserver.hpp"
 
 #include "connection.hpp"
