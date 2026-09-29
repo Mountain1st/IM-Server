@@ -544,6 +544,44 @@ def main():
     json.loads(b4.recv())
     b4.close()
 
+    # v2.3：缓存低频比对——绕过服务端直改库（SQL 插/删 contacts 行）后，
+    # 后台计数比对发现漂移触发缓存重建（测试 IM_OFFLINE_PURGE_INTERVAL=2 一轮 2s），
+    # isContact 走新数据：非好友 403 → 直插行 → 放行 → 直删 → 回 403
+    X = base + "31"
+    Y = base + "32"
+    cx = WS()
+    r = register(cx, X, "pw1234", nick="缓存甲")
+    check("cache sync register x ok", r["type"] == "auth.register_res" and r["data"]["code"] == 0)
+    xid = r["data"]["data"]["userId"]
+    r = login(cx, X, "pw1234")
+    check("cache sync x login ok", r["type"] == "auth.login_res" and r["data"]["code"] == 0)
+    cy = WS()
+    r = register(cy, Y, "pw1234", nick="缓存乙")
+    yid = r["data"]["data"]["userId"]
+    # 关闭临时对话，保证"非好友"时 msg.send 恒 403（不受 allow_temp_chat 默认值影响）
+    # 注意：注册不自动登录，settings.set 需先登录
+    r = login(cy, Y, "pw1234")
+    check("cache sync y login ok", r["type"] == "auth.login_res" and r["data"]["code"] == 0)
+    cy.send(env("settings.set", {"allowTempChat": False}))
+    r = json.loads(cy.recv())
+    check("cache sync y temp off", r["type"] == "settings.set_res" and r["data"]["code"] == 0)
+    r = send_msg(cx, Y, "pre-insert", "cache-pre")
+    check("cache sync pre-insert non-friend 403",
+          r["type"] == "msg.ack" and r["data"]["code"] == 403)
+    sql_q("INSERT INTO contacts (user_id, contact_id) VALUES (%d,%d),(%d,%d)" % (xid, yid, yid, xid))
+    time.sleep(3)  # 等一轮缓存比对重建
+    r = send_msg(cx, Y, "post-insert", "cache-ins")
+    check("cache sync after insert allowed",
+          r["type"] == "msg.ack" and r["data"]["code"] == 0)
+    sql_q("DELETE FROM contacts WHERE (user_id=%d AND contact_id=%d)"
+          " OR (user_id=%d AND contact_id=%d)" % (xid, yid, yid, xid))
+    time.sleep(3)  # 再等一轮
+    r = send_msg(cx, Y, "post-delete", "cache-del")
+    check("cache sync after delete 403",
+          r["type"] == "msg.ack" and r["data"]["code"] == 403)
+    cx.close()
+    cy.close()
+
     # v1.8：chat.history 的 to 为登录账号 account；自己对话框（to==自己账号）已落库，
     # 历史可查（见 self history persisted 用例）；与无历史的其他账号返回空列表
     a.send(env("chat.history", {"to": B}))
@@ -973,7 +1011,7 @@ def main():
           and r["data"]["code"] == 0)
     gid2 = r["data"]["data"]["groupId"]
     # 11 位合规账号：base(9 位)+2 位后缀，跳过已用后缀避免冲突
-    cap_block = {"10", "11", "12", "13", "14", "15", "50", "60", "61", "77"}
+    cap_block = {"10", "11", "12", "13", "14", "15", "31", "32", "50", "60", "61", "77"}
     cap_accounts = []
     n = 16
     while len(cap_accounts) < 49:
@@ -1269,7 +1307,7 @@ def main():
     import subprocess
     used = [A, B, C, SINK, SPAM, SINK2, SPAM2, D, E, F, G, H, base + "50", G1, G2,
             M1, M2, M3, M4] \
-        + cap_accounts + [OVER]
+        + cap_accounts + [OVER, X, Y]
     inlist = ",".join("'%s'" % x for x in used)
     # 群表清理必须在 users 删除之前（按 account 查 user_id，无级联外键）
     subprocess.run(["bash", "-c",

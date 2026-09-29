@@ -54,11 +54,21 @@ class GroupRepository {
 
  private:
   void loadMembersCache();
+  // 锁内全量查询现成员关系到 out；查询失败返回 false（不动 out）
+  bool fetchActiveMembers(std::unordered_set<std::string>* out);
 
   MySqlClient client_;
   std::mutex mutex_;  // 串行化 DB 访问 + 缓存读写
   // 现成员关系缓存；isMember 查 "gid|uid"
   std::unordered_set<std::string> members_;  // 键格式 "gid|uid"
+
+ public:
+  // ---- 缓存低频比对（防绕过服务端直改库导致缓存漂移）----
+  // 库内现成员（left_ts=0）总行数；查询失败返回 false（调用方跳过本轮比对）
+  bool dbMemberCount(size_t* out);
+  size_t cacheMemberCount();  // 内存缓存条目数（锁内）
+  // 全量重建缓存：先查到临时集合、成功才换入（失败保持旧缓存，不清空）
+  void reloadMembersCache();
 };
 
 }  // namespace im

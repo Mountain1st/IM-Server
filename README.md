@@ -15,7 +15,8 @@ MySQL 持久化 + Redis 可选双后端，覆盖注册登录、单聊、联系�
 - **群聊**：建群/拉人/退群/历史/群发（单行存储 + 每成员水位线补发），群管理（踢人/转让/解散/改名/公告）
 - **多端**：一账号多设备同时在线，自发消息回显 + 已读同步（msg.read_notify）
 - **存储**：MySQL 六表全参数化 SQL；Redis 可选（token/限流/幂等/在线状态，调用带超时且锁外执行——Redis 宕机不影响消息收发）
-- **可靠性**：clientMsgId 幂等、滑动窗口限流、离线消息 TTL 清理（7 天）、优雅停机
+- **可靠性**：clientMsgId 幂等、滑动窗口限流、离线消息 TTL 清理（7 天）、
+  优雅停机（Close 1001 通知 + 工作队列排水）；联系人/群成员缓存低频比对自愈
 - **部署**：Docker Compose 四件套（mysql+redis+imserver+**nginx 反代**）；
   `X-Forwarded-For` 真实 IP 信任链、TLS（wss）终结位、日志按大小轮转
 
@@ -37,8 +38,8 @@ cmake -B build && cmake --build build -j4
 
 ```bash
 bash scripts/ci.sh                     # 本地 CI 一键：构建+单测+双模式回归（--full 加 ASan）
-ctest --test-dir build                 # 7 个单元测试
-bash scripts/test_biz.sh               # 205 个业务回归用例（WebSocket 全链路）
+ctest --test-dir build                 # 9 个单元测试
+bash scripts/test_biz.sh               # 217 个业务回归用例（WebSocket 全链路）
 IM_REDIS_ENABLED=1 IM_REDIS_PORT=6379 bash scripts/test_biz.sh   # Redis 模式
 
 # Sanitizer（已通过 ASan/UBSan/LSan/TSan 全链路，修复过 2 处线程身份发布竞争）
@@ -52,8 +53,9 @@ IM_SERVER_BIN=./build-tsan/imserver bash scripts/test_biz.sh     # TSan 全链�
 
 ```text
 TCP → Connection(IO线程,epoll ET,背压) → Session(握手/心跳/8MB队列)
-    → ThreadPool(工作线程) → AppServer 路由 → 域处理器(auth/message/contact/group)
+    → ThreadPool(工作线程) → AppServer 哈希路由(O(1)查表) → 域处理器(auth/message/contact/group)
     → Repository(接口隔离) → MySQL(六表) / Redis(可选四类)
+IO 线程分配：最少连接优先（least-connections）；停机：停接入→Close(1001)→队列排水→兜底
 ```
 
 三条值得聊的技术决策：
@@ -62,7 +64,7 @@ TCP → Connection(IO线程,epoll ET,背压) → Session(握手/心跳/8MB队列
    离线补发按每成员水位线读时过滤——写少读可控的权衡
 2. **Redis 只做"重启不失忆"**：token/限流/幂等/在线状态可选上 Redis 且全部带超时+锁外化，
    Redis 宕机时消息收发零影响，只降级免密重连与在线显示
-3. **测试金字塔**：7 个协议/逻辑单测 + 205 个真实 WebSocket 业务用例（双后端模式各跑一遍），
+3. **测试金字塔**：9 个协议/逻辑单测 + 217 个真实 WebSocket 业务用例（双后端模式各跑一遍），
    每次功能迭代 TDD 红绿循环（如 TTL 清理的单位 bug 即由边界用例回归发现）
 
 ## 文档索引

@@ -47,11 +47,21 @@ public:
 
 private:
   void loadContactsCache();
+  // 锁内全量查询联系人关系到 out；查询失败返回 false（不动 out）
+  bool fetchAllContacts(std::unordered_set<std::string>* out);
 
   MySqlClient client_;
   std::mutex mutex_; // 串行化 DB 访问 + 缓存读写
   // 已加载的 (a,b) 有向关系缓存；isContact(a,b) 查 (a,b)
   std::unordered_set<std::string> contacts_; // 键格式 "a|b"
+
+ public:
+  // ---- 缓存低频比对（防绕过服务端直改库导致缓存漂移）----
+  // 库内联系人总行数；查询失败返回 false（调用方跳过本轮比对）
+  bool dbContactCount(size_t* out);
+  size_t cacheContactCount();  // 内存缓存条目数（锁内）
+  // 全量重建缓存：先查到临时集合、成功才换入（失败保持旧缓存，不清空）
+  void reloadContactsCache();
 };
 
 } // namespace im

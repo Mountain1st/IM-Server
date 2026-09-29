@@ -100,6 +100,7 @@ set(UNIT_TEST_SOURCES
     src/rate_limiter_store.cpp
     src/user_store.cpp
     src/token_store.cpp
+    src/threadpool.cpp
 )
 set(UNIT_TEST_INCLUDES src third_party)
 
@@ -117,3 +118,5 @@ im_add_unit_test(rate_limiter_test tests/rate_limiter_test.cpp)
 im_add_unit_test(log_test tests/log_test.cpp)
 im_add_unit_test(target_parse_test tests/target_parse_test.cpp)
 im_add_unit_test(login_guard_test tests/login_guard_test.cpp)
+im_add_unit_test(tcpserver_test tests/tcpserver_test.cpp)
+im_add_unit_test(threadpool_test tests/threadpool_test.cpp)

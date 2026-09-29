@@ -15,22 +15,71 @@ GroupRepository::GroupRepository(const std::string& host, unsigned port,
 }
 
 void GroupRepository::loadMembersCache() {
-  if (!client_.ok()) return;
+  std::lock_guard<std::mutex> lock(mutex_);
+  if (!fetchActiveMembers(&members_)) return;
+  LOG_I("[mysql] 已加载 " << members_.size() << " 条群成员关系到缓存");
+}
+
+bool GroupRepository::fetchActiveMembers(std::unordered_set<std::string>* out) {
+  // 调用方须持有 mutex_（构造加载与重建共用同一查询）
+  if (!client_.ok()) return false;
   MYSQL* c = client_.handle();
   if (mysql_query(c, "SELECT group_id, user_id FROM group_members WHERE left_ts = 0")) {
-    LOG_E("[mysql] 加载群成员缓存失败: " << client_.errStr());
-    return;
+    LOG_E("[mysql] 查询群成员失败: " << client_.errStr());
+    return false;
   }
   MYSQL_RES* res = mysql_store_result(c);
-  if (!res) return;
+  if (!res) return false;
+  out->clear();
   MYSQL_ROW row;
   while ((row = mysql_fetch_row(res))) {
     if (row[0] && row[1]) {
-      members_.emplace(std::string(row[0]) + "|" + row[1]);
+      out->emplace(std::string(row[0]) + "|" + row[1]);
     }
   }
   mysql_free_result(res);
-  LOG_I("[mysql] 已加载 " << members_.size() << " 条群成员关系到缓存");
+  return true;
+}
+
+bool GroupRepository::dbMemberCount(size_t* out) {
+  std::lock_guard<std::mutex> lock(mutex_);
+  if (!client_.ok()) return false;
+  MYSQL* c = client_.handle();
+  if (mysql_query(c, "SELECT COUNT(*) FROM group_members WHERE left_ts = 0")) {
+    LOG_E("[mysql] 统计群成员行数失败: " << client_.errStr());
+    return false;
+  }
+  MYSQL_RES* res = mysql_store_result(c);
+  if (!res) return false;
+  bool ok = false;
+  MYSQL_ROW row = mysql_fetch_row(res);
+  if (row && row[0]) {
+    char* endp = nullptr;
+    const unsigned long long v = std::strtoull(row[0], &endp, 10);
+    if (endp && *endp == '\0') {
+      *out = static_cast<size_t>(v);
+      ok = true;
+    }
+  }
+  mysql_free_result(res);
+  return ok;
+}
+
+size_t GroupRepository::cacheMemberCount() {
+  std::lock_guard<std::mutex> lock(mutex_);
+  return members_.size();
+}
+
+void GroupRepository::reloadMembersCache() {
+  // 先查全量到临时集合，成功才换入：查询失败保持旧缓存，
+  // 避免"先清空再加载"在失败时把缓存打成空（isMember 全 false，群发全 403）
+  std::unordered_set<std::string> fresh;
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (!fetchActiveMembers(&fresh)) return;
+    members_.swap(fresh);
+    LOG_I("[mysql] 群成员缓存已重建（" << members_.size() << " 条，触发：计数漂移）");
+  }
 }
 
 int64_t GroupRepository::createGroup(const std::string& name, int64_t ownerId,

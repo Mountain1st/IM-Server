@@ -35,7 +35,7 @@
 - **Nginx 反向代理接入**（v2.2 后）：`nginx/im.conf` + compose 第四服务（WebSocket
   升级/90s 超时/每 IP 50 连接）；`X-Forwarded-For` 真实 IP 信任链
   （`IM_TRUSTED_PROXIES`，未配置即忽略防伪造）；过代理 207 用例全量验证。
-- 7 个 CTest 单元测试 + 205 个业务回归用例（内存/Redis 双模式）。
+- 9 个 CTest 单元测试 + 217 个业务回归用例（内存/Redis 双模式）。
 - 安全加固：offline_ack 上限、clientMsgId 上限、登录洗表防护、TTL 单位修复、
   Redis 级联防护（2026-09-09 / 2026-09-27 两轮审计闭环）。
 
@@ -461,7 +461,7 @@ ACK 只能确认已经完成的事情。
 | P0-7 离线和写入可靠性 | ✅ | MySQL 状态机 + 非破坏性补发 + offline_ack + TTL 清理（v2.1） |
 | P1-1 生命周期和线程边界 | ✅ | 优雅关闭/停止顺序已做；TSan 全链路通过（修复 2 处 EventLoopThread 线程身份发布竞争，2026-09-27） |
 | P1-2 协议契约统一 | ✅ | v1.3-v2.0 统一 envelope，字段校验齐全 |
-| P1-3 测试和 CI | ◐ | 7 单测 + 205 biz 双模式；CI/模糊/Sanitizer 未做 |
+| P1-3 测试和 CI | ◐ | 9 单测 + 217 biz 双模式；CI 已全绿 |
 | P1-4 日志、指标和追踪 | ◐ | LOG_* + /health 指标；结构化/导出/告警未做 |
 | P2-1 Repository 适配层 | ✅ | User/Message/Contact/Group 四仓库接口 |
 | P2-2 DB / Redis / MQ | ◐ | MySQL 全量 + Redis 可选（含 Presence/超时/锁外化，v2.1-v2.2 加固）；MQ 未做 |

@@ -4,6 +4,7 @@
 #include "eventloop.hpp"
 #include "server_config.hpp"
 
+#include <atomic>
 #include <cstdint>
 #include <functional>
 #include <memory>
@@ -21,7 +22,7 @@ class Connection;
 
 // 网络层：拥有一个主 eventloop（绑定监听 fd，负责 accept）和
 // 一组从 eventloop（线程池，负责与各个客户端实际通信）。
-// 新连接按 fd % 从线程数 分配到对应从 loop。
+// 新连接按最少连接优先（least-connections）分配到负载最小的从 loop。
 // 不含业务逻辑与工作线程；业务由上层（AppServer）通过回调接入。
 class TcpServer : public std::enable_shared_from_this<TcpServer> {
 public:
@@ -53,9 +54,28 @@ public:
   void requestStop();
   // 通知主从 eventloop 停止，并关闭全部现存连接
   void stop();
+  // 优雅停机第一步（调用前提：主 loop 已停，从 loop 仍运行）：
+  // 向所有在线连接发送 WS Close(1001 Going Away) 并按"写完即关"关闭。
+  // 从 loop 归属的连接经各自 loop 线程处理（barrier 等下发完成）；
+  // 主 loop 归属的连接直接关闭（主 loop 已停无法走帧，仅无 IO 线程的
+  // 退化配置会出现）。完成后由上层继续排水工作队列，最后调 stop() 兜底。
+  void gracefulShutdown();
   void removeConnection(const ConnectionPtr& conn);
 
   EventLoop* mainLoop() { return &acceptLoop_; }
+
+  // 从各 IO loop 的连接计数中选负载最小者的下标（平局取最靠前）。
+  // 纯函数、static：供单测直接验证分配策略
+  static size_t pickLeastLoadedIndex(const std::vector<std::atomic<size_t>>& counts) {
+    size_t best = 0;
+    for (size_t i = 1; i < counts.size(); ++i) {
+      if (counts[i].load(std::memory_order_relaxed) <
+          counts[best].load(std::memory_order_relaxed)) {
+        best = i;
+      }
+    }
+    return best;
+  }
 
 private:
   struct Listener {
@@ -77,6 +97,10 @@ private:
   size_t maxPerIpConnections_ = config::kMaxPerIpConnections; // 0 表示不限
   std::unordered_map<std::string, size_t> perIpCounts_; // IP -> 并发连接数
   std::unordered_map<Connection*, std::string> connIp_; // 连接 -> IP（释放时扣减）
+  // IO loop -> 下标（start 后建立，只读）；连接归属其扣减 per-loop 计数用
+  std::unordered_map<EventLoop*, size_t> loopIndex_;
+  // 各 IO loop 当前连接数（accept 主线程增、各 IO 线程减，原子操作）
+  std::vector<std::atomic<size_t>> loopCounts_;
 
   NewConnectionCallback newConnCb_;
   ConnectionClosedCallback connClosedCb_;

@@ -170,7 +170,42 @@ AppServer::AppServer(uint16_t port, size_t ioThreads, size_t workThreads, size_t
         << " 秒；离线 TTL "
         << std::chrono::duration_cast<std::chrono::hours>(config::kOfflineTtl).count()
         << " 天；历史保留 " << msgRetentionDays_ << " 天）");
+  buildRoutes();
   purgeThread_ = std::thread([this] { purgeLoop(); });
+}
+
+void AppServer::buildRoutes() {
+  routes_ = {
+    {"auth.register", &AppServer::onRegister},
+    {"auth.login", &AppServer::onLogin},
+    {"auth.token", &AppServer::onToken},
+    {"auth.logout", &AppServer::onLogout},
+    {"msg.send", &AppServer::onSend},
+    {"chat.create", &AppServer::onCreateConv},
+    {"msg.offline_ack", &AppServer::onOfflineAck},
+    {"chat.history", &AppServer::onHistory},
+    {"msg.read", &AppServer::onRead},
+    {"user.search", &AppServer::onSearch},
+    {"contact.request", &AppServer::onContactRequest},
+    {"contact.accept", &AppServer::onContactAccept},
+    {"contact.reject", &AppServer::onContactReject},
+    {"contact.list", &AppServer::onContactList},
+    {"contact.requests", &AppServer::onContactRequests},
+    {"contact.delete", &AppServer::onContactDelete},
+    {"settings.get", &AppServer::onSettingsGet},
+    {"settings.set", &AppServer::onSettingsSet},
+    {"group.create", &AppServer::onGroupCreate},
+    {"group.invite", &AppServer::onGroupInvite},
+    {"group.leave", &AppServer::onGroupLeave},
+    {"group.kick", &AppServer::onGroupKick},
+    {"group.transfer", &AppServer::onGroupTransfer},
+    {"group.dissolve", &AppServer::onGroupDissolve},
+    {"group.rename", &AppServer::onGroupRename},
+    {"group.announce", &AppServer::onGroupAnnounce},
+    {"group.list", &AppServer::onGroupList},
+    {"group.members", &AppServer::onGroupMembers},
+    {"group.history", &AppServer::onGroupHistory},
+  };
 }
 
 AppServer::~AppServer() {
@@ -199,6 +234,32 @@ void AppServer::purgeLoop() {
     if (aged > 0) {
       LOG_I("[purge] 已归档清理 " << aged << " 条超期历史消息");
     }
+    // 同轮做内存缓存低频比对（默认 30 分钟一轮；两条 COUNT 成本可忽略）
+    syncCaches();
+  }
+}
+
+void AppServer::syncCaches() {
+  // 联系人缓存：库行数与缓存条目数不一致（绕过服务端直改库）→ 全量重建。
+  // 计数查询失败跳过本轮（fail-safe：不动缓存）
+  size_t dbN = 0;
+  if (contactRepo_->dbContactCount(&dbN)) {
+    const size_t cachedN = contactRepo_->cacheContactCount();
+    if (dbN != cachedN) {
+      LOG_I("[cache] 联系人缓存计数漂移（库 " << dbN << " / 缓存 " << cachedN
+            << "），触发重建");
+      contactRepo_->reloadContactsCache();
+    }
+  }
+  // 群成员缓存：同构比对（现成员行数 vs 缓存条目数）
+  size_t dbM = 0;
+  if (groupRepo_->dbMemberCount(&dbM)) {
+    const size_t cachedM = groupRepo_->cacheMemberCount();
+    if (dbM != cachedM) {
+      LOG_I("[cache] 群成员缓存计数漂移（库 " << dbM << " / 缓存 " << cachedM
+            << "），触发重建");
+      groupRepo_->reloadMembersCache();
+    }
   }
 }
 
@@ -214,9 +275,17 @@ void AppServer::start() {
 }
 
 void AppServer::stop() {
-  // 1) 停止工作线程
+  // 优雅停机四步（顺序不可换）：
+  // 1) 停止接入：主 loop 退出（不再 accept 新连接；若信号路径已停则幂等）
+  tcpServer_->requestStop();
+  // 2) 通知在线会话：发 WS Close(1001 Going Away) 并关闭连接。
+  //    此刻从 IO loop 仍运行（帧可写出）；连接关闭后不再有新业务入队
+  tcpServer_->gracefulShutdown();
+  // 3) 排水：工作线程把队列中已入队任务执行完（消息已落库的部分不受
+  //    影响；回复写往已关连接会被静默丢弃，客户端靠离线补发自愈）。
+  //    带超时防个别慢任务（DB 超时等）拖住停机
   workPool_.stop();
-  // 2) 通知 TcpServer 停止，由其通知主从 eventloop
+  // 4) 兜底：关闭残余连接（1001 写完即关的多数已自关）并停止从 loop
   tcpServer_->stop();
 }
 
@@ -266,113 +335,20 @@ void AppServer::onEnvelope(const std::shared_ptr<Session>& session, const json& 
     const std::string type = env[env::kType].get<std::string>();
     const json& data = env[env::kData];
 
-    if (type == "auth.register") {
-      onRegister(session, data);
-      return;
-    }
-    if (type == "auth.login") {
-      onLogin(session, data);
-      return;
-    }
-    if (type == "auth.token") {
-      onToken(session, data);
-      return;
-    }
-    // 未登录只允许 auth.register / auth.login / auth.token
-    if (!session->isLoggedIn()) {
+    // 未登录只放行 auth.register / auth.login / auth.token 三条；
+    // 其余指令（含未知指令）一律 401，与路由表化之前的拦截顺序一致
+    const bool authCmd = type == "auth.register" || type == "auth.login" ||
+                         type == "auth.token";
+    if (!authCmd && !session->isLoggedIn()) {
       session->reply(makeError(401, "未登录"));
       return;
     }
-    if (type == "auth.logout") {
-      onLogout(session);
+    auto it = routes_.find(type);
+    if (it == routes_.end()) {
+      session->reply(makeError(400, "未知的指令类型"));
       return;
     }
-    if (type == "msg.send") {
-      onSend(session, data);
-      return;
-    }
-    if (type == "chat.create") {
-      onCreateConv(session, data);
-      return;
-    }
-    if (type == "msg.offline_ack") {
-      onOfflineAck(session, data);
-      return;
-    }
-    if (type == "chat.history") {
-      onHistory(session, data);
-      return;
-    }
-    if (type == "msg.read") {
-      onRead(session, data);
-      return;
-    }
-    if (type == "user.search") {
-      onSearch(session, data);
-      return;
-    }
-    if (type == "contact.request") {
-      onContactRequest(session, data);
-      return;
-    }
-    if (type == "contact.accept") {
-      onContactAccept(session, data);
-      return;
-    }
-    if (type == "contact.reject") {
-      onContactReject(session, data);
-      return;
-    }
-    if (type == "contact.list") {
-      onContactList(session, data);
-      return;
-    }
-    if (type == "contact.requests") {
-      onContactRequests(session, data);
-      return;
-    }
-    if (type == "contact.delete") {
-      onContactDelete(session, data);
-      return;
-    }
-    if (type == "settings.get") {
-      onSettingsGet(session, data);
-      return;
-    }
-    if (type == "settings.set") {
-      onSettingsSet(session, data);
-      return;
-    }
-    if (type == "group.create") {
-      onGroupCreate(session, data);
-      return;
-    }
-    if (type == "group.invite") {
-      onGroupInvite(session, data);
-      return;
-    }
-    if (type == "group.leave") {
-      onGroupLeave(session, data);
-      return;
-    }
-    if (type == "group.kick") { onGroupKick(session, data); return; }
-    if (type == "group.transfer") { onGroupTransfer(session, data); return; }
-    if (type == "group.dissolve") { onGroupDissolve(session, data); return; }
-    if (type == "group.rename") { onGroupRename(session, data); return; }
-    if (type == "group.announce") { onGroupAnnounce(session, data); return; }
-    if (type == "group.list") {
-      onGroupList(session, data);
-      return;
-    }
-    if (type == "group.members") {
-      onGroupMembers(session, data);
-      return;
-    }
-    if (type == "group.history") {
-      onGroupHistory(session, data);
-      return;
-    }
-    session->reply(makeError(400, "未知的指令类型"));
+    (this->*it->second)(session, data);
   } catch (const json::exception& e) {
     // data.value() 在字段存在但类型不符时抛 type_error.302。
     // 统一按坏包处理并回复，避免异常逃逸到工作线程导致进程崩溃。

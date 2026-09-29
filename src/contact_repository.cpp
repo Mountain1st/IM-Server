@@ -17,22 +17,71 @@ ContactRepository::ContactRepository(const std::string& host, unsigned port,
 }
 
 void ContactRepository::loadContactsCache() {
-  if (!client_.ok()) return;
+  std::lock_guard<std::mutex> lock(mutex_);
+  if (!fetchAllContacts(&contacts_)) return;
+  LOG_I("[mysql] 已加载 " << contacts_.size() << " 条联系人关系到缓存");
+}
+
+bool ContactRepository::fetchAllContacts(std::unordered_set<std::string>* out) {
+  // 调用方须持有 mutex_（构造加载与重建共用同一查询）
+  if (!client_.ok()) return false;
   MYSQL* c = client_.handle();
   if (mysql_query(c, "SELECT user_id, contact_id FROM contacts")) {
-    LOG_E("[mysql] 加载联系人缓存失败: " << client_.errStr());
-    return;
+    LOG_E("[mysql] 查询联系人失败: " << client_.errStr());
+    return false;
   }
   MYSQL_RES* res = mysql_store_result(c);
-  if (!res) return;
+  if (!res) return false;
+  out->clear();
   MYSQL_ROW row;
   while ((row = mysql_fetch_row(res))) {
     if (row[0] && row[1]) {
-      contacts_.emplace(std::string(row[0]) + "|" + row[1]);
+      out->emplace(std::string(row[0]) + "|" + row[1]);
     }
   }
   mysql_free_result(res);
-  LOG_I("[mysql] 已加载 " << contacts_.size() << " 条联系人关系到缓存");
+  return true;
+}
+
+bool ContactRepository::dbContactCount(size_t* out) {
+  std::lock_guard<std::mutex> lock(mutex_);
+  if (!client_.ok()) return false;
+  MYSQL* c = client_.handle();
+  if (mysql_query(c, "SELECT COUNT(*) FROM contacts")) {
+    LOG_E("[mysql] 统计联系人行数失败: " << client_.errStr());
+    return false;
+  }
+  MYSQL_RES* res = mysql_store_result(c);
+  if (!res) return false;
+  bool ok = false;
+  MYSQL_ROW row = mysql_fetch_row(res);
+  if (row && row[0]) {
+    char* endp = nullptr;
+    const unsigned long long v = std::strtoull(row[0], &endp, 10);
+    if (endp && *endp == '\0') {
+      *out = static_cast<size_t>(v);
+      ok = true;
+    }
+  }
+  mysql_free_result(res);
+  return ok;
+}
+
+size_t ContactRepository::cacheContactCount() {
+  std::lock_guard<std::mutex> lock(mutex_);
+  return contacts_.size();
+}
+
+void ContactRepository::reloadContactsCache() {
+  // 先查全量到临时集合，成功才换入：查询失败保持旧缓存，
+  // 避免"先清空再加载"在失败时把缓存打成空（isContact 全 false，消息全 403）
+  std::unordered_set<std::string> fresh;
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (!fetchAllContacts(&fresh)) return;
+    contacts_.swap(fresh);
+    LOG_I("[mysql] 联系人缓存已重建（" << contacts_.size() << " 条，触发：计数漂移）");
+  }
 }
 
 bool ContactRepository::isContact(int64_t a, int64_t b) {

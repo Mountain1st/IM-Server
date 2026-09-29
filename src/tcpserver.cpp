@@ -5,6 +5,7 @@
 #include "log.hpp"
 #include "metrics.hpp"
 #include "util.hpp"
+#include "websocket.hpp"
 
 #include <arpa/inet.h>
 #include <netinet/in.h>
@@ -25,7 +26,8 @@ TcpServer::TcpServer(uint16_t port, size_t ioThreads, size_t maxConnections,
                      size_t maxPerIpConnections)
     : ioPool_(std::make_unique<EventLoopThreadPool>(ioThreads)),
       maxConnections_(maxConnections),
-      maxPerIpConnections_(maxPerIpConnections) {
+      maxPerIpConnections_(maxPerIpConnections),
+      loopCounts_(ioThreads) { // n 格原子计数（vector<atomic> 只能构造期定长，reserve 会实例化搬迁路径）
   LOG_I("[server] 配置: 端口 " << port
         << ", 从 eventloop 线程 " << ioThreads);
   // 同时监听 IPv6 与 IPv4：WSL2 的 localhost 中继会按服务器监听的地址族
@@ -104,6 +106,12 @@ TcpServer::~TcpServer() {
 void TcpServer::start() {
   // 先启动从 eventloop 线程池
   ioPool_->start();
+  // 建立 loop -> 下标 映射（此后只读）：连接关闭时按归属扣减 per-loop 计数
+  const size_t n = ioPool_->size();
+  for (size_t i = 0; i < n; ++i) {
+    EventLoop* loop = ioPool_->getLoop(i);
+    if (loop) loopIndex_[loop] = i;
+  }
   // 主 eventloop 注册各监听 fd；主 loop 由 run() 在同一线程运行
   for (auto& li : listeners_) {
     li.channel.enableReading(&acceptLoop_);
@@ -172,6 +180,58 @@ void TcpServer::stop() {
   ioPool_->stop();
 }
 
+void TcpServer::gracefulShutdown() {
+  std::vector<ConnectionPtr> conns;
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    conns.assign(connections_.begin(), connections_.end());
+  }
+  if (conns.empty()) return;
+  // WS Close 帧载荷：状态码 1001 Going Away（2 字节网络序）
+  const std::string closeFrame =
+      ws::buildFrame(ws::Opcode::Close, std::string("\x03\xe9", 2));
+  // 按 loop 归类：从 loop 的连接投递到其线程（发帧 → 写完即关），
+  // 主 loop 的连接直接关闭（主 loop 已停，runInLoop 不会执行）
+  std::map<EventLoop*, std::vector<ConnectionPtr>> byLoop;
+  for (auto& conn : conns) {
+    if (conn->loop() == &acceptLoop_) {
+      conn->forceClose();
+    } else {
+      byLoop[conn->loop()].push_back(conn);
+    }
+  }
+
+  struct Barrier {
+    std::mutex m;
+    std::condition_variable cv;
+    bool done = false;
+  };
+  std::vector<std::shared_ptr<Barrier>> barriers;
+  barriers.reserve(byLoop.size());
+  for (auto& [loop, list] : byLoop) {
+    auto bar = std::make_shared<Barrier>();
+    barriers.push_back(bar);
+    loop->runInLoop([list, bar, closeFrame] {
+      for (auto& c : list) {
+        // send 线程安全；shutdownAfterFlush 立即尝试写出并登记
+        // "写完即关"（含 flush 超时兜底定时器），IO loop 仍运行可完成
+        c->send(closeFrame.data(), closeFrame.size());
+        c->shutdownAfterFlush();
+      }
+      {
+        std::lock_guard<std::mutex> lock(bar->m);
+        bar->done = true;
+      }
+      bar->cv.notify_all();
+    });
+  }
+  for (auto& bar : barriers) {
+    std::unique_lock<std::mutex> lock(bar->m);
+    bar->cv.wait(lock, [&bar] { return bar->done; });
+  }
+  LOG_I("[server] 优雅停机：已向 " << conns.size() << " 个在线连接发送 Close(1001)");
+}
+
 void TcpServer::handleAccept() {
   for (auto& li : listeners_) {
     for (;;) {
@@ -234,9 +294,15 @@ void TcpServer::deviceNewConnection(int cfd, const std::string& peerIp) {
       perIpCounts_[peerIp] = n + 1;
     }
   }
-  // 简单分配：客户端 fd 对从线程数量求模，余数决定由哪个从 loop 处理
-  size_t n = ioPool_->size();
-  EventLoop* ioLoop = (n > 0) ? ioPool_->getLoop(static_cast<size_t>(cfd) % n) : nullptr;
+  // 最少连接优先：选当前连接数最少的从 loop（替代 fd % n——
+  // fd 回绕不均与连接寿命差异会造成负载倾斜，least-connections 始终均衡）
+  const size_t n = ioPool_->size();
+  EventLoop* ioLoop = nullptr;
+  if (n > 0) {
+    const size_t idx = pickLeastLoadedIndex(loopCounts_);
+    ioLoop = ioPool_->getLoop(idx);
+    if (ioLoop) loopCounts_[idx].fetch_add(1, std::memory_order_relaxed);
+  }
   if (!ioLoop) ioLoop = &acceptLoop_;
   auto conn = std::make_shared<Connection>(ioLoop, cfd);
   conn->setPeerIp(peerIp); // 供会话层做 X-Forwarded-For 真实 IP 判定
@@ -255,7 +321,13 @@ void TcpServer::deviceNewConnection(int cfd, const std::string& peerIp) {
 void TcpServer::removeConnection(const ConnectionPtr& conn) {
   {
     std::lock_guard<std::mutex> lock(mutex_);
-    connections_.erase(conn);
+    // 首次移除才扣减 per-loop 计数（重复调用幂等，防双扣）
+    if (connections_.erase(conn) > 0) {
+      auto li = loopIndex_.find(conn->loop());
+      if (li != loopIndex_.end() && li->second < loopCounts_.size()) {
+        loopCounts_[li->second].fetch_sub(1, std::memory_order_relaxed);
+      }
+    }
     // 扣减该连接所属 IP 的计数
     auto it = connIp_.find(conn.get());
     if (it != connIp_.end()) {

@@ -83,6 +83,9 @@ inline constexpr std::chrono::hours kTokenTtl = std::chrono::hours(7 * 24);
 // 登录限流：窗口内失败次数上限与窗口时长
 inline constexpr int kMaxLoginFailures = 5;
 inline constexpr std::chrono::seconds kLockWindow(60);
+// 工作线程池停机排水超时（毫秒）：超时后放弃队列剩余任务，
+// 防止个别慢任务（DB 超时等）拖住停机流程
+inline constexpr uint32_t kPoolDrainTimeoutMs = 5000;
 
 } // namespace config
 } // namespace im

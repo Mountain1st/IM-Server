@@ -124,7 +124,8 @@ void AppServer::onToken(const std::shared_ptr<Session>& session, const json& dat
   pushPendingRequests(userId, session);
 }
 
-void AppServer::onLogout(const std::shared_ptr<Session>& session) {
+void AppServer::onLogout(const std::shared_ptr<Session>& session, const json& data) {
+  (void)data; // 路由统一签名：logout 无业务参数
   int64_t userId = session->userId();
   onlineMgr_.remove(userId, session);
   userStore_->logout(session->token());

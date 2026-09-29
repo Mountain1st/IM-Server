@@ -16,10 +16,11 @@
 #include <atomic>
 #include <condition_variable>
 #include <cstdint>
-#include <mutex>
-#include <thread>
 #include <memory>
+#include <mutex>
 #include <string>
+#include <thread>
+#include <unordered_map>
 #include <vector>
 
 namespace im {
@@ -63,8 +64,17 @@ public:
   void run(); // 运行主 eventloop（阻塞），供 main 调用
 
 private:
+  // 业务指令处理器统一签名（onLogout 也适配为忽略 data 的同构签名）
+  using Handler = void (AppServer::*)(const std::shared_ptr<Session>&, const json&);
+  // 指令类型 -> 处理器 的路由表（构造时 buildRoutes 一次性注册）
+  std::unordered_map<std::string, Handler> routes_;
+  void buildRoutes();
+
   // 离线消息 TTL 清理循环（独立线程）：周期删除超期未领取的单聊离线消息
   void purgeLoop();
+  // 低频缓存比对：库内行数与内存缓存条目数不一致时全量重建
+  // （应对绕过服务端直改数据库导致的缓存漂移；失败保持旧缓存）
+  void syncCaches();
 
   void onNewConnection(EventLoop* ioLoop, const TcpServer::ConnectionPtr& conn);
   void onSessionClosed(const std::shared_ptr<Session>& session);
@@ -73,7 +83,7 @@ private:
   void onRegister(const std::shared_ptr<Session>& session, const json& data);
   void onLogin(const std::shared_ptr<Session>& session, const json& data);
   void onToken(const std::shared_ptr<Session>& session, const json& data);
-  void onLogout(const std::shared_ptr<Session>& session);
+  void onLogout(const std::shared_ptr<Session>& session, const json& data);
   void onSend(const std::shared_ptr<Session>& session, const json& data);
   // 新建对话：校验目标 userId 是否存在并返回其昵称
   void onCreateConv(const std::shared_ptr<Session>& session, const json& data);

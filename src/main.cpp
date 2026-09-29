@@ -157,7 +157,7 @@ int main(int argc, char* argv[]) {
   LOG_I("[server] 启动完成，按 Ctrl+C 退出");
   server->run();
   // run() 返回即表示收到停止请求，在主线程执行完整优雅关闭：
-  // 停止工作线程 → 通知 TcpServer 停止（主从 eventloop → 关闭连接）
+  // 停止接入 → 向在线会话发 Close(1001) → 工作队列排水（带超时）→ 兜底关闭
   server->stop();
   LOG_I("[server] 已退出");
   return 0;
