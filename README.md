@@ -27,13 +27,19 @@ MySQL 持久化 + Redis 可选双后端，覆盖注册登录、单聊、联系�
 ## 快速开始
 
 ```bash
-# 方式一：Docker 全家桶（推荐）
+# 方式一：Docker 全家桶（推荐，部署标准配置）
+cp .env.example .env 2>/dev/null; echo "IM_MYSQL_PASSWORD=改成强密码" > .env
 docker compose up -d --build   # mysql+redis+imserver+nginx（8080 反代入口）
 
 # 方式二：本地构建（需 libmysqlclient-dev，可选 libhiredis-dev）
 cmake -B build && cmake --build build -j4
-./build/imserver 9191 2 3 500    # 端口/IO线程/工作线程/最大连接
+./build/imserver 9191 2 3 50    # 端口/IO线程/工作线程/最大连接
 ```
+
+部署标准（按远程生产机固化，后续改进以此为准）：连接上限 50（2C2G）、
+imserver 仅绑 `127.0.0.1:9191`（对外唯一入口 Nginx 8080）、
+`IM_TRUSTED_PROXIES=网桥 IP`（换机器核对网段）、MySQL buffer pool 128M、
+密码经 `.env` 注入（compose 自动读取）。
 
 配置经环境变量注入（`IM_MYSQL_*`、`IM_REDIS_*`、`IM_OFFLINE_PURGE_INTERVAL`、
 `IM_MAX_PER_IP_CONN`），见协议文档 §10。云服务器（2C2G）部署调优清单见 §10.4。
