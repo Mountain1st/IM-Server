@@ -43,6 +43,9 @@ services:
 
   imserver:
     build: .
+    # 自动拉起：MySQL 启动慢/闪断时 imserver fail-fast 退出后自动重试
+    # 直到连上（配合 depends_on healthy 消除启动顺序问题）
+    restart: unless-stopped
     ports:
       - "9191:9191"
     environment:
