@@ -837,6 +837,14 @@ Message Queue Adapter
 多端回显与已读同步、Redis 超时/锁外化/批量 MGET、A 区打磨六项（removeMember 校验、
 MySQL 超时、弱断言、迁移幂等、清理告警、heartbeat 文档）。
 
+已完成追加（2026-09-29 第四轮，架构四项收敛）：指令路由表化（29 层 if-else 改
+`routes_` 哈希表 O(1) 查表）；联系人/群成员缓存低频比对自愈（清理线程每轮对库
+COUNT，漂移即全量重建、失败保旧，biz 7 用例验证直改库 2 秒自愈）；IO 线程分配
+改最少连接优先（替代 fd % N，per-loop 原子计数）；停机四步优雅化（停接入 →
+Close(1001) 通知在线客户端 → 工作队列排水 5s 超时 → 兜底，ThreadPool 升级
+drain+abandon；端到端探针实测 1001 收达）。新增 tcpserver_test/threadpool_test
+两单测（9 个 ctest），TSan 全链路零报告，217 用例双模式通过。
+
 已完成追加（2026-09-29 第三轮）：消息保留期清理（`IM_MSG_RETENTION_DAYS`，默认 90 天，
 已消费消息含群消息归档删除，TDD 209→210 用例）；重查询限流（chat/group.history 与
 group.members 共享额度桶 20 次/10s，Redis 键前缀 qrate: 独立）；性能压测基线
@@ -850,10 +858,11 @@ README、read_notify 收紧 fail-closed）；A 区六项打磨；clean checkout 
 `docs/nginx-deploy.md`）；**Windows 客户端已按设计文档实现**（Qt6，含重连拉 history
 对齐多端视图）。
 
-下一步（2026-09-28 更新，按价值排序）：
+下一步（2026-09-29 更新，按价值排序）：
 
-1. **推送 GitHub**：仓库当前无 remote；推送后 `.github/workflows/ci.yml` 生效，
-   项目对外可访问（唯一待办）
+1. ~~**推送 GitHub**~~ **已完成**（2026-09-29）：remote 为
+   `github.com/northwest2hugekongming/IM-Server`，GitHub Actions CI 全绿；
+   敏感信息已脱敏（密码环境变量注入，git 历史旧开发密码无生产价值）
 2. **端到端联调**（可选）：Windows 客户端 ↔ 本服务端经 Nginx（wss）实测一轮，
    将联调问题回馈协议文档
 3. **多端消息漫游：明确不做**（2026-09-28 决策）：等同微信登录时"同步聊天记录"
@@ -863,7 +872,7 @@ README、read_notify 收紧 fail-closed）；A 区六项打磨；clean checkout 
    仓库层 shared_mutex
 5. **保持现状的已知取舍**：多端离线自发消息不补发（漫游已定为非目标，history 自愈）、
    群管理事件离线不补发（拉列表自愈）、公告 2048 截断（正道不可达）、
-   INCR/EXPIRE 微秒窗口（TTL 兜底）
+   INCR/EXPIRE 微秒窗口（TTL 兜底）、bench.py 间歇性挂（实验性标注）
 
 ## 10. 阶段验收标准
 
