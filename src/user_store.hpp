@@ -14,13 +14,13 @@
 
 namespace im {
 
-// MySQL 连接配置。缺省值（IMS_reactor_db / IMS_jack / 520010）由 IM_MYSQL_*
+// MySQL 连接配置。缺省值（IMS_reactor_db / IMS_jack / 空密码）由 IM_MYSQL_*
 // 环境变量覆盖；连接失败时启动报错退出。
 struct UserStoreConfig {
   std::string mysqlHost = "127.0.0.1";
   unsigned mysqlPort = 3306;
   std::string mysqlUser = "IMS_jack";
-  std::string mysqlPassword = "520010";
+  std::string mysqlPassword;  // 缺省空：经 IM_MYSQL_PASSWORD 注入（勿在源码内置密码）
   std::string mysqlDb = "IMS_reactor_db";
 };
 

@@ -13,3 +13,7 @@ __pycache__/
 docs/docs/
 .vscode/
 Testing/
+
+# 本地私密配置（密码等）
+.env
+.env.local

@@ -4,5 +4,8 @@
 export IM_MYSQL_HOST="${IM_MYSQL_HOST:-127.0.0.1}"
 export IM_MYSQL_PORT="${IM_MYSQL_PORT:-3306}"
 export IM_MYSQL_USER="${IM_MYSQL_USER:-IMS_jack}"
-export IM_MYSQL_PASSWORD="${IM_MYSQL_PASSWORD:-520010}"
+# 本地私密配置（git-ignored，可选）：.env.local 里可写 export IM_MYSQL_PASSWORD=...
+_env_local="$(dirname "$0")/../.env.local"
+[ -f "$_env_local" ] && source "$_env_local"
+export IM_MYSQL_PASSWORD="${IM_MYSQL_PASSWORD:-change-me}"
 export IM_MYSQL_DB="${IM_MYSQL_DB:-IMS_reactor_db}"

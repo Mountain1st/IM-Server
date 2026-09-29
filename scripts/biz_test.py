@@ -91,6 +91,10 @@ class WS:
         self.s.close()
 
 
+# 测试用 MySQL 密码：从环境变量取（test_biz.sh 经 db_env.sh 提供；缺省与 compose 模板一致）
+MYSQL_PWD_ENV = os.environ.get("IM_MYSQL_PASSWORD", "change-me")
+
+
 def env(t, d):
     return json.dumps({"type": t, "data": d})
 
@@ -488,7 +492,7 @@ def main():
         import subprocess
         out = subprocess.run(
             ["bash", "-c",
-             "MYSQL_PWD=520010 mysql -u IMS_jack -h 127.0.0.1 -N -e \"%s\" IMS_reactor_db" % q],
+             "MYSQL_PWD=%s mysql -u IMS_jack -h 127.0.0.1 -N -e \"%s\" IMS_reactor_db" % (MYSQL_PWD_ENV, q)],
             capture_output=True, text=True)
         return out.stdout.strip()
 
@@ -1239,17 +1243,17 @@ def main():
     inlist = ",".join("'%s'" % x for x in used)
     # 群表清理必须在 users 删除之前（按 account 查 user_id，无级联外键）
     subprocess.run(["bash", "-c",
-        "MYSQL_PWD=520010 mysql -u IMS_jack -h 127.0.0.1 -e \""
+        "MYSQL_PWD=%s mysql -u IMS_jack -h 127.0.0.1 -e \""
         "USE IMS_reactor_db; "
         "DELETE FROM group_members WHERE user_id IN (SELECT id FROM users WHERE account IN (%s)); "
-        "DELETE FROM \`groups\` WHERE owner_id IN (SELECT id FROM users WHERE account IN (%s));\" 2>/dev/null" % (inlist, inlist)],
+        "DELETE FROM \`groups\` WHERE owner_id IN (SELECT id FROM users WHERE account IN (%s));\" 2>/dev/null" % (MYSQL_PWD_ENV, inlist, inlist)],
         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     subprocess.run(["bash", "-c",
-        "MYSQL_PWD=520010 mysql -u IMS_jack -h 127.0.0.1 -e \""
+        "MYSQL_PWD=%s mysql -u IMS_jack -h 127.0.0.1 -e \""
         "USE IMS_reactor_db; "
         "DELETE m FROM messages m JOIN users u ON m.from_user=u.id OR m.to_user=u.id "
         "WHERE u.account IN (%s); "
-        "DELETE FROM users WHERE account IN (%s);\" 2>/dev/null" % (inlist, inlist)],
+        "DELETE FROM users WHERE account IN (%s);\" 2>/dev/null" % (MYSQL_PWD_ENV, inlist, inlist)],
         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
     fails = [n for n, c in results if not c]

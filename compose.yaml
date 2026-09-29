@@ -17,10 +17,10 @@ services:
     container_name: ims-mysql
     restart: unless-stopped
     environment:
-      MYSQL_ROOT_PASSWORD: 520010
+      MYSQL_ROOT_PASSWORD: ${IM_MYSQL_PASSWORD:-change-me}
       MYSQL_DATABASE: IMS_reactor_db
       MYSQL_USER: IMS_jack
-      MYSQL_PASSWORD: 520010
+      MYSQL_PASSWORD: ${IM_MYSQL_PASSWORD:-change-me}
     ports:
       - "127.0.0.1:3306:3306"
     volumes:

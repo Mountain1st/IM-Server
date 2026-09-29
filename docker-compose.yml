@@ -7,10 +7,10 @@ services:
   mysql:
     image: mysql:8.4
     environment:
-      MYSQL_ROOT_PASSWORD: root_520010
+      MYSQL_ROOT_PASSWORD: ${IM_MYSQL_PASSWORD:-change-me}
       MYSQL_DATABASE: IMS_reactor_db
       MYSQL_USER: IMS_jack
-      MYSQL_PASSWORD: "520010"
+      MYSQL_PASSWORD: ${IM_MYSQL_PASSWORD:-change-me}
     command:
       - --character-set-server=utf8mb4
       - --collation-server=utf8mb4_unicode_ci
@@ -19,7 +19,7 @@ services:
       # 首次初始化时自动建表（幂等，schema.sql 含 CREATE TABLE IF NOT EXISTS）
       - ./db/schema.sql:/docker-entrypoint-initdb.d/01-schema.sql:ro
     healthcheck:
-      test: ["CMD-SHELL", "mysqladmin ping -h localhost -uroot -proot_520010 --silent"]
+      test: ["CMD-SHELL", "mysqladmin ping -h localhost -uroot -p\"$MYSQL_ROOT_PASSWORD\" --silent"]
       interval: 5s
       timeout: 3s
       retries: 20
@@ -49,7 +49,7 @@ services:
       IM_MYSQL_HOST: mysql
       IM_MYSQL_PORT: "3306"
       IM_MYSQL_USER: IMS_jack
-      IM_MYSQL_PASSWORD: "520010"
+      IM_MYSQL_PASSWORD: ${IM_MYSQL_PASSWORD:-change-me}
       IM_MYSQL_DB: IMS_reactor_db
       # Redis：token 等存储落到 Redis（容器内通过服务名 redis 访问 6379）
       IM_REDIS_ENABLED: "1"

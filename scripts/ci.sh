@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # 本地 CI：一键跑完整验证矩阵（等价 GitHub Actions，见 .github/workflows/ci.yml）
-# 前置：MySQL 127.0.0.1:3306（IMS_jack/520010/IMS_reactor_db，见 scripts/db_env.sh）
+# 前置：MySQL 127.0.0.1:3306（凭据经 scripts/db_env.sh → .env.local / 环境变量提供）
 #       Redis 127.0.0.1:6379（缺失时自动跳过 Redis 模式并给出提示）
 # 用法: bash scripts/ci.sh           # 构建+单测+biz 内存+Redis
 #       bash scripts/ci.sh --full    # 追加 ASan 构建与全链路（更慢）

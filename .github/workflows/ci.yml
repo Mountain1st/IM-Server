@@ -5,6 +5,9 @@ on: [push, pull_request]
 jobs:
   test:
     runs-on: ubuntu-latest
+    env:
+      # 一次性 CI 容器的密码（run 结束即焚，无生产价值；源码/模板已脱敏）
+      IM_MYSQL_PASSWORD: "520010"
     services:
       mysql:
         image: mysql:8.4

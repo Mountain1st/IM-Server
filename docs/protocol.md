@@ -315,7 +315,7 @@ imserver [端口] [IO线程数] [工作线程数] [最大连接数] [允许Origi
 |---|---|---|
 | `IM_MYSQL_HOST` | `127.0.0.1` | MySQL 主机（Docker 内填服务名 `mysql`） |
 | `IM_MYSQL_PORT` | `3306` | MySQL 端口 |
-| `IM_MYSQL_USER` / `IM_MYSQL_PASSWORD` | `IMS_jack` / `520010` | MySQL 账号（Docker 内账号为 IMS_jack，见 compose） |
+| `IM_MYSQL_USER` / `IM_MYSQL_PASSWORD` | `IMS_jack` / 空（须显式注入） | MySQL 账号与密码；密码**不再内置**，经环境变量/`.env`（compose 自动读取，git 忽略）注入 |
 | `IM_MYSQL_DB` | `IMS_reactor_db` | 数据库名 |
 | `IM_REDIS_ENABLED` | `0` | `1` 启用 Redis 存储（token/限流/幂等） |
 | `IM_REDIS_HOST` | `127.0.0.1` | Redis 主机（Docker 内填 `redis`） |
@@ -379,7 +379,7 @@ docker compose up -d --build
 ### 11.2 已知限制（2026-09-09 加固后）
 以下高/中危项已修复；低危项为已知取舍，暂保持：
 - **已修复**：`msg.offline_ack` 的 `messageIds` 单次上限 1000（超限回 `400 确认数量超限`）；登录限流表淘汰跳过被锁定账号（洗表不再清零受害者）；`clientMsgId` 上限 64 字节（与 DB 列宽对齐，超限回 `400 参数错误`，单聊/群聊同规则）；单聊离线补发上限 100 条/次（激活 `kOfflineMaxPerUser`，超量分多次登录渐进补发）；单 IP 并发连接上限 100（`IM_MAX_PER_IP_CONN` 可覆盖，`0` 不限）
-- **低（保持）**：JSON 无嵌套深度限制；群发扇出约 49 倍出流量放大（建群需 49 个联系人，门槛较高）；登录后 `404` 可探活账号（IM 常见设计）；compose 与缺省配置含明文密码（已入 git 历史，生产部署须轮换并改用环境变量注入）；Redis 缺省无密码（靠 `127.0.0.1` 绑定与内网隔离）；MySQL 单账号全权（未做最小授权）
+- **低（保持）**：JSON 无嵌套深度限制；群发扇出约 49 倍出流量放大（建群需 49 个联系人，门槛较高）；登录后 `404` 可探活账号（IM 常见设计）；~~compose 与缺省配置含明文密码~~ **已脱敏**（2026-09-29：模板改 `${IM_MYSQL_PASSWORD:-change-me}` 占位、源码缺省置空、测试读环境变量；git 历史中旧开发密码 520010 仍可考古但无生产价值，生产仍须强密码注入）；Redis 缺省无密码（靠 `127.0.0.1` 绑定与内网隔离）；MySQL 单账号全权（未做最小授权）
 
 ### 11.3 没做的功能（直白版，2026-09-16 审计）
 - 群没有管理员：只有群主能管人，没有"管理员"这个角色；也没有禁言、入群审批、群文件
