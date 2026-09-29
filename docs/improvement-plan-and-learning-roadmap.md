@@ -35,7 +35,7 @@
 - **Nginx 反向代理接入**（v2.2 后）：`nginx/im.conf` + compose 第四服务（WebSocket
   升级/90s 超时/每 IP 50 连接）；`X-Forwarded-For` 真实 IP 信任链
   （`IM_TRUSTED_PROXIES`，未配置即忽略防伪造）；过代理 207 用例全量验证。
-- 9 个 CTest 单元测试 + 221 个业务回归用例（内存/Redis 双模式，含 MySQL 断线自愈用例）。
+- 9 个 CTest 单元测试 + 223 个业务回归用例（内存/Redis 双模式，含 MySQL 断线自愈与整库宕机恢复）。
 - 安全加固：offline_ack 上限、clientMsgId 上限、登录洗表防护、TTL 单位修复、
   Redis 级联防护（2026-09-09 / 2026-09-27 两轮审计闭环）。
 
@@ -836,6 +836,14 @@ Message Queue Adapter
 已完成（不再排期）：离线 TTL 清理（含 168 秒单位 bug 修复）、Presence 双后端 + online 字段、
 多端回显与已读同步、Redis 超时/锁外化/批量 MGET、A 区打磨六项（removeMember 校验、
 MySQL 超时、弱断言、迁移幂等、清理告警、heartbeat 文档）。
+
+已完成追加（2026-09-30 自检轮）：揪出三处错漏——①自愈退化 bug（reconnect
+失败置 ok_=false 叠加仓库 ok() 短路 → MySQL 恢复后永久瘫痪到重启；修复 +
+docker stop/start 整库宕机→恢复闭环用例 2 条红绿验证，CI 无 docker 跳过，
+223 用例）；②user_store 登录限流注释夸大（"失败落库"实为纯内存）改诚实
++ 重启清零入已知取舍；③防御加固：MYSQL_OPT_CONNECT_TIMEOUT 5s +
+main 停机看门狗 15s 硬退（ASan 轮疑似挂 31 分钟事件兜底）；
+mysqlStmtExec 收编内部链接。223×3 模式 + ASan 223 零报告 + ctest 9/9。
 
 已完成追加（2026-09-29 第五轮，生产故障根治）：MySQL 断线自愈（生产 4031：
 闲置 19h>wait_timeout 被踢后登录全挂到重启；MySqlClient::stmtExec/query 于
