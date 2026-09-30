@@ -88,12 +88,16 @@ void AppServer::onGroupInvite(const std::shared_ptr<Session>& session, const jso
     session->reply(makeResult("group.invite_res", 409, "对方已在群中", json::object()));
     return;
   }
-  if (groupRepo_->activeCount(groupId) >= kMaxGroupMembers) {
+  const int64_t now = static_cast<int64_t>(std::time(nullptr));
+  // 满员校验与插入原子完成（B4 自检三轮）：此前 activeCount 与 addMember
+  // 两个锁区间存在 TOCTOU——群主多端并发拉人可双双读到 49 都插入，
+  // 上限被击穿到 51。返回 1=已满 403、2=DB 错误 500
+  const int arc = groupRepo_->addMemberCapped(groupId, target, now, kMaxGroupMembers);
+  if (arc == 1) {
     session->reply(makeResult("group.invite_res", 403, "群已满", json::object()));
     return;
   }
-  const int64_t now = static_cast<int64_t>(std::time(nullptr));
-  if (!groupRepo_->addMember(groupId, target, now)) {
+  if (arc != 0) {
     session->reply(makeResult("group.invite_res", 500, "服务器内部错误", json::object()));
     return;
   }

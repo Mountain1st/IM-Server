@@ -33,7 +33,9 @@ bool RedisRateLimiter::allow(int64_t userId, size_t maxCalls,
 }
 
 void RedisRateLimiter::reset(int64_t userId) {
-  client_.commandInt({"DEL", "rate:" + std::to_string(userId)});
+  // 用构造时的键前缀（C6 自检三轮：曾硬编码 "rate:"——qrate 实例调用
+  // 会删错额度桶；当前无调用者，属地雷修复）
+  client_.commandInt({"DEL", keyPrefix_ + std::to_string(userId)});
 }
 
 } // namespace im

@@ -93,6 +93,7 @@ class WS:
 
 # 测试用 MySQL 密码：从环境变量取（test_biz.sh 经 db_env.sh 提供；缺省与 compose 模板一致）
 MYSQL_PWD_ENV = os.environ.get("IM_MYSQL_PASSWORD", "change-me")
+MYSQL_PORT_ENV = os.environ.get("IM_MYSQL_PORT", "3306")
 
 
 def env(t, d):
@@ -492,7 +493,7 @@ def main():
         import subprocess
         out = subprocess.run(
             ["bash", "-c",
-             "MYSQL_PWD=%s mysql -u IMS_jack -h 127.0.0.1 -N -e \"%s\" IMS_reactor_db" % (MYSQL_PWD_ENV, q)],
+             "MYSQL_PWD=%s mysql -u IMS_jack -h 127.0.0.1 -P %s -N -e \"%s\" IMS_reactor_db" % (MYSQL_PWD_ENV, MYSQL_PORT_ENV, q)],
             capture_output=True, text=True)
         return out.stdout.strip()
 
@@ -582,18 +583,37 @@ def main():
     cx.close()
     cy.close()
 
+    # 用户 id 缓存自愈：SQL 直插 users 行后，legacy 数字 userId 路径
+    # （resolveTarget→exists→ids_ 纯缓存，不回源）应从 404（miss）→
+    # 等一轮比对重建后放行（默认 allow_temp_chat=1 非好友可发）。
+    # 修复前：ids_ 缓存无自愈机制（联系人/群成员有 syncCaches，用户没有），
+    # 加载失败/漂移即 miss 到重启
+    Z = base + "33"
+    sql_q("INSERT INTO users (account, username, salt, password_hash) "
+          "VALUES ('%s', '直插乙', 's', 'h')" % Z)
+    zid = int(sql_q("SELECT id FROM users WHERE account='%s'" % Z))
+    # 立即发（数字 id）：插行后下一轮 sync 至少 1 秒后，此窗口必 miss
+    a.send(env("msg.send", {"to": zid, "content": "pre-sync", "clientMsgId": "uc-pre"}))
+    r = json.loads(a.recv())
+    check("user cache miss pre-sync 404",
+          r["type"] == "msg.ack" and r["data"]["code"] == 404)
+    time.sleep(3)  # 等一轮缓存比对（测试 IM_OFFLINE_PURGE_INTERVAL=2）
+    a.send(env("msg.send", {"to": zid, "content": "post-sync", "clientMsgId": "uc-post"}))
+    r = json.loads(a.recv())
+    check("user cache sync heals userExists miss",
+          r["type"] == "msg.ack" and r["data"]["code"] == 0)
+
     # 唯一性防线：messages.message_id 唯一索引——自愈 INSERT 重试
     # （连接断时语句可能已执行）撞键被拒，绝不产生重复消息
     import subprocess as dup_probe
     mid = sql_q("SELECT message_id FROM messages LIMIT 1")
-    dup_rc = dup_probe.run(
-        ["bash", "-c",
-         "MYSQL_PWD=%s mysql -u IMS_jack -h 127.0.0.1 -e \""
-         "USE IMS_reactor_db; INSERT INTO messages (message_id, from_user, to_user,"
-         " content, ts, client_msg_id, chat_type, group_id, status)"
-         " SELECT message_id, from_user, to_user, 'dup-probe', 1, '', 'single', 0, 0"
-         " FROM messages WHERE message_id='%s';\"" % (MYSQL_PWD_ENV, mid)],
-        capture_output=True, text=True)
+    dup_cmd = ("MYSQL_PWD=%s mysql -u IMS_jack -h 127.0.0.1 -P %s -e \""
+               "USE IMS_reactor_db; INSERT INTO messages (message_id, from_user, to_user,"
+               " content, ts, client_msg_id, chat_type, group_id, status)"
+               " SELECT message_id, from_user, to_user, 'dup-probe', 1, '', 'single', 0, 0"
+               " FROM messages WHERE message_id='%s';\""
+               % (MYSQL_PWD_ENV, MYSQL_PORT_ENV, mid))
+    dup_rc = dup_probe.run(["bash", "-c", dup_cmd], capture_output=True, text=True)
     check("message_id unique rejects duplicate insert", dup_rc.returncode != 0)
 
     # 可靠性：MySQL 连接被服务端踢掉后自动重连自愈。
@@ -1081,7 +1101,7 @@ def main():
           and r["data"]["code"] == 0)
     gid2 = r["data"]["data"]["groupId"]
     # 11 位合规账号：base(9 位)+2 位后缀，跳过已用后缀避免冲突
-    cap_block = {"10", "11", "12", "13", "14", "15", "31", "32", "50", "60", "61", "77"}
+    cap_block = {"10", "11", "12", "13", "14", "15", "31", "32", "33", "50", "60", "61", "77"}
     cap_accounts = []
     n = 16
     while len(cap_accounts) < 49:
@@ -1377,21 +1397,22 @@ def main():
     import subprocess
     used = [A, B, C, SINK, SPAM, SINK2, SPAM2, D, E, F, G, H, base + "50", G1, G2,
             M1, M2, M3, M4] \
-        + cap_accounts + [OVER, X, Y]
+        + cap_accounts + [OVER, X, Y, Z]
     inlist = ",".join("'%s'" % x for x in used)
     # 群表清理必须在 users 删除之前（按 account 查 user_id，无级联外键）
     subprocess.run(["bash", "-c",
-        "MYSQL_PWD=%s mysql -u IMS_jack -h 127.0.0.1 -e \""
+        "MYSQL_PWD=%s mysql -u IMS_jack -h 127.0.0.1 -P %s -e \""
         "USE IMS_reactor_db; "
         "DELETE FROM group_members WHERE user_id IN (SELECT id FROM users WHERE account IN (%s)); "
-        "DELETE FROM \`groups\` WHERE owner_id IN (SELECT id FROM users WHERE account IN (%s));\" 2>/dev/null" % (MYSQL_PWD_ENV, inlist, inlist)],
+        "DELETE FROM \`groups\` WHERE owner_id IN (SELECT id FROM users WHERE account IN (%s));\" 2>/dev/null"
+        % (MYSQL_PWD_ENV, MYSQL_PORT_ENV, inlist, inlist)],
         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     subprocess.run(["bash", "-c",
-        "MYSQL_PWD=%s mysql -u IMS_jack -h 127.0.0.1 -e \""
+        "MYSQL_PWD=%s mysql -u IMS_jack -h 127.0.0.1 -P %s -e \""
         "USE IMS_reactor_db; "
         "DELETE m FROM messages m JOIN users u ON m.from_user=u.id OR m.to_user=u.id "
         "WHERE u.account IN (%s); "
-        "DELETE FROM users WHERE account IN (%s);\" 2>/dev/null" % (MYSQL_PWD_ENV, inlist, inlist)],
+        "DELETE FROM users WHERE account IN (%s);\" 2>/dev/null" % (MYSQL_PWD_ENV, MYSQL_PORT_ENV, inlist, inlist)],
         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
     fails = [n for n, c in results if not c]

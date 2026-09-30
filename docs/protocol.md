@@ -476,6 +476,31 @@ restart 依赖进程退出才能拉起）。
 有本机 docker 的环境执行；GitHub Actions 的 mysql 是 service 容器
 （无 docker CLI），该用例在 CI 跳过——宕机恢复路径靠本地矩阵覆盖。
 
+**自检三轮加固（2026-09-30，外部审计 A/B/C 分级全量处置）**：
+- **A1 注册限流 + PBKDF2 并发闸**：auth.register 按 IP 3 次/10 分钟
+  （`IM_REGISTER_LIMIT_PER_WINDOW` 可覆盖；未登录即可调用的 PBKDF2
+  50-100ms/次此前可被刷成未认证 CPU DoS）；登录/注册的慢哈希同时受
+  全局并发闸（同时最多 2 个在算，排队不占 CPU）
+- **B2 登录拆锁**：PBKDF2 移出 UserStore 互斥锁（此前 5 个并发登录可让
+  全部消息投递停顿半秒——热路径 lookupAccount 共用该锁）
+- **B3 用户缓存自愈**：ids/idAccounts 缓存纳入 syncCaches 计数比对
+  （此前是唯一无自愈路径的缓存：加载失败即 fromNick/数字 userId 404
+  到重启）；MySqlUserRepository 补内部锁（清理线程直调路径安全），
+  并修复插锁时引入的 fetchUserInfo→fetchUser 同线程递归加锁自死锁
+  （gdb 现场抓栈定位）
+- **B4 群满 TOCTOU**：activeCount 与 addMember 合并为锁内原子
+  addMemberCapped（并发拉人不再能击穿 50 上限到 51）
+- **B1 固定容器 IP**：compose 自定义网段 172.19.0.0/24，nginx 容器
+  固定 .5——IM_TRUSTED_PROXIES=网关+nginx 两值，8080/80 两路径的
+  X-Forwarded-For 信任均稳定成立（容器重建不再漂移失效）
+- **C 批**：stop_grace_period 20s（＞看门狗 15s，排水不被 SIGKILL 截
+  断）、workerLoop/purgeLoop catch(...) 兜底（异常不再 terminate 全
+  进程）、user.search 纳入查询限流（LIKE 可刷）、RedisRateLimiter::reset
+  用构造前缀（qrate 不再删错桶）、Presence DECR 失败不误删在线键、
+  argv[4] 非数字警告、MySQL 连接禁用 TLS（libmysqlclient TLS 握手库
+  级泄漏，LSan 实测 37982 次分配不回收——内网容器网络可接受，公网
+  入口由 Nginx wss 终结；非 TLS 下密码走 RSA 公钥交换仍不裸奔）
+
 **消息唯一性防线**（2026-09-30 自检修复）：`messages.message_id` 升级为
 **数据库唯一索引**（其余四表本就有唯一键，唯 messages 漏配）。防的是
 自愈 INSERT 重试的"半途成功"场景：连接断时语句可能已在服务端执行，

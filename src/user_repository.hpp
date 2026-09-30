@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstddef>
 #include <cstdint>
 #include <memory>
 #include <string>
@@ -48,6 +49,13 @@ public:
   virtual void searchUsers(const std::string& keyword, int64_t excludeUserId,
                            int limit,
                            std::vector<std::pair<std::string, std::string>>* out) = 0;
+
+  // ---- 缓存低频比对（2026-09-30 B3 自检补齐；默认空实现兼容接口）----
+  // 库内 users 行数；查询失败返回 false（调用方跳过本轮比对）
+  virtual bool dbUserCount(size_t* out) { (void)out; return false; }
+  virtual size_t cacheUserCount() { return 0; }
+  // 全量重建缓存（失败保旧）。MySQL 实现有真实逻辑
+  virtual void reloadIdCache() {}
 };
 
 } // namespace im

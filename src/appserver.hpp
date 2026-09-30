@@ -136,6 +136,9 @@ private:
   std::unique_ptr<MsgDedupStore> msgDedup_;    // 消息幂等去重（内存/Redis 双后端）
   std::unique_ptr<RateLimiterStore> msgLimiter_; // msg.send 限流（内存/Redis 双后端）
   std::unique_ptr<RateLimiterStore> queryLimiter_; // 重查询限流（history/members；Redis 键前缀 qrate: 独立额度桶）
+  std::unique_ptr<RateLimiterStore> registerLimiter_; // 注册限流（按 IP；Redis 键前缀 reg: 独立额度桶）
+  // 注册限流额度（环境变量 IM_REGISTER_LIMIT_PER_WINDOW 可覆盖，测试豁免）
+  size_t registerLimit_ = config::kRegisterLimitPerWindow;
   // 全局消息序列（生成 messageId）。起点随机化（构造播种）：id 格式为
   // <秒级时间戳>-<seq>，若固定从 1 起，同秒内重启前后会生成相同 id
   //（撞唯一键丢消息）；随机起点把该窗口概率降到约百万分之一

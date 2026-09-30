@@ -13,6 +13,7 @@
 // 线程：工作线程池（AppServer::onEnvelope 分发）
 // ============================================================
 #include "appserver.hpp"
+#include "metrics.hpp"
 #include "app_util.hpp"
 #include "log.hpp"
 #include "session.hpp"
@@ -25,6 +26,15 @@ void AppServer::onSearch(const std::shared_ptr<Session>& session, const json& da
   std::string keyword = data.value("keyword", "");
   if (keyword.empty()) {
     session->reply(makeResult("user.search_res", 400, "参数错误", json::object()));
+    return;
+  }
+  // 搜索限流（C9 自检三轮）：LIKE 全表扫可被刷，纳入查询限流额度桶
+  // （与 history/members 共享 20 次/10s；Redis 键前缀 qrate:）
+  if (!queryLimiter_->allow(session->userId(), config::kQueryLimitPerWindow,
+                            config::kQueryWindow)) {
+    g_metrics.rateLimited.fetch_add(1, std::memory_order_relaxed);
+    session->reply(makeResult("user.search_res", 429, "搜索过于频繁，请稍后再试",
+                              json::object()));
     return;
   }
   int limit = data.value("limit", 20);

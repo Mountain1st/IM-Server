@@ -27,7 +27,11 @@ void RedisPresenceStore::online(int64_t userId) {
 void RedisPresenceStore::offline(int64_t userId) {
   const std::string key = "p:online:" + std::to_string(userId);
   const int64_t n = client_.commandInt({"DECR", key});
-  // 归零（或防御性负数）即删除，避免 EXISTS 误判在线
+  // commandInt 失败返回 -2（连接错误/超时）：不动键（此时键状态未知，
+  // 误删会把真实在线者打成离线；TTL 1h 兜底自愈——C7 自检三轮）
+  if (n == -2) return;
+  // 归零（或防御性负数，如断连漏减导致的重复 offline）即删除，
+  // 避免 EXISTS 误判在线
   if (n <= 0) {
     client_.commandInt({"DEL", key});
   }

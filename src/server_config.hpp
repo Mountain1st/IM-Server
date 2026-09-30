@@ -60,6 +60,14 @@ inline constexpr size_t kMaxSendNoIdPerWindow = 5;
 // 重查询限流（chat.history / group.history / group.members）：滑动窗口内每用户次数
 inline constexpr std::chrono::seconds kQueryWindow(10);
 inline constexpr size_t kQueryLimitPerWindow = 20;
+// 注册限流（auth.register 按 IP）：PBKDF2 约 50-100ms/次且未登录即可调用，
+// 无限流可被用作未认证 CPU DoS（打满工作线程拖垮消息投递）。
+// 环境变量 IM_REGISTER_LIMIT_PER_WINDOW 可覆盖（测试豁免用大值）
+inline constexpr std::chrono::seconds kRegisterWindow(600);
+inline constexpr size_t kRegisterLimitPerWindow = 3;
+// PBKDF2 全局并发上限：同一时刻最多 N 个登录/注册在计算慢哈希，
+// 排队不占 CPU（纵深防御分布式多 IP 刷注册）
+inline constexpr int kMaxConcurrentPbkdf2 = 2;
 // clientMsgId 长度上限（64，与 messages.client_msg_id 列宽对齐，防 Redis 大 key）
 inline constexpr size_t kMaxClientMsgIdBytes = 64;
 // msg.offline_ack 单次确认数量上限（防单包触发海量 DB 更新）

@@ -80,7 +80,6 @@ private:
 
   std::mutex taskMutex_;
   std::vector<std::function<void()>> tasks_;
-  std::mutex updateMutex_;
 
   std::mutex flushMutex_;
   std::vector<std::shared_ptr<Connection>> pendingFlush_;

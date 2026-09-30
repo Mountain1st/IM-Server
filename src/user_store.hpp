@@ -6,6 +6,7 @@
 #include <chrono>
 #include <cstdint>
 #include <memory>
+#include <condition_variable>
 #include <mutex>
 #include <string>
 #include <unordered_map>
@@ -32,6 +33,19 @@ struct UserStoreConfig {
 // 多个工作线程会并发访问，内部统一用互斥锁保护。
 class UserStore {
 public:
+  // PBKDF2 并发闸（A1 自检三轮）：登录/注册的慢哈希计算最多
+  // kMaxConcurrentPbkdf2 个同时进行，其余排队（排队不占 CPU——
+  // 防分布式多 IP 刷注册把工作线程 CPU 打满）。RAII 守卫用法
+  class Pbkdf2Gate {
+  public:
+    explicit Pbkdf2Gate(UserStore* s);
+    ~Pbkdf2Gate();
+    Pbkdf2Gate(const Pbkdf2Gate&) = delete;
+    Pbkdf2Gate& operator=(const Pbkdf2Gate&) = delete;
+  private:
+    UserStore* store_;
+  };
+
   // 必须注入存储后端（MySQL + token 存储）；连接失败由上层在启动前报错退出。
   explicit UserStore(std::shared_ptr<UserRepository> repo,
                      std::shared_ptr<TokenStore> tokenStore);
@@ -56,6 +70,13 @@ public:
   bool accountOf(int64_t userId, std::string* account);
   // 隐私设置转发（见 UserRepository）
   int fetchSettings(int64_t userId, int* allowTempChat, int* searchable, int* allowAdd);
+
+  // ---- 用户缓存低频比对（清理线程 syncCaches 调用；门面锁内转发）----
+  // 库内 users 行数；查询失败返回 false（跳过本轮比对）
+  bool dbUserCacheCount(size_t* out);
+  size_t cacheUserCount();
+  // 全量重建用户 id 缓存（失败保旧不清空）
+  void reloadUserCache();
   int updateSettings(int64_t userId, int allowTempChat, int searchable, int allowAdd);
   void searchUsers(const std::string& keyword, int64_t excludeUserId, int limit,
                    std::vector<std::pair<std::string, std::string>>* out);
@@ -66,7 +87,7 @@ private:
   std::string hashPassword(const std::string& salt, const std::string& password);
   // 生成登录 token（随机种子，SHA-1 摘要）
   std::string genToken();
-  // 记录一次登录失败（含窗口初始化与防表膨胀清理），供 login 内部调用
+  // 记录一次登录失败（含窗口初始化与防表膨胀清理）。契约：调用方须已持有 mutex_
   void recordFail(const std::string& account, std::chrono::steady_clock::time_point now);
 
   std::mutex mutex_;
@@ -84,6 +105,11 @@ private:
     int allowAdd = 1;
   };
   std::unordered_map<int64_t, Settings> settingsCache_;  // userId -> 设置缓存
+  // PBKDF2 并发闸：active_ 计数 + cv（满则排队）。与 mutex_ 分开（独立的
+  // 一把小锁，避免闸等待与业务锁耦合）
+  std::mutex pbkdf2Mutex_;
+  std::condition_variable pbkdf2Cv_;
+  int pbkdf2Active_ = 0;
 };
 
 } // namespace im

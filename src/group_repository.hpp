@@ -42,6 +42,9 @@ public:
   bool memberPeriod(int64_t groupId, int64_t userId, int64_t* joinedTs, int64_t* leftTs);
   // 加人（新加或重入：重入时 joined_ts=now、left_ts=0）。成功返回 true。
   bool addMember(int64_t groupId, int64_t userId, int64_t now);
+  // 带上限的原子加人（B4：校验与插入同一临界区，防 TOCTOU 击穿上限）。
+  // 返回：0=成功；1=已满（cap）；2=DB 错误
+  int addMemberCapped(int64_t groupId, int64_t userId, int64_t now, size_t cap);
   // 退群（left_ts=now，行保留）。成功返回 true。
   bool removeMember(int64_t groupId, int64_t userId, int64_t now);
   size_t activeCount(int64_t groupId);                    // 现成员数

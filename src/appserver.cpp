@@ -157,7 +157,8 @@ AppServer::AppServer(uint16_t port, size_t ioThreads, size_t workThreads, size_t
       onlineMgr_(presence_),
       msgDedup_(makeMsgDedup(redisConfig)),
       msgLimiter_(makeRateLimiter(redisConfig, "发送限流")),
-      queryLimiter_(makeRateLimiter(redisConfig, "查询限流", "qrate:")) {
+      queryLimiter_(makeRateLimiter(redisConfig, "查询限流", "qrate:")),
+      registerLimiter_(makeRateLimiter(redisConfig, "注册限流", "reg:")) {
   if (!msgRepo_->ok()) {
     throw std::runtime_error("消息存储连接失败");
   }
@@ -177,6 +178,11 @@ AppServer::AppServer(uint16_t port, size_t ioThreads, size_t workThreads, size_t
   if (const char* v = std::getenv("IM_OFFLINE_PURGE_INTERVAL")) {
     const int n = std::atoi(v);
     if (n > 0) purgeIntervalSec_ = n;
+  }
+  // 注册限流额度（按 IP）：环境变量可覆盖（测试豁免用大值）
+  if (const char* v = std::getenv("IM_REGISTER_LIMIT_PER_WINDOW")) {
+    const int n = std::atoi(v);
+    if (n > 0) registerLimit_ = static_cast<size_t>(n);
   }
   // 历史保留天数（已消费消息含群消息）：环境变量可覆盖；0 = 不清理
   if (const char* v = std::getenv("IM_MSG_RETENTION_DAYS")) {
@@ -243,16 +249,24 @@ void AppServer::purgeLoop() {
     if (purgeStop_.load()) break;
     lk.unlock();
     const int64_t now = static_cast<int64_t>(std::time(nullptr));
-    const int64_t removed = msgRepo_->purgeExpiredOffline(now);
-    if (removed > 0) {
-      LOG_I("[purge] 已清理 " << removed << " 条过期离线消息");
+    // 兜底 catch（C3 自检三轮）：清理线程异常逃逸到线程入口会
+    // std::terminate 全进程（如极端 OOM 的 bad_alloc）
+    try {
+      const int64_t removed = msgRepo_->purgeExpiredOffline(now);
+      if (removed > 0) {
+        LOG_I("[purge] 已清理 " << removed << " 条过期离线消息");
+      }
+      const int64_t aged = msgRepo_->purgeAgedHistory(now, msgRetentionDays_);
+      if (aged > 0) {
+        LOG_I("[purge] 已归档清理 " << aged << " 条超期历史消息");
+      }
+      // 同轮做内存缓存低频比对（默认 30 分钟一轮；四条 COUNT 成本可忽略）
+      syncCaches();
+    } catch (const std::exception& e) {
+      LOG_E("[purge] 清理轮异常被兜底捕获: " << e.what());
+    } catch (...) {
+      LOG_E("[purge] 清理轮异常（未知类型）被兜底捕获");
     }
-    const int64_t aged = msgRepo_->purgeAgedHistory(now, msgRetentionDays_);
-    if (aged > 0) {
-      LOG_I("[purge] 已归档清理 " << aged << " 条超期历史消息");
-    }
-    // 同轮做内存缓存低频比对（默认 30 分钟一轮；两条 COUNT 成本可忽略）
-    syncCaches();
   }
 }
 
@@ -276,6 +290,17 @@ void AppServer::syncCaches() {
       LOG_I("[cache] 群成员缓存计数漂移（库 " << dbM << " / 缓存 " << cachedM
             << "），触发重建");
       groupRepo_->reloadMembersCache();
+    }
+  }
+  // 用户 id 缓存（2026-09-30 自检三轮 B3 补齐——此前用户缓存是唯一
+  // 无自愈路径的：加载失败即 userExists/fromNick miss 到重启）
+  size_t dbU = 0;
+  if (userStore_->dbUserCacheCount(&dbU)) {
+    const size_t cachedU = userStore_->cacheUserCount();
+    if (dbU != cachedU) {
+      LOG_I("[cache] 用户缓存计数漂移（库 " << dbU << " / 缓存 " << cachedU
+            << "），触发重建");
+      userStore_->reloadUserCache();
     }
   }
 }

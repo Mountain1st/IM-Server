@@ -15,10 +15,10 @@ MySQL 持久化 + Redis 可选双后端，覆盖注册登录、单聊、联系�
 - **群聊**：建群/拉人/退群/历史/群发（单行存储 + 每成员水位线补发），群管理（踢人/转让/解散/改名/公告）
 - **多端**：一账号多设备同时在线，自发消息回显 + 已读同步（msg.read_notify）
 - **存储**：MySQL 六表全参数化 SQL；Redis 可选（token/限流/幂等/在线状态，调用带超时且锁外执行——Redis 宕机不影响消息收发）
-- **可靠性**：clientMsgId 幂等、滑动窗口限流、离线消息 TTL 清理（7 天）、
-  优雅停机（Close 1001 通知 + 工作队列排水）；联系人/群成员缓存低频比对自愈；
-  MySQL/Redis 断线自愈（被踢/闪断/停机恢复后透明重建，运行期无需重启）；
-  compose restart 策略兜底启动顺序
+- **可靠性**：clientMsgId 幂等、滑动窗口限流（发送/查询/注册三层）、离线消息
+  TTL 清理（7 天）、优雅停机（Close 1001 通知 + 工作队列排水）；三缓存低频比对
+  自愈（联系人/群成员/用户）；MySQL/Redis 断线自愈（运行期无需重启）；
+  PBKDF2 并发闸 + 登录拆锁（防慢哈希阻塞热路径）；compose restart 兜底
 - **工程**：`-Wall -Wextra` 零警告基线；ASan/UBSan/LSan/TSan 全矩阵通过
 - **部署**：Docker Compose 四件套（mysql+redis+imserver+**nginx 反代**）；
   `X-Forwarded-For` 真实 IP 信任链、TLS（wss）终结位、日志按大小轮转；

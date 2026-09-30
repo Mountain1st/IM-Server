@@ -83,7 +83,16 @@ void ThreadPool::workerLoop() {
       task = std::move(tasks_.front());
       tasks_.pop_front();
     }
-    task();
+    // 兜底 catch（C3 自检三轮）：业务异常逃逸到线程入口会
+    // std::terminate 全进程；onEnvelope 内部已捕 json 异常，此处
+    // 防其余异常（如 OOM bad_alloc）杀进程
+    try {
+      task();
+    } catch (const std::exception& e) {
+      LOG_E("[pool] 任务异常逃逸被兜底捕获: " << e.what());
+    } catch (...) {
+      LOG_E("[pool] 任务异常（未知类型）被兜底捕获");
+    }
   }
   // 退出计数（锁内）并唤醒等待方（stop 的 drain 完成判定）
   {

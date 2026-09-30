@@ -36,6 +36,21 @@ UserStore::UserStore(std::shared_ptr<UserRepository> repo,
                      std::shared_ptr<TokenStore> tokenStore)
   : repo_(std::move(repo)), tokenStore_(std::move(tokenStore)) {}
 
+UserStore::Pbkdf2Gate::Pbkdf2Gate(UserStore* s) : store_(s) {
+  // 满则排队（futex 等待不占 CPU）；进入即计数
+  std::unique_lock<std::mutex> lk(store_->pbkdf2Mutex_);
+  store_->pbkdf2Cv_.wait(lk, [s = store_] { return s->pbkdf2Active_ < config::kMaxConcurrentPbkdf2; });
+  ++store_->pbkdf2Active_;
+}
+
+UserStore::Pbkdf2Gate::~Pbkdf2Gate() {
+  {
+    std::lock_guard<std::mutex> lk(store_->pbkdf2Mutex_);
+    --store_->pbkdf2Active_;
+  }
+  store_->pbkdf2Cv_.notify_one();
+}
+
 std::string UserStore::genSalt() {
   std::random_device rd;
   std::uniform_int_distribution<unsigned> dist(0, 255);
@@ -64,39 +79,64 @@ std::string UserStore::genToken() {
 
 int UserStore::registerUser(const std::string& account, const std::string& password,
                             const std::string& username, int64_t* userId) {
-  std::lock_guard<std::mutex> lock(mutex_);
+  // salt/哈希生成与 PBKDF2 均在锁外（salt 随机、哈希无共享状态）；
+  // PBKDF2 同时受并发闸约束（A1）。mutex_ 只保护 ids_ 语义上不需要——
+  // insertUser 内部（repo）自带锁维护缓存
   std::string salt = genSalt();
-  return repo_->insertUser(account, username, salt, hashPassword(salt, password), userId);
+  std::string hash;
+  {
+    Pbkdf2Gate gate(this);
+    hash = hashPassword(salt, password);
+  }
+  return repo_->insertUser(account, username, salt, hash, userId);
 }
 
 int UserStore::login(const std::string& account, const std::string& password,
                      int64_t* userId, std::string* username, std::string* token) {
-  std::lock_guard<std::mutex> lock(mutex_);
-  auto now = std::chrono::steady_clock::now();
-
-  // 登录限流：窗口内失败次数已达阈值则拒绝（返回 429），窗口过期后重置
-  auto guardIt = loginGuards_.find(account);
-  if (guardIt != loginGuards_.end()) {
-    if (now - guardIt->second.windowStart >= kLockWindow) {
-      loginGuards_.erase(guardIt);
-    } else if (guardIt->second.failures >= kMaxLoginFailures) {
-      return 429; // 尝试过于频繁，稍后再试
+  // 三段式拆锁（2026-09-30 自检三轮 B2）：PBKDF2 约 50-100ms，此前全程
+  // 持 mutex_ 会阻塞消息热路径（lookupAccount/fetchSettings 共用此锁），
+  // 5 个并发登录即可让全部消息投递停顿半秒。现改为：
+  //   段1 锁内：guard 判定（429 或放行）
+  //   段2 锁外：查库 + PBKDF2（重活）
+  //   段3 锁内：失败记账 / 成功清 guard；token 签发（tokenStore 自带锁）
+  // 锁语义：loginGuards_ 只在本锁内读写；并发同账号登录在 guard 上仅
+  // 存在判定交错（双方都过判定、各自 PBKDF2）——最终记账原子，可接受
+  const auto now = std::chrono::steady_clock::now();
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    auto guardIt = loginGuards_.find(account);
+    if (guardIt != loginGuards_.end()) {
+      if (now - guardIt->second.windowStart >= kLockWindow) {
+        loginGuards_.erase(guardIt);
+      } else if (guardIt->second.failures >= kMaxLoginFailures) {
+        return 429; // 尝试过于频繁，稍后再试
+      }
     }
   }
 
+  // 段2：锁外查库与慢哈希（repo/tokenStore 均自带锁，无需本锁保护）
   int64_t id = 0;
   std::string name, salt, passwordHash;
   int frc = repo_->fetchUser(account, &id, &name, &salt, &passwordHash);
   if (frc == 2) return 500; // 数据库错误，不能误报为密码错误
   if (frc != 0) { // 账号不存在，统一按密码错误处理
+    std::lock_guard<std::mutex> lock(mutex_);
     recordFail(account, now);
     return 403;
   }
-  if (hashPassword(salt, password) != passwordHash) {
-    recordFail(account, now);
-    return 403;
+  {
+    Pbkdf2Gate gate(this);
+    if (hashPassword(salt, password) != passwordHash) {
+      std::lock_guard<std::mutex> lock(mutex_);
+      recordFail(account, now);
+      return 403;
+    }
   }
-  loginGuards_.erase(account); // 登录成功，清空失败记录
+  // 段3：成功清失败记录（锁内），签发 token（tokenStore 自带锁，锁外）
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    loginGuards_.erase(account);
+  }
   *token = genToken();
   // 只保存 token 的 SHA-256 摘要：内存/Redis 均不落明文 token（P0-5）
   tokenStore_->put(sha256Hex(*token), id, kTokenTtl);
@@ -165,6 +205,21 @@ bool UserStore::exists(int64_t userId) {
 int UserStore::lookupAccount(const std::string& account, int64_t* userId, std::string* username) {
   std::lock_guard<std::mutex> lock(mutex_);
   return repo_->fetchUserInfo(account, userId, username);
+}
+
+bool UserStore::dbUserCacheCount(size_t* out) {
+  std::lock_guard<std::mutex> lock(mutex_);
+  return repo_->dbUserCount(out);
+}
+
+size_t UserStore::cacheUserCount() {
+  std::lock_guard<std::mutex> lock(mutex_);
+  return repo_->cacheUserCount();
+}
+
+void UserStore::reloadUserCache() {
+  std::lock_guard<std::mutex> lock(mutex_);
+  repo_->reloadIdCache();
 }
 
 bool UserStore::nickname(int64_t userId, std::string* username) {

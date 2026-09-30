@@ -4,6 +4,7 @@
 #include "user_repository.hpp"
 
 #include <cstdint>
+#include <mutex>
 #include <string>
 #include <unordered_map>
 #include <utility>
@@ -44,15 +45,31 @@ public:
 
 private:
   void loadIdCache();
+  // 锁内全量查询用户 id/账号/昵称到临时结构；查询失败返回 false（不动 out）
+  bool fetchAllUsers(std::unordered_map<int64_t, std::string>* ids,
+                     std::unordered_map<int64_t, std::string>* idAccounts);
 
   MySqlClient client_;
+  // 串行化 DB 访问 + 缓存读写。UserStore 门面锁只覆盖工作线程侧；
+  // syncCaches（清理线程）绕过门面直调 sync 接口，故仓储自身有锁
+  // （与 Contact/GroupRepository 同构；两层锁顺序恒为 UserStore→repo，
+  // 无反向调用，无死锁）。2026-09-30 起本类按"自带锁、可跨线程"设计
+  std::mutex mutex_;
   // 已知 userId -> 昵称(username) 缓存（启动全量加载 + 注册时追加）。
   // userExists()、token 回执与 msg.recv 的 fromNick 都走缓存，避免热路径打数据库。
-  // 本服务不提供删号，缓存不会过期；若外部直接改库则需重启同步。
+  // 本服务不提供删号，缓存不会过期；绕库直改的自愈见下方 sync 接口。
   std::unordered_map<int64_t, std::string> ids_;
   // 已知 userId -> 登录账号(account) 缓存（启动全量加载 + 注册时追加）。
   // msg.recv/msg.offline/chat.history_res 的 from 返回 account，需要反查。
   std::unordered_map<int64_t, std::string> idAccounts_;
+
+public:
+  // ---- 缓存低频比对（防绕库直改导致漂移；与 Contact/Group 同构）----
+  // 库内 users 总行数；查询失败返回 false（调用方跳过本轮比对）
+  bool dbUserCount(size_t* out) override;
+  size_t cacheUserCount() override;  // 内存缓存条目数（锁内）
+  // 全量重建：先查到临时结构、成功才换入（失败保持旧缓存，不清空）
+  void reloadIdCache() override;
 };
 
 } // namespace im

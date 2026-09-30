@@ -73,6 +73,14 @@ MySqlClient::MySqlClient(const std::string& host, unsigned port, const std::stri
   // join 挂死；部署机连服务名 mysql，容器重启期 connect 可能长等）
   const unsigned kMySqlIoTimeoutSec = 5;
   mysql_options(conn_, MYSQL_OPT_CONNECT_TIMEOUT, &kMySqlIoTimeoutSec);
+  // 禁用 TLS（内网容器服务名/本地连接无需加密；MySQL 8 密码认证在非 TLS
+  // 下自动走 RSA 公钥交换，凭据仍不裸奔）：libmysqlclient 的 TLS 握手
+  // 存在库级内存泄漏（LSan 实测 37982 次分配不回收，2026-09-30 ASan
+  // 自检三轮），禁用后顺带消除——对明文容器网络可接受，公网须经 Nginx
+  // wss 终结（入口已加密）
+  const enum mysql_ssl_mode kSslMode = SSL_MODE_DISABLED;
+  mysql_options(conn_, MYSQL_OPT_SSL_MODE, &kSslMode);
+
   mysql_options(conn_, MYSQL_OPT_READ_TIMEOUT, &kMySqlIoTimeoutSec);
   mysql_options(conn_, MYSQL_OPT_WRITE_TIMEOUT, &kMySqlIoTimeoutSec);
   if (!mysql_real_connect(conn_, host.c_str(), user.c_str(), password.c_str(),
@@ -113,6 +121,8 @@ bool MySqlClient::reconnect() {
   mysql_options(conn_, MYSQL_OPT_CONNECT_TIMEOUT, &kMySqlIoTimeoutSec);
   mysql_options(conn_, MYSQL_OPT_READ_TIMEOUT, &kMySqlIoTimeoutSec);
   mysql_options(conn_, MYSQL_OPT_WRITE_TIMEOUT, &kMySqlIoTimeoutSec);
+  const enum mysql_ssl_mode kSslMode = SSL_MODE_DISABLED;
+  mysql_options(conn_, MYSQL_OPT_SSL_MODE, &kSslMode);
   if (!mysql_real_connect(conn_, host_.c_str(), user_.c_str(), password_.c_str(),
                           db_.c_str(), port_, nullptr, 0)) {
     // 注意：此处不置 ok_=false——各仓库方法开头有 `if (!client_.ok())`

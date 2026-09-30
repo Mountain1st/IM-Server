@@ -318,6 +318,35 @@ bool GroupRepository::addMember(int64_t groupId, int64_t userId, int64_t now) {
   return true;
 }
 
+int GroupRepository::addMemberCapped(int64_t groupId, int64_t userId, int64_t now,
+                                     size_t cap) {
+  // 上限校验与插入在同一临界区内原子完成（B4 自检三轮）：此前 invite 的
+  // activeCount 与 addMember 是两个锁区间，群主多端并发拉人可双双读到
+  // 49 而都插入成功，把上限击穿到 cap+1（TOCTOU）
+  std::lock_guard<std::mutex> lock(mutex_);
+  if (!client_.ok()) return 2; // DB 错误
+  // 现成员数以缓存计数（members_ 与库由本类所有写路径同步维护；
+  // syncCaches 比对兜底直改库漂移）
+  size_t n = 0;
+  const std::string prefix = std::to_string(groupId) + "|";
+  for (const auto& k : members_) {
+    if (k.compare(0, prefix.size(), prefix) == 0) ++n;
+  }
+  if (n >= cap) return 1; // 已满
+  int errNo = 0;
+  MYSQL_STMT* stmt = client_.stmtExec(
+      "INSERT INTO group_members (group_id, user_id, joined_ts) VALUES (?, ?, ?) "
+      "ON DUPLICATE KEY UPDATE joined_ts = VALUES(joined_ts), left_ts = 0",
+      {std::to_string(groupId), std::to_string(userId), std::to_string(now)}, &errNo);
+  if (!stmt) {
+    LOG_E("[mysql] 群加人失败 errno=" << errNo);
+    return 2;
+  }
+  mysql_stmt_close(stmt);
+  members_.emplace(prefix + std::to_string(userId));
+  return 0; // 成功
+}
+
 bool GroupRepository::removeMember(int64_t groupId, int64_t userId, int64_t now) {
   std::lock_guard<std::mutex> lock(mutex_);
   if (!client_.ok()) return false;

@@ -16,6 +16,8 @@
 #include "metrics.hpp"
 #include "session.hpp"
 
+#include <functional>
+
 namespace im {
 
 void AppServer::onRegister(const std::shared_ptr<Session>& session, const json& data) {
@@ -24,6 +26,18 @@ void AppServer::onRegister(const std::shared_ptr<Session>& session, const json& 
   // username 为昵称（可选，空则缺省与账号一致）
   std::string username = data.value("username", "");
   if (username.empty()) username = account;
+  // 注册限流（按对端 IP，A1 自检三轮）：PBKDF2 约 50-100ms/次且未登录
+  // 即可调用，无限流可被刷成未认证 CPU DoS。IP 哈希为 int64 作限流键
+  // （碰撞=不同 IP 共享额度，粗粒度可接受）
+  {
+    const int64_t ipKey = static_cast<int64_t>(
+        static_cast<uint64_t>(std::hash<std::string>{}(session->conn()->peerIp())));
+    if (!registerLimiter_->allow(ipKey, registerLimit_, config::kRegisterWindow)) {
+      session->reply(makeResult("auth.register_res", 429,
+          "注册过于频繁，请稍后再试", json::object()));
+      return;
+    }
+  }
   // 校验：账号须为 10-11 位数字；密码 6-32 位字母数字组合；昵称 < 32 位。
   // 账号格式不合规给专用消息（客户端可直接展示原因）
   if (!validAccount(account)) {

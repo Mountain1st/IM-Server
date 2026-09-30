@@ -67,6 +67,12 @@ int main(int argc, char* argv[]) {
   }
   if (argc > 4) {
     maxConnections = parseUint(argv[4]);
+    if (maxConnections == 0 && std::string(argv[4]) != "0") {
+      // C8 自检三轮：解析失败回退 0 = 不限连接，与"防 OOM 必设上限"的
+      // 部署约定相反，显式告警提醒
+      LOG_W("[server] argv[4] 非数字（" << argv[4]
+            << "），连接数上限按 0（不限）——生产建议显式设置（如 50）");
+    }
   }
 
   // 允许的 Origin/Host 列表（逗号分隔，可省略 scheme）；缺省为空 → 不校验
