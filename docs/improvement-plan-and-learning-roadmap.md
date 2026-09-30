@@ -837,6 +837,18 @@ Message Queue Adapter
 多端回显与已读同步、Redis 超时/锁外化/批量 MGET、A 区打磨六项（removeMember 校验、
 MySQL 超时、弱断言、迁移幂等、清理告警、heartbeat 文档）。
 
+已完成追加（2026-09-30 自检三轮，外部审计 A/B/C 分级全量处置）：
+A1 注册限流（IP 3/10min reg: 桶 + PBKDF2 并发闸全局 max2 排队不占
+CPU——手动实测第 4 次注册 429）；B2 登录拆锁三段式（慢哈希出 UserStore
+锁，热路径不再被阻塞半秒）；B3 用户缓存自愈 + repo 补锁——插锁曾引入
+fetchUserInfo 递归加锁自死锁（gdb 现场抓栈破案：PR_SET_PTRACER_ANY +
+nohup 保现场法）；B4 addMemberCapped 锁内原子防群满 TOCTOU；B1 compose
+自定义网段 172.19.0.0/24 + nginx 固定 .5（信任链双值，容器实测待 Docker
+恢复）；C 批 7 项（grace 20s/catch 兜底/search 限流/reset 前缀/DECR 保护/
+argv 警告/死注释清理）；**MySQL 连接禁用 TLS**（ASan 破案：libmysqlclient
+TLS 握手库级泄漏 37982 次分配不回收→零报告；密码走 RSA 交换，公网由
+Nginx wss 终结）。224×4 矩阵 + ctest 9/9 + 零警告。
+
 已完成追加（2026-09-30 自检二轮）：A级缺陷 2 个修复——messages.message_id
 普通索引改唯一（其余四表均有唯一键唯它漏配；防自愈 INSERT 重试半途成功
 双插重复消息，撞键宁拒不重）+ 幂等迁移脚本 db/migrate_unique_message_id.sql
