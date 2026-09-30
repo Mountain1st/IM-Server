@@ -837,6 +837,14 @@ Message Queue Adapter
 多端回显与已读同步、Redis 超时/锁外化/批量 MGET、A 区打磨六项（removeMember 校验、
 MySQL 超时、弱断言、迁移幂等、清理告警、heartbeat 文档）。
 
+已完成追加（2026-09-30 自检四轮，CI 假红根治）：CI 224 中 1 失败（本地 226
+全过）双根因——①user cache 用例相位竞态（"直插后立即发→404"依赖 purge
+轮询相位，CI 慢机器 INSERT 期间 sync 跨 COMMIT 即反转，10-20% 概率——
+"本地绿 CI 红"典型画像）→ 相位无关化（插入+等 sync→0；删行+等 sync→
+404，双向确定性，红绿验证能力保留）；②中断轮清理未执行 → 残留
+purge-mid → 后续每轮 INSERT 撞 message_id 唯一索引静默失败（本地实证
+连环假红）→ TTL/保留期用例 message_id 带轮次 base 后缀，历史残留免疫。
+
 已完成追加（2026-09-30 自检三轮，外部审计 A/B/C 分级全量处置）：
 A1 注册限流（IP 3/10min reg: 桶 + PBKDF2 并发闸全局 max2 排队不占
 CPU——手动实测第 4 次注册 429）；B2 登录拆锁三段式（慢哈希出 UserStore
