@@ -80,6 +80,12 @@ MySqlClient::MySqlClient(const std::string& host, unsigned port, const std::stri
   // wss 终结（入口已加密）
   const enum mysql_ssl_mode kSslMode = SSL_MODE_DISABLED;
   mysql_options(conn_, MYSQL_OPT_SSL_MODE, &kSslMode);
+  // 禁 TLS 下 caching_sha2_password 的首次完整认证需要 RSA 公钥加密
+  // 密码（无此选项会报 "Authentication requires secure connection"——
+  // 本地曾通过是因为 CLI 先连过、服务端走了缓存的 fast path）。
+  // 开启后客户端自动向服务器请求 RSA 公钥
+  const unsigned char kGetPubKey = 1;
+  mysql_options(conn_, MYSQL_OPT_GET_SERVER_PUBLIC_KEY, &kGetPubKey);
 
   mysql_options(conn_, MYSQL_OPT_READ_TIMEOUT, &kMySqlIoTimeoutSec);
   mysql_options(conn_, MYSQL_OPT_WRITE_TIMEOUT, &kMySqlIoTimeoutSec);
@@ -123,6 +129,12 @@ bool MySqlClient::reconnect() {
   mysql_options(conn_, MYSQL_OPT_WRITE_TIMEOUT, &kMySqlIoTimeoutSec);
   const enum mysql_ssl_mode kSslMode = SSL_MODE_DISABLED;
   mysql_options(conn_, MYSQL_OPT_SSL_MODE, &kSslMode);
+  // 禁 TLS 下 caching_sha2_password 的首次完整认证需要 RSA 公钥加密
+  // 密码（无此选项会报 "Authentication requires secure connection"——
+  // 本地曾通过是因为 CLI 先连过、服务端走了缓存的 fast path）。
+  // 开启后客户端自动向服务器请求 RSA 公钥
+  const unsigned char kGetPubKey = 1;
+  mysql_options(conn_, MYSQL_OPT_GET_SERVER_PUBLIC_KEY, &kGetPubKey);
   if (!mysql_real_connect(conn_, host_.c_str(), user_.c_str(), password_.c_str(),
                           db_.c_str(), port_, nullptr, 0)) {
     // 注意：此处不置 ok_=false——各仓库方法开头有 `if (!client_.ok())`
