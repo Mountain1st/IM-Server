@@ -35,7 +35,7 @@
 - **Nginx 反向代理接入**（v2.2 后）：`nginx/im.conf` + compose 第四服务（WebSocket
   升级/90s 超时/每 IP 50 连接）；`X-Forwarded-For` 真实 IP 信任链
   （`IM_TRUSTED_PROXIES`，未配置即忽略防伪造）；过代理 207 用例全量验证。
-- 9 个 CTest 单元测试 + 223 个业务回归用例（内存/Redis 双模式，含 MySQL 断线自愈与整库宕机恢复）。
+- 9 个 CTest 单元测试 + 224 个业务回归用例（内存/Redis 双模式，含断线自愈/整库宕机恢复/消息唯一性防线）。
 - 安全加固：offline_ack 上限、clientMsgId 上限、登录洗表防护、TTL 单位修复、
   Redis 级联防护（2026-09-09 / 2026-09-27 两轮审计闭环）。
 
@@ -836,6 +836,15 @@ Message Queue Adapter
 已完成（不再排期）：离线 TTL 清理（含 168 秒单位 bug 修复）、Presence 双后端 + online 字段、
 多端回显与已读同步、Redis 超时/锁外化/批量 MGET、A 区打磨六项（removeMember 校验、
 MySQL 超时、弱断言、迁移幂等、清理告警、heartbeat 文档）。
+
+已完成追加（2026-09-30 自检二轮）：A级缺陷 2 个修复——messages.message_id
+普通索引改唯一（其余四表均有唯一键唯它漏配；防自愈 INSERT 重试半途成功
+双插重复消息，撞键宁拒不重）+ 幂等迁移脚本 db/migrate_unique_message_id.sql
+（先查重复再 ALTER）；nextMessageId 同秒重启撞 id——msgSeq_ 起点随机化
+（撞窗 1e-6）。biz 新用例：同 message_id 直插被唯一键拒（224 用例）。
+B 级边界补录：缓存比对 ±1 对冲漏检、outage 用例 CI 盲区、purge 停机
+日志噪音运维提示。环境说明：本地 redis@6379 与容器 ims-redis@6380 并存
+（测试连前者，不影响正确性）。
 
 已完成追加（2026-09-30 自检轮）：揪出三处错漏——①自愈退化 bug（reconnect
 失败置 ok_=false 叠加仓库 ok() 短路 → MySQL 恢复后永久瘫痪到重启；修复 +

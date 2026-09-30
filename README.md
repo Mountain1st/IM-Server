@@ -49,7 +49,7 @@ imserver 仅绑 `127.0.0.1:9191`（对外唯一入口 Nginx 8080）、
 ```bash
 bash scripts/ci.sh                     # 本地 CI 一键：构建+单测+双模式回归（--full 加 ASan）
 ctest --test-dir build                 # 9 个单元测试
-bash scripts/test_biz.sh               # 223 个业务回归用例（含 MySQL 断线自愈 + 整库宕机恢复）
+bash scripts/test_biz.sh               # 224 个业务回归用例（含 MySQL 断线自愈、整库宕机恢复、消息唯一性防线）
 IM_REDIS_ENABLED=1 IM_REDIS_PORT=6379 bash scripts/test_biz.sh   # Redis 模式
 
 # Sanitizer（已通过 ASan/UBSan/LSan/TSan 全链路，修复过 2 处线程身份发布竞争）
