@@ -497,40 +497,42 @@ def main():
             capture_output=True, text=True)
         return out.stdout.strip()
 
+    # message_id 带轮次时间戳后缀：防历史残留（中断轮清理未执行等）撞
+    # 唯一索引导致 INSERT 静默失败（2026-09-30 CI 假红根因）
     old_ts = int(time.time()) - 8 * 86400
     for i in range(2):
         sql_q("INSERT INTO messages (message_id,from_user,to_user,content,ts,client_msg_id,"
-              "chat_type,group_id,status) VALUES ('purge-old-%d',%d,%d,'stale',%d,'','single',0,0)"
-              % (i, alice, bob, old_ts + i))
+              "chat_type,group_id,status) VALUES ('purge-old-%s-%d',%d,%d,'stale',%d,'','single',0,0)"
+              % (base, i, alice, bob, old_ts + i))
     # 10 分钟前的离线消息：TTL 为 7 天，不应被清理（防 168 秒单位错误回归）
     sql_q("INSERT INTO messages (message_id,from_user,to_user,content,ts,client_msg_id,"
-          "chat_type,group_id,status) VALUES ('purge-mid',%d,%d,'recent',%d,'','single',0,0)"
-          % (alice, bob, int(time.time()) - 600))
+          "chat_type,group_id,status) VALUES ('purge-mid-%s',%d,%d,'recent',%d,'','single',0,0)"
+          % (base, alice, bob, int(time.time()) - 600))
     r = send_msg(a, bob, "fresh offline", "purge-new-1")
     check("purge fresh ack ok", r["type"] == "msg.ack" and r["data"]["code"] == 0)
     time.sleep(3)  # 测试环境 IM_OFFLINE_PURGE_INTERVAL=2，等一轮清理
-    n = sql_q("SELECT COUNT(*) FROM messages WHERE message_id LIKE 'purge-old-%%'"
-              " AND from_user=%d AND to_user=%d" % (alice, bob))
+    n = sql_q("SELECT COUNT(*) FROM messages WHERE message_id LIKE 'purge-old-%s-%%'"
+              " AND from_user=%d AND to_user=%d" % (base, alice, bob))
     check("expired offline purged", n == "0")
-    nm = sql_q("SELECT COUNT(*) FROM messages WHERE message_id='purge-mid'"
-               " AND from_user=%d AND to_user=%d" % (alice, bob))
+    nm = sql_q("SELECT COUNT(*) FROM messages WHERE message_id='purge-mid-%s'"
+               " AND from_user=%d AND to_user=%d" % (base, alice, bob))
     check("10min offline kept (TTL=7d)", nm == "1")
     # 保留期二期：已送达/已读的单聊与群消息超 90 天删除；89 天的保留
     old91 = int(time.time()) - 91 * 86400
     old89 = int(time.time()) - 89 * 86400
     sql_q("INSERT INTO messages (message_id,from_user,to_user,content,ts,client_msg_id,"
-          "chat_type,group_id,status) VALUES ('purge-h91',%d,%d,'aged',%d,'','single',0,2)"
-          % (alice, bob, old91))
+          "chat_type,group_id,status) VALUES ('purge-h91-%s',%d,%d,'aged',%d,'','single',0,2)"
+          % (base, alice, bob, old91))
     sql_q("INSERT INTO messages (message_id,from_user,to_user,content,ts,client_msg_id,"
-          "chat_type,group_id,status) VALUES ('purge-h89',%d,%d,'near',%d,'','single',0,2)"
-          % (alice, bob, old89))
+          "chat_type,group_id,status) VALUES ('purge-h89-%s',%d,%d,'near',%d,'','single',0,2)"
+          % (base, alice, bob, old89))
     sql_q("INSERT INTO messages (message_id,from_user,to_user,content,ts,client_msg_id,"
-          "chat_type,group_id,status) VALUES ('purge-g91',%d,0,'grp',%d,'','group',%d,1)"
-          % (alice, old91, 1))
+          "chat_type,group_id,status) VALUES ('purge-g91-%s',%d,0,'grp',%d,'','group',%d,1)"
+          % (base, alice, old91, 1))
     time.sleep(3)  # 再等一轮清理
-    n91 = sql_q("SELECT COUNT(*) FROM messages WHERE message_id IN ('purge-h91','purge-g91')")
+    n91 = sql_q("SELECT COUNT(*) FROM messages WHERE message_id IN ('purge-h91-%s','purge-g91-%s')" % (base, base))
     check("aged history purged (90d)", n91 == "0")
-    n89 = sql_q("SELECT COUNT(*) FROM messages WHERE message_id='purge-h89'")
+    n89 = sql_q("SELECT COUNT(*) FROM messages WHERE message_id='purge-h89-%s'" % base)
     check("89d history kept", n89 == "1")
     nf = sql_q("SELECT COUNT(*) FROM messages WHERE client_msg_id='purge-new-1'"
                " AND from_user=%d AND to_user=%d" % (alice, bob))
@@ -583,25 +585,29 @@ def main():
     cx.close()
     cy.close()
 
-    # 用户 id 缓存自愈：SQL 直插 users 行后，legacy 数字 userId 路径
-    # （resolveTarget→exists→ids_ 纯缓存，不回源）应从 404（miss）→
-    # 等一轮比对重建后放行（默认 allow_temp_chat=1 非好友可发）。
+    # 用户 id 缓存自愈（相位无关版）：legacy 数字 userId 路径
+    # （resolveTarget→exists→ids_ 纯缓存，不回源）。原"直插后立即发"
+    # 版本依赖 purge 轮询相位（INSERT 期间一轮 sync 跨 COMMIT 即反转，
+    # CI 慢机器偶发红）——改为双向确定性验证：
+    #   ① 直插 + 等一轮 sync → 发送 0（缓存重建后命中，证明缓存路径在用）
+    #   ② 删行 + 等一轮 sync → 发送 404（缓存与库重新对齐，自愈闭环）
     # 修复前：ids_ 缓存无自愈机制（联系人/群成员有 syncCaches，用户没有），
-    # 加载失败/漂移即 miss 到重启
+    # ②处将永远 0（缓存 stale 命中）——自愈缺失即红
     Z = base + "33"
     sql_q("INSERT INTO users (account, username, salt, password_hash) "
           "VALUES ('%s', '直插乙', 's', 'h')" % Z)
     zid = int(sql_q("SELECT id FROM users WHERE account='%s'" % Z))
-    # 立即发（数字 id）：插行后下一轮 sync 至少 1 秒后，此窗口必 miss
-    a.send(env("msg.send", {"to": zid, "content": "pre-sync", "clientMsgId": "uc-pre"}))
-    r = json.loads(a.recv())
-    check("user cache miss pre-sync 404",
-          r["type"] == "msg.ack" and r["data"]["code"] == 404)
     time.sleep(3)  # 等一轮缓存比对（测试 IM_OFFLINE_PURGE_INTERVAL=2）
-    a.send(env("msg.send", {"to": zid, "content": "post-sync", "clientMsgId": "uc-post"}))
+    a.send(env("msg.send", {"to": zid, "content": "post-insert", "clientMsgId": "uc-a"}))
     r = json.loads(a.recv())
-    check("user cache sync heals userExists miss",
+    check("user cache sync picks up inserted user",
           r["type"] == "msg.ack" and r["data"]["code"] == 0)
+    sql_q("DELETE FROM users WHERE id=%d" % zid)
+    time.sleep(3)  # 再等一轮：缓存重建（Z 行消失）
+    a.send(env("msg.send", {"to": zid, "content": "post-delete", "clientMsgId": "uc-b"}))
+    r = json.loads(a.recv())
+    check("user cache sync heals after row deleted",
+          r["type"] == "msg.ack" and r["data"]["code"] == 404)
 
     # 唯一性防线：messages.message_id 唯一索引——自愈 INSERT 重试
     # （连接断时语句可能已执行）撞键被拒，绝不产生重复消息
