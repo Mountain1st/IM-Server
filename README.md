@@ -8,16 +8,17 @@ MySQL 持久化 + Redis 可选双后端，覆盖注册登录、单聊、联系�
 ## 特性
 
 - **网络**：主从 Reactor（epoll ET + eventfd + timerfd），IPv6 双栈，单 IP 连接限流，多层背压（2MB 帧 / 8MB 队列 / 8MB 写缓冲）
-- **协议**：手写 WebSocket 帧解析与握手校验（掩码/RSV/opcode/UTF-8/Close code），JSON 信封协议（v2.2）
+- **协议**：手写 WebSocket 帧解析与握手校验（掩码/RSV/opcode/UTF-8/Close code），JSON 信封协议（v2.4）
 - **认证**：PBKDF2-HMAC-SHA256（10 万迭代 + 独立盐），token 摘要化存储，登录限流（防账号枚举与洗表绕过）
 - **单聊**：account 定位、消息状态机（offline→delivered→read）、非破坏性离线补发（确认制）、历史、已读回执
 - **联系人**：搜索/请求/接受/删除，三开关隐私（临时对话/可搜索/可添加），列表恒含自己
+- **拉黑**：双向断联（分方向 403 文案、好友请求模糊防探测、自动删联系人、群聊不受影响）
 - **群聊**：建群/拉人/退群/历史/群发（单行存储 + 每成员水位线补发），群管理（踢人/转让/解散/改名/公告）
 - **多端**：一账号多设备同时在线，自发消息回显 + 已读同步（msg.read_notify）
-- **存储**：MySQL 六表全参数化 SQL；Redis 可选（token/限流/幂等/在线状态，调用带超时且锁外执行——Redis 宕机不影响消息收发）
+- **存储**：MySQL 七表全参数化 SQL；Redis 可选（token/限流/幂等/在线状态，调用带超时且锁外执行——Redis 宕机不影响消息收发）
 - **可靠性**：clientMsgId 幂等、滑动窗口限流（发送/查询/注册三层）、离线消息
-  TTL 清理（7 天）、优雅停机（Close 1001 通知 + 工作队列排水）；三缓存低频比对
-  自愈（联系人/群成员/用户）；MySQL/Redis 断线自愈（运行期无需重启）；
+  TTL 清理（7 天）、优雅停机（Close 1001 通知 + 工作队列排水）；四缓存低频比对
+  自愈（联系人/群成员/用户/拉黑）；MySQL/Redis 断线自愈（运行期无需重启）；
   PBKDF2 并发闸 + 登录拆锁（防慢哈希阻塞热路径）；compose restart 兜底
 - **工程**：`-Wall -Wextra` 零警告基线；ASan/UBSan/LSan/TSan 全矩阵通过
 - **部署**：Docker Compose 四件套（mysql+redis+imserver+**nginx 反代**）；
@@ -49,7 +50,7 @@ imserver 仅绑 `127.0.0.1:9191`（对外唯一入口 Nginx 8080）、
 ```bash
 bash scripts/ci.sh                     # 本地 CI 一键：构建+单测+双模式回归（--full 加 ASan）
 ctest --test-dir build                 # 9 个单元测试
-bash scripts/test_biz.sh               # 224 个业务回归用例（含 MySQL 断线自愈、整库宕机恢复、消息唯一性防线）
+bash scripts/test_biz.sh               # 246 个业务回归用例（含断线自愈、整库宕机恢复、唯一性防线、v2.4 拉黑 20 用例）
 IM_REDIS_ENABLED=1 IM_REDIS_PORT=6379 bash scripts/test_biz.sh   # Redis 模式
 
 # Sanitizer（已通过 ASan/UBSan/LSan/TSan 全链路，修复过 2 处线程身份发布竞争）

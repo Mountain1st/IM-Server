@@ -74,6 +74,19 @@ void AppServer::onContactRequest(const std::shared_ptr<Session>& session, const 
     session->reply(makeResult("contact.request_res", 400, "不能添加自己为联系人", json::object()));
     return;
   }
+  // 拉黑检查（v2.4 双向断联，优先级高于 allowAdd）：
+  // 自己拉黑的 → 明确提示先解除；被对方拉黑 → 复用 allowAdd 关的
+  // 文案与错误码（403 对方未开启添加）——模糊处理防探测
+  if (blockRepo_->isBlockedPair(self, to)) {
+    if (blockRepo_->isOneWayBlockedBy(self, to)) {
+      session->reply(makeResult("contact.request_res", 403, "你已拉黑对方，请先解除",
+                                json::object()));
+    } else {
+      session->reply(makeResult("contact.request_res", 403, "对方未开启添加，请使用其他方式联系",
+                                json::object()));
+    }
+    return;
+  }
   if (contactRepo_->isContact(self, to)) {
     session->reply(makeResult("contact.request_res", 409, "对方已是你的联系人", json::object()));
     return;

@@ -35,7 +35,7 @@
 - **Nginx 反向代理接入**（v2.2 后）：`nginx/im.conf` + compose 第四服务（WebSocket
   升级/90s 超时/每 IP 50 连接）；`X-Forwarded-For` 真实 IP 信任链
   （`IM_TRUSTED_PROXIES`，未配置即忽略防伪造）；过代理 207 用例全量验证。
-- 9 个 CTest 单元测试 + 224 个业务回归用例（内存/Redis 双模式，含断线自愈/整库宕机恢复/消息唯一性防线）。
+- 9 个 CTest 单元测试 + 246 个业务回归用例（内存/Redis 双模式，含断线自愈/整库宕机恢复/唯一性防线/v2.4 拉黑）。
 - 安全加固：offline_ack 上限、clientMsgId 上限、登录洗表防护、TTL 单位修复、
   Redis 级联防护（2026-09-09 / 2026-09-27 两轮审计闭环）。
 
@@ -836,6 +836,16 @@ Message Queue Adapter
 已完成（不再排期）：离线 TTL 清理（含 168 秒单位 bug 修复）、Presence 双后端 + online 字段、
 多端回显与已读同步、Redis 超时/锁外化/批量 MGET、A 区打磨六项（removeMember 校验、
 MySQL 超时、弱断言、迁移幂等、清理告警、heartbeat 文档）。
+
+已完成追加（2026-10-01 v2.4 拉黑功能）：黑名单双向断联（block.add/remove/list；
+拉黑方「你已拉黑对方」/被拉黑方「对方已拒收」分方向 403，被拉黑方好友请求复用
+allowAdd 关文案模糊防探测；群聊不受影响；不追溯；解除不恢复联系人）。实现：
+BlockRepository（单连接+互斥锁+内存缓存+全量加载，含 dbCount/cacheCount/reload
+三件套，纳入 syncCaches 自愈体系第四段）+ app_block.cpp（先写 blocks 主操作再尽力
+联动：删联系人/双向请求置 rejected）+ onSend/onContactRequest 拦截。迁移
+db/migrate_blocks.sql 幂等。20 个 biz 用例（含缓存自愈相位无关双向验证 +
+拉黑优先级 + 拉黑期间不落库 + 历史不动 + 边界 400/409）。246×4 矩阵 +
+ctest 9/9 + 零警告。
 
 已完成追加（2026-09-30 自检四轮，CI 假红根治）：CI 224 中 1 失败（本地 226
 全过）双根因——①user cache 用例相位竞态（"直插后立即发→404"依赖 purge

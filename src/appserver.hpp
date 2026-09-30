@@ -1,5 +1,6 @@
 #pragma once
 
+#include "block_repository.hpp"
 #include "contact_repository.hpp"
 #include "group_repository.hpp"
 #include "message.hpp"
@@ -114,6 +115,10 @@ private:
   void onGroupList(const std::shared_ptr<Session>& session, const json& data);
   void onGroupMembers(const std::shared_ptr<Session>& session, const json& data);
   void onGroupHistory(const std::shared_ptr<Session>& session, const json& data);
+  // v2.4 拉黑（block.add/remove/list；语义见 docs/protocol.md §4）
+  void onBlockAdd(const std::shared_ptr<Session>& session, const json& data);
+  void onBlockRemove(const std::shared_ptr<Session>& session, const json& data);
+  void onBlockList(const std::shared_ptr<Session>& session, const json& data);
   void onGroupSend(const std::shared_ptr<Session>& session, const json& data,
                    const std::string& content, const std::string& clientMsgId);
   // 推送 pending 好友请求（登录/重连后补发）
@@ -131,6 +136,7 @@ private:
   std::unique_ptr<MessageRepository> msgRepo_; // MySQL 消息存储（离线/历史/已读）
   std::unique_ptr<ContactRepository> contactRepo_; // 联系人/请求/设置存储
   std::unique_ptr<GroupRepository> groupRepo_;  // 群/成员/水位线存储
+  std::unique_ptr<BlockRepository> blockRepo_;  // 拉黑存储（v2.4，第四个纳入自愈的缓存）
   std::shared_ptr<PresenceStore> presence_;  // 在线状态标记（内存/Redis 双后端）
   OnlineManager onlineMgr_;
   std::unique_ptr<MsgDedupStore> msgDedup_;    // 消息幂等去重（内存/Redis 双后端）

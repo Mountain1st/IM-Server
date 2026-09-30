@@ -60,6 +60,7 @@ add_executable(imserver
     src/mysql_user_repository.cpp
     src/mysql_message_repository.cpp
     src/contact_repository.cpp
+    src/block_repository.cpp
     src/online_manager.cpp
     src/msg_dedup.cpp
     src/rate_limiter_store.cpp
@@ -69,6 +70,7 @@ add_executable(imserver
     src/app_message.cpp
     src/app_contact.cpp
     src/group_repository.cpp
+    src/app_block.cpp
     src/app_group.cpp
     src/app_settings.cpp
 )

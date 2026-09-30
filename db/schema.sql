@@ -90,3 +90,12 @@ CREATE TABLE IF NOT EXISTS group_members (
   UNIQUE KEY uk_group_user (group_id, user_id),
   KEY idx_user (user_id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS blocks (
+  id         BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+  user_id    BIGINT UNSIGNED NOT NULL,   -- 拉黑方
+  blocked_id BIGINT UNSIGNED NOT NULL,   -- 被拉黑方
+  created_ts BIGINT       NOT NULL,
+  UNIQUE KEY uk_pair (user_id, blocked_id),
+  KEY idx_blocked (blocked_id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;

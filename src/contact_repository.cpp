@@ -122,6 +122,23 @@ void ContactRepository::addSelfContact(int64_t userId) {
   contacts_.emplace(std::to_string(userId) + "|" + std::to_string(userId));
 }
 
+bool ContactRepository::rejectRequestsBetween(int64_t a, int64_t b) {
+  std::lock_guard<std::mutex> lock(mutex_);
+  if (!client_.ok()) return false;
+  int errNo = 0;
+  MYSQL_STMT* stmt = client_.stmtExec(
+      "UPDATE friend_requests SET status = 2 WHERE (from_user = ? AND to_user = ?) "
+      "OR (from_user = ? AND to_user = ?)",
+      {std::to_string(a), std::to_string(b), std::to_string(b), std::to_string(a)},
+      &errNo);
+  if (!stmt) {
+    LOG_E("[mysql] 拉黑联动关闭好友请求失败 errno=" << errNo);
+    return false;
+  }
+  mysql_stmt_close(stmt);
+  return true;
+}
+
 bool ContactRepository::deleteContactPair(int64_t a, int64_t b) {
   std::lock_guard<std::mutex> lock(mutex_);
   if (!client_.ok()) return false;

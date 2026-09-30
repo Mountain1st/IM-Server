@@ -162,6 +162,18 @@ void AppServer::onSend(const std::shared_ptr<Session>& session, const json& data
   // 位于限流之后、自己对话框落库之前：被限流拒绝不触发权限校验；
   // 自己对话框（to==自己）跳过权限，直接落库。
   if (to != session->userId()) {
+    // 拉黑检查（v2.4 双向断联）：优先级最高——即使开着临时对话/是
+    // 联系人也不可达（此时联系人已被拉黑联动删除，双保险）。
+    // 方向性报错：拉黑方提示先解除；被拉黑方提示对方拒收。
+    // 拒绝不落库、不记幂等（与限流拒绝同先例，重试不被误判）
+    if (blockRepo_->isBlockedPair(session->userId(), to)) {
+      if (blockRepo_->isOneWayBlockedBy(session->userId(), to)) {
+        ack(403, "你已拉黑对方，请先解除");
+      } else {
+        ack(403, "对方已拒收");
+      }
+      return;
+    }
     int allowTemp = 0;
     const bool isContact = contactRepo_->isContact(session->userId(), to);
     if (!isContact) {

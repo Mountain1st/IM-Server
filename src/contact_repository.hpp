@@ -38,6 +38,9 @@ public:
   bool requestTime(int64_t from, int64_t to, int64_t* ts);
   // 返回：0=成功拒绝；1=无 pending 请求；2=数据库错误。
   int rejectRequest(int64_t to, int64_t from);
+  // 双向把 a-b 之间的好友请求置 rejected（拉黑联动：清掉残留 pending，
+  // 解除后可重新申请）。失败返回 false（尽力而为语义）
+  bool rejectRequestsBetween(int64_t a, int64_t b);
   // 收到的 pending 请求列表（from_user, created_at 秒）
   struct PendingRequest {
     int64_t fromUser;

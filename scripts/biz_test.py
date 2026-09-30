@@ -609,6 +609,140 @@ def main():
     check("user cache sync heals after row deleted",
           r["type"] == "msg.ack" and r["data"]["code"] == 404)
 
+
+    # ---- v2.4 拉黑（双向断联）----
+    # BL 拉黑 BL2：消息双向 403（文案分方向）、好友请求双向拒（被拉黑方
+    # 文案模糊防探测）、自动删联系人、群聊不受影响、历史不动、解除恢复。
+    # 缓存自愈用相位无关双向验证（照 user cache 模式）
+    BL = base + "34"
+    BL2 = base + "35"
+    bl = WS()
+    r = register(bl, BL, "pw1234", nick="拉黑甲")
+    blid = r["data"]["data"]["userId"]
+    bl2 = WS()
+    r = register(bl2, BL2, "pw1234", nick="拉黑乙")
+    bl2id = r["data"]["data"]["userId"]
+    r = login(bl2, BL2, "pw1234")
+    # 成为好友 + 同群（群须在拉黑前建立：拉黑删联系人后无法邀请）
+    r = login(bl, BL, "pw1234")
+    bl.send(env("contact.request", {"account": BL2}))
+    json.loads(bl.recv())  # request_res
+    json.loads(bl2.recv())  # contact.request 推送
+    bl2.send(env("contact.accept", {"account": BL}))
+    json.loads(bl2.recv())  # accept_res
+    json.loads(bl.recv())  # contact.accepted 推送
+    bl.send(env("group.create", {"name": "拉黑群"}))
+    r = json.loads(bl.recv())
+    blgid = r["data"]["data"]["groupId"]
+    bl.send(env("group.invite", {"groupId": blgid, "account": BL2}))
+    json.loads(bl.recv())  # invite_res
+    json.loads(bl2.recv())  # group.added 推送
+    json.loads(bl.recv())  # member_changed 推送
+    # 基线：BL2→BL 消息正常
+    r = send_msg(bl2, BL, "before-block", "bb-1")
+    check("block baseline send ok", r["data"]["code"] == 0)
+    json.loads(bl.recv())  # bl 消费 msg.recv
+    # 拉黑
+    bl.send(env("block.add", {"account": BL2}))
+    r = json.loads(bl.recv())
+    check("block add ok", r["type"] == "block.add_res" and r["data"]["code"] == 0)
+    # 拉黑方发：你已拉黑对方
+    r = send_msg(bl, BL2, "blocked-try", "bb-2")
+    check("blocker send 403", r["data"]["code"] == 403)
+    # 被拉黑方发：对方已拒收（BL2 默认 allow_temp=1——403 即优先级证明）
+    r = send_msg(bl2, BL, "blocked-try2", "bb-3")
+    check("blocked send 403", r["data"]["code"] == 403)
+    # 被拉黑方请求：模糊文案防探测（与 allowAdd 关同码同文案）
+    bl2.send(env("contact.request", {"account": BL}))
+    r = json.loads(bl2.recv())
+    check("blocked request rejected fuzzy",
+          r["type"] == "contact.request_res" and r["data"]["code"] == 403)
+    # 拉黑方请求：你已拉黑对方
+    bl.send(env("contact.request", {"account": BL2}))
+    r = json.loads(bl.recv())
+    check("blocker request 403", r["data"]["code"] == 403)
+    # 自动删联系人：双方列表均无对方
+    bl.send(env("contact.list", {}))
+    r = json.loads(bl.recv())
+    bl_accounts = [x["account"] for x in r["data"]["data"]["contacts"]]
+    check("blocker contact list has no blocked",
+          BL2 not in bl_accounts and BL in bl_accounts)
+    bl2.send(env("contact.list", {}))
+    r = json.loads(bl2.recv())
+    bl2_accounts = [x["account"] for x in r["data"]["data"]["contacts"]]
+    check("blocked contact list has no blocker", BL not in bl2_accounts)
+    # block.list
+    bl.send(env("block.list", {}))
+    r = json.loads(bl.recv())
+    blocks = r["data"]["data"]["blocks"]
+    check("block list has entry",
+          r["type"] == "block.list_res" and r["data"]["code"] == 0
+          and len(blocks) == 1 and blocks[0]["account"] == BL2
+          and blocks[0]["username"] == "拉黑乙")
+    # 群聊不受影响：BL2 群发言 BL 照常收到
+    bl.send(env("msg.send", {"to": blgid, "content": "group-while-blocked",
+                             "chatType": "group", "clientMsgId": "bb-4"}))
+    r = json.loads(bl.recv())
+    check("block group send ok", r["data"]["code"] == 0)
+    json.loads(bl2.recv())  # bl2 收群推送
+    # 拉黑期间不落库
+    nblk = sql_q("SELECT COUNT(*) FROM messages WHERE from_user=%d AND to_user=%d"
+                 % (bl2id, blid))
+    check("blocked send not persisted", nblk == "1")  # 仅拉黑前 bb-1 一条
+    # 历史不动：拉黑前消息照常可查
+    bl.send(env("chat.history", {"to": BL2}))
+    r = json.loads(bl.recv())
+    hist = [m["content"] for m in r["data"]["data"]["msgs"]]
+    check("history untouched by block", "before-block" in hist)
+    # 边界：拉黑自己 400 / 重复 409 / 解除未拉黑 409
+    bl.send(env("block.add", {"account": BL}))
+    r = json.loads(bl.recv())
+    check("block self 400", r["data"]["code"] == 400)
+    bl.send(env("block.add", {"account": BL2}))
+    r = json.loads(bl.recv())
+    check("block dup 409", r["data"]["code"] == 409)
+    # 解除
+    bl.send(env("block.remove", {"account": BL2}))
+    r = json.loads(bl.recv())
+    check("block remove ok", r["type"] == "block.remove_res" and r["data"]["code"] == 0)
+    bl.send(env("block.remove", {"account": BL2}))
+    r = json.loads(bl.recv())
+    check("block remove again 409", r["data"]["code"] == 409)
+    # 解除后通信恢复（非好友 + BL2 默认临时对话开 → 0）
+    r = send_msg(bl2, BL, "after-unblock", "bb-5")
+    check("unblock send restored", r["data"]["code"] == 0)
+    json.loads(bl.recv())
+    # 解除不恢复联系人：可重新申请
+    bl.send(env("contact.request", {"account": BL2}))
+    r = json.loads(bl.recv())
+    check("unblock request can re-initiate", r["data"]["code"] == 0)
+    json.loads(bl2.recv())  # bl2 消费 request 推送
+    bl.close(); bl2.close()
+
+    # 拉黑缓存自愈（相位无关双向，照 user cache 模式）：
+    # 直插 blocks 行 + 等 sync → 403（生效）；直删行 + 等 sync → 0（自愈）
+    BL3 = base + "36"
+    BL4 = base + "37"
+    bl3 = WS()
+    r = register(bl3, BL3, "pw1234", nick="黑丙")
+    bl3id = r["data"]["data"]["userId"]
+    bl4 = WS()
+    r = register(bl4, BL4, "pw1234", nick="黑丁")
+    bl4id = r["data"]["data"]["userId"]
+    r = login(bl3, BL3, "pw1234")
+    sql_q("INSERT INTO blocks (user_id, blocked_id, created_ts) VALUES (%d, %d, %d)"
+          % (bl3id, bl4id, int(time.time())))
+    time.sleep(3)  # 等一轮缓存比对
+    r = send_msg(bl3, BL4, "heal-probe-1", "bh-1")
+    check("block cache sync picks up inserted row",
+          r["data"]["code"] == 403)
+    sql_q("DELETE FROM blocks WHERE user_id=%d AND blocked_id=%d" % (bl3id, bl4id))
+    time.sleep(3)  # 再等一轮
+    r = send_msg(bl3, BL4, "heal-probe-2", "bh-2")
+    check("block cache sync heals after row deleted",
+          r["data"]["code"] == 0)
+    bl3.close(); bl4.close()
+
     # 唯一性防线：messages.message_id 唯一索引——自愈 INSERT 重试
     # （连接断时语句可能已执行）撞键被拒，绝不产生重复消息
     import subprocess as dup_probe
@@ -1107,7 +1241,7 @@ def main():
           and r["data"]["code"] == 0)
     gid2 = r["data"]["data"]["groupId"]
     # 11 位合规账号：base(9 位)+2 位后缀，跳过已用后缀避免冲突
-    cap_block = {"10", "11", "12", "13", "14", "15", "31", "32", "33", "50", "60", "61", "77"}
+    cap_block = {"10", "11", "12", "13", "14", "15", "31", "32", "33", "34", "35", "36", "37", "50", "60", "61", "77"}
     cap_accounts = []
     n = 16
     while len(cap_accounts) < 49:
@@ -1403,7 +1537,7 @@ def main():
     import subprocess
     used = [A, B, C, SINK, SPAM, SINK2, SPAM2, D, E, F, G, H, base + "50", G1, G2,
             M1, M2, M3, M4] \
-        + cap_accounts + [OVER, X, Y, Z]
+        + cap_accounts + [OVER, X, Y, Z, BL, BL2, BL3, BL4]
     inlist = ",".join("'%s'" % x for x in used)
     # 群表清理必须在 users 删除之前（按 account 查 user_id，无级联外键）
     subprocess.run(["bash", "-c",
@@ -1418,7 +1552,10 @@ def main():
         "USE IMS_reactor_db; "
         "DELETE m FROM messages m JOIN users u ON m.from_user=u.id OR m.to_user=u.id "
         "WHERE u.account IN (%s); "
-        "DELETE FROM users WHERE account IN (%s);\" 2>/dev/null" % (MYSQL_PWD_ENV, MYSQL_PORT_ENV, inlist, inlist)],
+        "DELETE FROM blocks WHERE user_id IN (SELECT id FROM users WHERE account IN (%s)) "
+        "OR blocked_id IN (SELECT id FROM users WHERE account IN (%s)); "
+        "DELETE FROM users WHERE account IN (%s);\" 2>/dev/null"
+        % (MYSQL_PWD_ENV, MYSQL_PORT_ENV, inlist, inlist, inlist, inlist)],
         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
     fails = [n for n, c in results if not c]

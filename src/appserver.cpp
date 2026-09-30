@@ -153,6 +153,9 @@ AppServer::AppServer(uint16_t port, size_t ioThreads, size_t workThreads, size_t
       groupRepo_(std::make_unique<GroupRepository>(
           userConfig.mysqlHost, userConfig.mysqlPort, userConfig.mysqlUser,
           userConfig.mysqlPassword, userConfig.mysqlDb)),
+      blockRepo_(std::make_unique<BlockRepository>(
+          userConfig.mysqlHost, userConfig.mysqlPort, userConfig.mysqlUser,
+          userConfig.mysqlPassword, userConfig.mysqlDb)),
       presence_(makePresenceStore(redisConfig)),
       onlineMgr_(presence_),
       msgDedup_(makeMsgDedup(redisConfig)),
@@ -172,6 +175,11 @@ AppServer::AppServer(uint16_t port, size_t ioThreads, size_t workThreads, size_t
   if (!groupRepo_->ok()) {
     throw std::runtime_error("群存储连接失败: " + groupRepo_->errStr());
   }
+  if (!blockRepo_->ok()) {
+    throw std::runtime_error("拉黑存储连接失败: " + blockRepo_->errStr());
+  }
+  LOG_I("[db] 拉黑存储: MySQL (host=" << userConfig.mysqlHost << ":"
+        << userConfig.mysqlPort << ", db=" << userConfig.mysqlDb << ")");
   LOG_I("[db] 群存储: MySQL (host=" << userConfig.mysqlHost << ":"
         << userConfig.mysqlPort << ", db=" << userConfig.mysqlDb << ")");
   // 离线 TTL 清理间隔（秒）：环境变量可覆盖（测试用小值），非法值回退默认
@@ -228,6 +236,9 @@ void AppServer::buildRoutes() {
     {"group.list", &AppServer::onGroupList},
     {"group.members", &AppServer::onGroupMembers},
     {"group.history", &AppServer::onGroupHistory},
+    {"block.add", &AppServer::onBlockAdd},
+    {"block.remove", &AppServer::onBlockRemove},
+    {"block.list", &AppServer::onBlockList},
   };
 }
 
@@ -290,6 +301,17 @@ void AppServer::syncCaches() {
       LOG_I("[cache] 群成员缓存计数漂移（库 " << dbM << " / 缓存 " << cachedM
             << "），触发重建");
       groupRepo_->reloadMembersCache();
+    }
+  }
+  // 拉黑缓存（v2.4 第四段：与其他三缓存同构；拉黑是安全语义，
+  // 直改库漂移不及时自愈会让本该拦截的消息放行）
+  size_t dbB = 0;
+  if (blockRepo_->dbBlockCount(&dbB)) {
+    const size_t cachedB = blockRepo_->cacheBlockCount();
+    if (dbB != cachedB) {
+      LOG_I("[cache] 拉黑缓存计数漂移（库 " << dbB << " / 缓存 " << cachedB
+            << "），触发重建");
+      blockRepo_->reloadBlocksCache();
     }
   }
   // 用户 id 缓存（2026-09-30 自检三轮 B3 补齐——此前用户缓存是唯一
