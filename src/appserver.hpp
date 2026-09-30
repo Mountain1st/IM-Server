@@ -18,6 +18,7 @@
 #include <cstdint>
 #include <memory>
 #include <mutex>
+#include <random>
 #include <string>
 #include <thread>
 #include <unordered_map>
@@ -135,7 +136,10 @@ private:
   std::unique_ptr<MsgDedupStore> msgDedup_;    // 消息幂等去重（内存/Redis 双后端）
   std::unique_ptr<RateLimiterStore> msgLimiter_; // msg.send 限流（内存/Redis 双后端）
   std::unique_ptr<RateLimiterStore> queryLimiter_; // 重查询限流（history/members；Redis 键前缀 qrate: 独立额度桶）
-  std::atomic<uint64_t> msgSeq_{0}; // 全局消息序列（生成 messageId）
+  // 全局消息序列（生成 messageId）。起点随机化（构造播种）：id 格式为
+  // <秒级时间戳>-<seq>，若固定从 1 起，同秒内重启前后会生成相同 id
+  //（撞唯一键丢消息）；随机起点把该窗口概率降到约百万分之一
+  std::atomic<uint64_t> msgSeq_{1000000 + std::random_device{}() % 1000000};
   // 离线 TTL 清理线程（间隔秒由 IM_OFFLINE_PURGE_INTERVAL 覆盖，缺省 1800）
   int purgeIntervalSec_ = config::kOfflinePurgeIntervalSec;
   int msgRetentionDays_ = config::kMsgRetentionDays; // 已消费消息保留天数；0=不清理

@@ -582,6 +582,20 @@ def main():
     cx.close()
     cy.close()
 
+    # 唯一性防线：messages.message_id 唯一索引——自愈 INSERT 重试
+    # （连接断时语句可能已执行）撞键被拒，绝不产生重复消息
+    import subprocess as dup_probe
+    mid = sql_q("SELECT message_id FROM messages LIMIT 1")
+    dup_rc = dup_probe.run(
+        ["bash", "-c",
+         "MYSQL_PWD=%s mysql -u IMS_jack -h 127.0.0.1 -e \""
+         "USE IMS_reactor_db; INSERT INTO messages (message_id, from_user, to_user,"
+         " content, ts, client_msg_id, chat_type, group_id, status)"
+         " SELECT message_id, from_user, to_user, 'dup-probe', 1, '', 'single', 0, 0"
+         " FROM messages WHERE message_id='%s';\"" % (MYSQL_PWD_ENV, mid)],
+        capture_output=True, text=True)
+    check("message_id unique rejects duplicate insert", dup_rc.returncode != 0)
+
     # 可靠性：MySQL 连接被服务端踢掉后自动重连自愈。
     # 场景来自生产（2026-09-29）：闲置 19 小时 > wait_timeout(8h)，服务端
     # 踢连接（errno 4031/2006），单连接无自愈导致登录全挂直到重启。
