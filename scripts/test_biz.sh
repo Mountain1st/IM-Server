@@ -13,6 +13,9 @@ SRV=$!
 
 cleanup() {
   kill $SRV 2>/dev/null
+  # 优雅停机（看门狗 15s 兜底）后仍存活的进程强杀（ASan 构建的 LSan
+  # atexit 曾出现卡死不退的顽固进程——2026-09-30 实测；生产为普通构建不受影响）
+  ( sleep 18; kill -9 $SRV 2>/dev/null ) &
   # 测试账号清理由 biz_test.py 末尾精确执行（删除本次注册账号及关联消息）；
   # 此处仅兜底清理历史遗留的旧格式测试账号（字母前缀，现行规则下不可能再产生）
   MYSQL_PWD="$IM_MYSQL_PASSWORD" mysql -u "$IM_MYSQL_USER" -h "$IM_MYSQL_HOST" \
