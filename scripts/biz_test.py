@@ -440,8 +440,13 @@ def main():
     # 非法 base64 → 400
     r = send_msg(pim, QIMG, "not-valid-base64!!!", "img-bad-1", msg_type="image")
     check("image bad base64 400", r["type"] == "msg.ack" and r["data"]["code"] == 400)
-    # 超频：10 张/分钟（img-ok-1 已占 1 个额度，再发 9 张占满，第 10 张 → 429）
-    for i in range(9):
+    # 有效 base64 但非图片内容 → 400（解码校验拒绝，不落盘）
+    r = send_msg(pim, QIMG, base64.b64encode(b"hello world").decode(),
+                 "img-bad-2", msg_type="image")
+    check("image bad content 400", r["type"] == "msg.ack" and r["data"]["code"] == 400)
+    # 超频：10 张/分钟（img-ok-1 成功与 img-bad-2 解码失败各占 1 个额度，
+    # 解码失败同样先过限流桶；再发 8 张占满，第 11 次 → 429）
+    for i in range(8):
         r = send_msg(pim, QIMG, PNG_1X1_B64, "img-flood-%d" % i, msg_type="image")
         assert r["data"]["code"] == 0, r
         json.loads(qim.recv())  # 消费投递，防队列污染

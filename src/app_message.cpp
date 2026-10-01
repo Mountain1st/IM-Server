@@ -1,11 +1,13 @@
 // ============================================================
 // 业务域：消息收发核心（msg.* / chat.*）——服务端最热路径
 // - onSend：单聊/群聊统一入口。处理顺序（有依赖，勿调整）：
-//   msgType 白名单（text/image，兼容 msg_type）→ image 走图片分支
+//   msgType 白名单（text/image，兼容 msg_type，非字符串 400）→ 幂等查询
+//   （窗口内同 clientMsgId 直接回 ack 0；空 id 跳过；不消耗限流额度，
+//   图片重发不重复限流/落盘）→ image 走图片分支
 //   （1.5MB 上限 413 → base64 合法 400 → 图片独立限流 429 → 并发闸 2 →
 //   解码落盘 400，content 换 URL 后并入下述 text 流程；ack 不带 msg_type）
-//   参数校验 → 幂等查询（窗口内同 clientMsgId 直接回 ack 0，不消耗限流额度）
-//   → 限流（30 条/10s；空 clientMsgId 更严 5 条）→ 权限校验
+//   → 参数校验（to 解析）→ 限流（30 条/10s；空 clientMsgId 更严 5 条）
+//   → 权限校验
 //   （自己对话框跳过 / 联系人 / allow_temp_chat 临时对话，否则 403）
 //   → 落库（持久化，重启不丢）→ 投递（在线）或记 pending（离线）
 //   → 多端回显（发送者其他在线端，v2.2）
@@ -99,11 +101,14 @@ void AppServer::pushOfflineMessages(int64_t userId,
 
 void AppServer::onSend(const std::shared_ptr<Session>& session, const json& data) {
   // 统一发送入口（单聊）。处理顺序（顺序有依赖，勿调整）：
-  //   1 参数/内容长度校验 → 2 to 解析（账号/兼容数字 userId/0=自己）
-  //   3 幂等查询（窗口内同 clientMsgId 直接回 ack 0——放在限流前，
-  //     合法重试不消耗配额且不受权限状态影响）
-  //   4 限流（30 条/10s；空 id 更严 5 条；被拒不记幂等防误判）
-  //   5 权限校验（to==自己跳过；联系人；allow_temp_chat）
+  //   0 msgType 白名单（非字符串/白名单外 400）→ 1 幂等查询（窗口内同
+  //     clientMsgId 直接回 ack 0——放在图片限流/解码与发送限流之前，
+  //     合法重试不消耗配额、不重复落盘，且不受权限状态影响；空 id 跳过）
+  //   2 图片分支（空/超 1.5MB 判 413 → base64 合法 400 → 图片限流 429 →
+  //     并发闸解码落盘 400，content 换 URL 后并入文本流程）/ 文本内容校验
+  //   3 to 解析（账号/兼容数字 userId/0=自己）→ 4 发送限流（30 条/10s；
+  //     空 id 更严 5 条；被拒不记幂等防误判）→ 5 权限校验
+  //     （to==自己跳过；联系人；allow_temp_chat）
   //   6 落库 → 7 在线投递/离线记 pending → 8 多端回显（v2.2）
   // chatType=group 时分流 onGroupSend（幂等/限流已完成）
   std::string content = data.value("content", "");
@@ -127,16 +132,33 @@ void AppServer::onSend(const std::shared_ptr<Session>& session, const json& data
     ack(400, "封包格式错误");
     return;
   }
-  // 消息类型：缺省 "text"；兼容旧字段名 "msg_type"；白名单外直接 400。
+  // 消息类型：缺省 "text"；兼容旧字段名 "msg_type"；非字符串类型
+  // （如数字）与白名单外一律 400，不静默当 text。
   // ack 不带 msg_type（协议约定，客户端以发送上下文区分）。
   std::string msgType = "text";
-  if (data.contains("msgType") && data["msgType"].is_string()) {
+  if (data.contains("msgType")) {
+    if (!data["msgType"].is_string()) {
+      ack(400, "参数错误");
+      return;
+    }
     msgType = data["msgType"].get<std::string>();
-  } else if (data.contains("msg_type") && data["msg_type"].is_string()) {
+  } else if (data.contains("msg_type")) {
+    if (!data["msg_type"].is_string()) {
+      ack(400, "参数错误");
+      return;
+    }
     msgType = data["msg_type"].get<std::string>();
   }
   if (msgType != "text" && msgType != "image") {
     ack(400, "参数错误");
+    return;
+  }
+  // 幂等查询（只查不记）：窗口内已处理过 → 直接回执成功、不再投递。
+  // 放在 msgType 分流之后、图片限流/解码之前：合法重试不消耗图片配额、
+  // 不产生孤儿文件；同样在文本限流之前，合法重试不消耗发送配额；
+  // 且不受权限状态影响（重发恒回 ack 0）。空 clientMsgId 跳过（不参与去重）。
+  if (!clientMsgId.empty() && msgDedup_->isDuplicate(session->userId(), clientMsgId)) {
+    ack(0, "ok");
     return;
   }
   if (msgType == "image") {
@@ -184,7 +206,7 @@ void AppServer::onSend(const std::shared_ptr<Session>& session, const json& data
       }
       url = *stored;
     }
-    // 内容替换为落盘 URL 后走原幂等/落库/投递路径（64KB 文本上限不再适用）
+    // 内容替换为落盘 URL 后走落库/投递路径（64KB 文本上限不再适用）
     content = url;
   } else if (content.empty()) {
     ack(400, "参数错误");
@@ -205,12 +227,6 @@ void AppServer::onSend(const std::shared_ptr<Session>& session, const json& data
   }
   if (to == -3) {
     ack(500, "服务器内部错误");
-    return;
-  }
-  // 幂等查询（只查不记）：窗口内已处理过 → 直接回执成功、不再投递。
-  // 放在限流之前，使合法重试不消耗发送配额；且不受权限状态影响（重发恒回 ack 0）。
-  if (msgDedup_->isDuplicate(session->userId(), clientMsgId)) {
-    ack(0, "ok");
     return;
   }
   // 消息发送限流：空 clientMsgId 不参与去重，走更严限制，遏制无 id 刷消息。
