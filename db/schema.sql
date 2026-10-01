@@ -38,6 +38,7 @@ CREATE TABLE IF NOT EXISTS messages (
   client_msg_id VARCHAR(64)  NOT NULL DEFAULT '',
   chat_type     VARCHAR(16)  NOT NULL DEFAULT 'single',
   msg_type      VARCHAR(16)  NOT NULL DEFAULT 'text', -- 消息类型：text=文本，image=图片路径
+  media_id      BIGINT UNSIGNED NULL,            -- 关联 media.id（图片消息，NULL=无媒体）
   group_id      BIGINT UNSIGNED NOT NULL DEFAULT 0,
   status        TINYINT      NOT NULL DEFAULT 0,
   delivered_ts  BIGINT       NOT NULL DEFAULT 0,
@@ -47,7 +48,8 @@ CREATE TABLE IF NOT EXISTS messages (
   -- 全局唯一（数据库级强制）：防自愈重试双插（连接断时 INSERT 可能已
   -- 执行，重试会撞唯一键被拒——宁可拒也不允许重复消息进离线/历史）
   UNIQUE KEY idx_message_id (message_id),
-  KEY idx_group_ts (group_id, ts)
+  KEY idx_group_ts (group_id, ts),
+  KEY idx_media (media_id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 -- 联系人关系表（双向各一条，删除时删两条）
@@ -99,4 +101,25 @@ CREATE TABLE IF NOT EXISTS blocks (
   created_ts BIGINT       NOT NULL,
   UNIQUE KEY uk_pair (user_id, blocked_id),
   KEY idx_blocked (blocked_id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- 媒体表：对象存储引用与元数据（与 db/migrate_media.sql 同定义）
+CREATE TABLE IF NOT EXISTS media (
+  id            BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+  file_id       CHAR(32)     NOT NULL,
+  uploader_id   BIGINT UNSIGNED NOT NULL,
+  object_key    VARCHAR(255) NOT NULL,
+  file_name     VARCHAR(255) NOT NULL,
+  mime_type     VARCHAR(64)  NOT NULL,
+  file_size     BIGINT UNSIGNED NOT NULL DEFAULT 0,
+  width         INT          NOT NULL DEFAULT 0,
+  height        INT          NOT NULL DEFAULT 0,
+  duration      INT          NOT NULL DEFAULT 0,
+  thumb_key     VARCHAR(255) NOT NULL DEFAULT '',
+  status        TINYINT      NOT NULL DEFAULT 0,  -- 0=PENDING 1=UPLOADED 2=COMMITTED 3=GC
+  created_at    BIGINT       NOT NULL DEFAULT 0,
+  UNIQUE KEY uk_file_id (file_id),
+  UNIQUE KEY uk_object_key (object_key),
+  KEY idx_uploader (uploader_id),
+  KEY idx_status_created (status, created_at)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
