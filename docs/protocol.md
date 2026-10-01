@@ -99,7 +99,7 @@
 | `auth.login` | `{ "account": "...", "password": "..." }` | 用登录账号登录，成功回 `auth.login_res`（携带 token） |
 | `auth.token` | `{ "token": "..." }` | 免密重连：用上次登录的 token 恢复登录态，成功回 `auth.token_res` |
 | `auth.logout` | `{}` | 主动登出，回 `auth.logout_res` |
-| `msg.send` | `{ "to": "<account>", "content": "...", "clientMsgId": "uuid", "chatType": "single" }` | 发送单聊消息（`to` 为目标登录账号，v1.7；兼容旧协议传数字 `userId`），回 `msg.ack`；消息持久化到 MySQL |
+| `msg.send` | `{ "to": "<account>", "content": "...", "clientMsgId": "uuid", "chatType": "single", "msgType": "text" }` | 发送单聊消息（`to` 为目标登录账号，v1.7；兼容旧协议传数字 `userId`），回 `msg.ack`；消息持久化到 MySQL；`msgType` 为 `"text"`（默认）或 `"image"`（图片，见图片消息约束） |
 | `chat.create` | `{ "account": "登录账号" }` | 新建对话：按 account 查找目标用户，存在回其 account 与昵称；不存在回 404 |
 | `msg.offline_ack` | `{ "messageIds": ["...", ...] }` | 客户端确认已收到 `msg.offline` 中的消息，服务端标记为已投递（确认后不再补发）；回 `msg.offline_ack_res` |
 | `chat.history` | `{ "to": "<account>", "limit": 50(可选) }` | 拉取与目标用户的单聊历史（`to` 为目标登录账号，v1.7；兼容旧协议传数字 `userId`），按 ts 倒序，最新在前，默认 50 条，上限 200；回 `chat.history_res` |
@@ -141,6 +141,7 @@
 - `msg.send` 的 `to` 权限校验（v1.8）：`to` 为**自己账号** 或 **自己的联系人** 或 **目标开启临时对话（`allowTempChat=1`）** 时才能发送；否则回 `403 对方未开启临时对话，请先添加联系人` 且**不落库**
 - **三开关（v1.8）**：`allowTempChat`（是否允许非联系人给自己发临时对话）、`searchable`（是否可被 `user.search` 搜索到）、`allowAdd`（是否可被添加为联系人）；三者**默认全开**；`allowTempChat=0` 时非联系人发送被 403 拒绝；`searchable=0` 时搜索结果不返回该用户；`allowAdd=0` 时对方 `contact.request` 回 `403 对方未开启添加，请使用其他方式联系`
 - `msg.send` 的 `chatType` 可选，缺省 `"single"`；**`single` 时 `to` 为目标登录账号 `account`**（单聊权限与落库规则见上）；**`group` 时 `to` 为数字 `groupId`（整数必填）**：群不存在回 `404 群不存在`，非群成员回 `403 非群成员`，`to` 缺失/非整数回 `400 参数错误`；其他 `chatType` 值回 `400 封包格式错误`；**群发送同样校验内容**：空消息回 `400 参数错误`，超 64KB 回 `413 消息内容超长（超过64KB）`
+- **图片消息（`msgType: "image"`，单聊/群聊同规则）**：`msgType` 仅 `"text"`（默认，可缺省）/`"image"`，其他值回 `400 参数错误`；`msg.ack` 不带 `msgType`。`image` 时 `content` 为图片 base64（信封上限 **1.5MB**，超限回 `413 图片过大`；非法 base64/非 PNG-JPEG-GIF-WebP/维度任一边超 4096/SVG 均回 `400 参数错误`，日志只记大小与类型不打字节）；成功后 `content` 替换为服务端落盘 URL `/uploads/<hex>.<ext>`（HMAC-SHA256 内容寻址对象键，tmp+fsync+rename 原子落盘）再走原幂等/落库/投递路径，`msg.recv`/`msg.offline`/`chat.history_res`/`group.history_res` 透传 `msgType: "image"` 与该 URL。**双重限流**：通用发送限流（带 clientMsgId 30 条/10 秒、空 id 5 条/10 秒）与图片限流（**按用户** 10 张/分钟，超限回 `429 图片发送过于频繁`）同时生效；解码落盘受**并发闸 2** 保护（同时最多 2 路解码）。落盘文件保留 7 天（mtime），过期由后台 GC 删除（只删命名模式常规文件，跳过 symlink/`*.tmp`），过期后 URL 访问即 **404**；静态服务经 Nginx `location /uploads/` 只读 alias，`Cache-Control: public, max-age=86400`（**max-age 1 天**）
 - **群聊约束（v1.9）**：`group.create` 的 `name` 非空且长度 ≤ 32，否则 `400 参数错误`；`group.invite` 仅群主可拉人（非群主 `403 仅群主可拉人`），被拉人须是邀请人的联系人（否则 `409 对方不是你的联系人`），已在群 `409 对方已在群中`，群满（50 人，含群主）`403 群已满`，群不存在 / 目标不存在各回 `404 群不存在` / `404 目标用户不存在`，`groupId` 缺失或非整数 `400 参数错误`；`group.leave` 群主不能退群（`403 群主不能退群`），非成员退群 `403 非群成员`，群不存在 `404 群不存在`；`group.members` / `group.history` 非（曾）成员 `403 非群成员`；群消息**不做已读**（无群已读回执，`msg.read` 仅限单聊视图）
 - **群管理（v2.0）**：`group.kick/transfer/dissolve/rename/announce` 仅群主可操作（非群主 `403 仅群主可操作`）；`groupId` 缺失/非整数 `400 参数错误`，群不存在 `404 群不存在`；已解散群操作（除 `group.history`）回 `404 群已解散`；`group.kick` 不能踢群主本人（`409 不能踢群主`）、目标不存在 `404 目标用户不存在`、非成员 `409 目标非群成员`；`group.transfer` 只能转给现群成员（`409 不能转让给自己` / `409 目标非群成员`），原群主变为普通成员；`group.rename` 的 `name` 非空且长度 ≤ 32（同建群，否则 `400 参数错误`）；`group.announce` 的 `content` ≤ 1024 字节（超限 `413 消息内容超长`），空=清空；被踢可被重新拉入，重入后仅看新窗口历史（与退群一致）
 - **群存储与补发（v1.9）**：群消息单行存储（`to_user=0, group_id=G`）；在线成员直接收 `msg.recv`（发送者不回显），离线成员按水位线在登录/重连时经 `msg.offline` 合并补发（补发同样不含发送者自己发的消息）；`chat.history` / `msg.read` 单聊视图均加群隔离（`group_id=0`），群消息不混入单聊
@@ -359,7 +360,9 @@ docker compose up -d --build
 - `mysql_data` / `redis_data` 命名卷持久化数据
 - `docker compose` 启用 Redis（`IM_REDIS_ENABLED=1`），token 免密重连跨容器重启不失效
 - **nginx**（`nginx/im.conf`，8080 反代 9191）：WebSocket 升级头、90s 读超时、
-  每真实 IP 50 连接限流、`X-Forwarded-For` 传递；TLS/域名见 `docs/nginx-deploy.md`
+  每真实 IP 50 连接限流、`X-Forwarded-For` 传递；`location /uploads/` 只读服务
+  落盘图片（alias 命名卷，`expires 1d` + `max-age=86400`，过期文件访问即 404）；
+  TLS/域名见 `docs/nginx-deploy.md`
 
 ### 10.4 云服务器部署（以阿里云 2 核 2G 为例）
 
