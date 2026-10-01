@@ -19,6 +19,27 @@ TEST(sigv4_presign_get_deterministic) {
   CHECK_EQ(url, sigV4Presign(cfg, req));
 }
 
+TEST(sigv4_known_answer) {
+  // KAT：固定输入写死完整签名 URL，防止 canonical request 组装错误仍自洽通过。
+  // 常量由 AWS SigV4 规范用 Python3 hashlib/hmac 独立复算，与 C++ 输出逐字节一致。
+  SigV4Config cfg{"minio.example.com", "us-east-1", "mybucket",
+                  "AKIAIOSFODNN7EXAMPLE",
+                  "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY", true, "http"};
+  SigV4Request req{"GET", "media/1001/2026/10/test.png",
+                   /*amzDate=*/"20261001T120000Z", /*expiresSec=*/900};
+  const std::string expected =
+      "http://minio.example.com/mybucket/media/1001/2026/10/test.png"
+      "?X-Amz-Algorithm=AWS4-HMAC-SHA256"
+      "&X-Amz-Credential=AKIAIOSFODNN7EXAMPLE%2F20261001%2Fus-east-1"
+      "%2Fs3%2Faws4_request"
+      "&X-Amz-Date=20261001T120000Z"
+      "&X-Amz-Expires=900"
+      "&X-Amz-SignedHeaders=host"
+      "&X-Amz-Signature="
+      "797897c96c275d3e7e7ec179fe8a93715849fac10669808b875d24776047c66b";
+  CHECK_EQ(sigV4Presign(cfg, req), expected);
+}
+
 TEST(sigv4_utf8_key_encoding) {
   SigV4Config cfg{"h", "us-east-1", "b", "AK", "SK", true};
   SigV4Request req{"PUT", "media/1001/相册 图.jpg", "20261001T120000Z", 900};
@@ -43,11 +64,33 @@ TEST(sigv4_expires_overflow_rejected) {
   CHECK(sigV4Presign(cfg, req).empty());
 }
 
+TEST(sigv4_expires_zero_rejected) {
+  SigV4Config cfg{"h", "us-east-1", "b", "AK", "SK", true};
+  SigV4Request req{"GET", "k", "20261001T120000Z", 0}; // 下界 0 拒绝
+  CHECK(sigV4Presign(cfg, req).empty());
+}
+
+TEST(sigv4_invalid_method_rejected) {
+  SigV4Config cfg{"h", "us-east-1", "b", "AK", "SK", true};
+  SigV4Request req{"POST", "k", "20261001T120000Z", 900}; // 仅支持 GET/PUT/HEAD/DELETE
+  CHECK(sigV4Presign(cfg, req).empty());
+}
+
+TEST(sigv4_empty_secret_rejected) {
+  SigV4Config cfg{"h", "us-east-1", "b", "AK", "", true}; // 空 secretKey
+  SigV4Request req{"GET", "k", "20261001T120000Z", 900};
+  CHECK(sigV4Presign(cfg, req).empty());
+}
+
 int main() {
   RUN(sigv4_presign_get_deterministic);
+  RUN(sigv4_known_answer);
   RUN(sigv4_utf8_key_encoding);
   RUN(sigv4_scope_and_host);
   RUN(sigv4_expires_overflow_rejected);
+  RUN(sigv4_expires_zero_rejected);
+  RUN(sigv4_invalid_method_rejected);
+  RUN(sigv4_empty_secret_rejected);
   std::printf("sigv4_test: %d failures\n", g_failures);
   return g_failures == 0 ? 0 : 1;
 }
