@@ -1,6 +1,6 @@
 // ============================================================
 // util：通用工具（协议层支撑）
-// - PBKDF2-SHA256（OpenSSL，迭代 10 万次）+ 恒定时间比较（防时序侧信道）
+// - PBKDF2-SHA256（本文件手写 SHA256/HMAC-SHA256 实现，不依赖 OpenSSL）+ 恒定时间比较（防时序侧信道）
 // - 随机 token 生成（256 位熵）与摘取
 // - validAccount/validPassword：注册参数格式校验
 // - blockStopSignals：工作线程屏蔽 SIGINT/SIGTERM（信号归主线程）
