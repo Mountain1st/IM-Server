@@ -59,6 +59,7 @@ add_executable(imserver
     src/mysql_client.cpp
     src/mysql_user_repository.cpp
     src/mysql_message_repository.cpp
+    src/mysql_media_repository.cpp
     src/contact_repository.cpp
     src/block_repository.cpp
     src/online_manager.cpp
