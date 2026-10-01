@@ -110,6 +110,23 @@ inline constexpr std::chrono::seconds kLockWindow(60);
 inline constexpr int64_t kMediaRetentionSec = 7 * 24 * 3600;
 // 媒体 GC 两次执行的最短间隔（秒，默认 24 小时；环境变量 IM_MEDIA_GC_INTERVAL_SEC 可覆盖，测试用小值）
 inline constexpr int kMediaGcIntervalSec = 24 * 3600;
+
+// ---- 媒体（对象存储预签名直传，V1 仅图片） ----
+// 文件名长度上限（与 media.file_name 列宽对齐）
+inline constexpr size_t kMediaFileNameMaxLen = 255;
+// 单文件大小上限 20MB
+inline constexpr size_t kMediaSizeMaxBytes = 20 * 1024 * 1024;
+// PUT 预签名有效期 15 分钟
+inline constexpr int64_t kMediaPutTtlSec = 900;
+// GET 预签名有效期 60 分钟
+inline constexpr int64_t kMediaGetTtlSec = 3600;
+// presign 限流窗口（60 秒）与窗口内每用户额度
+inline constexpr std::chrono::seconds kMediaWindow(60);
+inline constexpr size_t kMediaPresignPerWindow = 30;
+// 未 commit 的 PENDING 记录保留时长（24h 后由 GC 回收）
+inline constexpr int64_t kMediaPendingTtlSec = 24 * 3600;
+// GC 单轮回收条数上限
+inline constexpr int kMediaGcBatch = 100;
 // 工作线程池停机排水超时（毫秒）：超时后放弃队列剩余任务，
 // 防止个别慢任务（DB 超时等）拖住停机流程
 inline constexpr uint32_t kPoolDrainTimeoutMs = 5000;

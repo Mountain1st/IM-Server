@@ -121,6 +121,7 @@ add_executable(imserver
     src/app_settings.cpp
     src/sigv4.cpp
     src/minio_object_store.cpp
+    src/media_service.cpp
 )
 target_include_directories(imserver PRIVATE src third_party ${MYSQL_INCLUDE_DIR})
 target_link_libraries(imserver PRIVATE Threads::Threads ${MYSQLCLIENT_LIB} CURL::libcurl)
