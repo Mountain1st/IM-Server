@@ -83,7 +83,6 @@ services:
       - "8080:8080"
     volumes:
       - ./nginx/im.conf:/etc/nginx/conf.d/im.conf:ro
-      - uploads_data:/var/lib/imserver/uploads:ro
     depends_on:
       - imserver
 
@@ -132,8 +131,6 @@ services:
     # Nginx 的 8080）
     ports:
       - "127.0.0.1:9191:9191"
-    volumes:
-      - uploads_data:/app/uploads
     depends_on:
       mysql:
         condition: service_healthy
@@ -162,5 +159,4 @@ networks:
 volumes:
   mysql_data:
   redis_data:
-  uploads_data:
   minio_data:

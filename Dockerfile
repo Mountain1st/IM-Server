@@ -31,8 +31,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && useradd -m -u 1000 im
 WORKDIR /app
 COPY --from=builder /src/build/imserver ./imserver
-# 图片落盘目录（imserver 运行时写入 /app/uploads，compose 挂命名卷覆盖）
-RUN mkdir -p /app/uploads && chown im:im /app/uploads
 USER im
 EXPOSE 9191
 # 连接配置经环境变量注入（IM_MYSQL_HOST 等）；连接失败将启动报错退出
