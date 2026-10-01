@@ -146,6 +146,41 @@ TEST(parser_64bit_length_lowbyte_highbit_accepted) {
   CHECK(f.payload.size() == size_t(70088));
 }
 
+TEST(parser_64bit_length_msb_set_rejected) {
+  // RFC 6455 §5.2 负向锁定：64 位长度最高位为 1 必须拒绝（与接受侧单测配对）
+  ws::FrameParser p;
+  p.setMaxBytes(2 * 1024 * 1024);
+  std::string raw;
+  raw.push_back(static_cast<char>(0x81));
+  raw.push_back(static_cast<char>(0x80 | 127));
+  raw.append("\x80\x00\x00\x00\x00\x01\x00\x00", 8);  // 最高位 1
+  raw.append("\x11\x22\x33\x44", 4);
+  p.feed(raw.data(), raw.size());
+  ws::Frame f;
+  CHECK(p.parseOne(&f) == ws::ParseResult::ProtocolError);
+}
+
+TEST(parser_64bit_image_envelope_size_accepted) {
+  // 图片信封贯通：1.5MB 上限 + JSON 开销约 1.6MB 帧走 64 位长度分支必须接受。
+  // 依赖 kMaxFrameBytes(64MB) 远大于图片信封；若收紧帧上限，此用例即红。
+  ws::FrameParser p;
+  p.setMaxBytes(2 * 1024 * 1024);
+  const std::string big(1572864 + 1024, 'B');
+  auto raw = buildMaskedFrame(ws::Opcode::Text, big);
+  size_t off = 0;
+  ws::Frame f;
+  ws::ParseResult pr = ws::ParseResult::NeedMore;
+  while (off < raw.size()) {
+    size_t n = std::min<size_t>(65536, raw.size() - off);
+    p.feed(raw.data() + off, n);
+    off += n;
+    pr = p.parseOne(&f);
+    if (pr != ws::ParseResult::NeedMore) break;
+  }
+  CHECK(pr == ws::ParseResult::Complete);
+  CHECK(f.payload.size() == big.size());
+}
+
 TEST(parser_utf8_valid) {
   CHECK(ws::isValidUtf8("hello"));
   CHECK(ws::isValidUtf8("中文消息"));
@@ -240,6 +275,8 @@ int main() {
   RUN(parser_control_frame_too_long_rejected);
   RUN(parser_nonminimal_length_rejected);
   RUN(parser_64bit_length_lowbyte_highbit_accepted);
+  RUN(parser_64bit_length_msb_set_rejected);
+  RUN(parser_64bit_image_envelope_size_accepted);
   RUN(parser_utf8_valid);
   RUN(parser_utf8_invalid);
   RUN(parser_close_code_valid);

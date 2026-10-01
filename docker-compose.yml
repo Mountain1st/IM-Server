@@ -101,6 +101,10 @@ services:
       # 服务端单 IP 限连关闭；入口限流交给 Nginx perip 50（im.conf 已含）。
       # 总量仍有 command 的连接上限 50 兜底
       IM_MAX_PER_IP_CONN: "0"
+      # 图片对象键 HMAC 密钥：为空则用内置默认值（单机可用；生产必须经
+      # .env 配随机值——默认密钥全网相同，同内容同 URL 可跨用户链接预测；
+      # 轮换密钥后旧图 URL 即 404，见 docs/protocol.md 图片消息节）
+      IM_MEDIA_HMAC_KEY: "${IM_MEDIA_HMAC_KEY:-}"
     # 仅绑 127.0.0.1：不经 Nginx 的直连通道不暴露公网（对外入口只有
     # Nginx 的 8080）
     ports:

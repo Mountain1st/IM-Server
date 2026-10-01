@@ -577,12 +577,15 @@ void AppServer::onGroupSend(const std::shared_ptr<Session>& session, const json&
     ack(413, "消息内容超长（超过64KB）");
     return;
   }
-  // 发送限流（与单聊同一套，按发送方去重；幂等查询已在上游完成，此处只记成功）
+  // 发送限流（与单聊同一套，按发送方去重；图片上游预检已消费一次额度，
+  // 此处跳过以防双重消费；成员/权限只读校验仍执行，失败直接拦截）。
+  if (msgType == "text") {
   const size_t sendLimit = clientMsgId.empty() ? kMaxSendNoIdPerWindow : kMaxSendPerWindow;
   if (!msgLimiter_->allow(session->userId(), sendLimit, kSendWindow)) {
     g_metrics.rateLimited.fetch_add(1, std::memory_order_relaxed);
     ack(429, "消息发送过于频繁，请稍后再试");
     return;
+  }
   }
   if (!groupRepo_->isMember(groupId, session->userId())) {
     ack(403, "非群成员");

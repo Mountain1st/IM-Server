@@ -294,7 +294,8 @@ void AppServer::purgeLoop() {
       // 同轮做内存缓存低频比对（默认 30 分钟一轮；四条 COUNT 成本可忽略）
       syncCaches();
       // 媒体 GC：距上次执行超过间隔才跑一轮（默认 24 小时；mtime 超 7 天的
-      // 落盘文件删除，过期即 404 占位语义）。目录不存在时 gcExpired 直接返回 0。
+      // 落盘文件删除，过期即 404 占位语义）。lastMediaGc_ 初值 0 使启动后
+      // 首个 purge 轮即清一次陈旧文件（符合预期）；目录不存在时直接返回 0。
       if (now - lastMediaGc_ >= mediaGcIntervalSec_) {
         lastMediaGc_ = now;
         MediaStore::gcExpired(uploadsDir_, config::kMediaRetentionSec);

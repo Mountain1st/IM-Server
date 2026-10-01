@@ -122,6 +122,12 @@ private:
   void onGroupSend(const std::shared_ptr<Session>& session, const json& data,
                    const std::string& content, const std::string& clientMsgId,
                    const std::string& msgType);
+  // 图片发送预检（解码落盘前）：目标解析 + 发送限流 + 权限只读检查。
+  // 返回 0 通过；非 0 为应回的 ack code（ackMsg 回填文案）。
+  // 避免无效目标/无权限/超频时已落盘产生孤儿文件、白耗图片配额。
+  int precheckImageTarget(const std::shared_ptr<Session>& session, const json& data,
+                          const std::string& chatType, int64_t* toOut,
+                          std::string* ackMsg);
   // 推送 pending 好友请求（登录/重连后补发）
   void pushPendingRequests(int64_t userId, const std::shared_ptr<Session>& session);
   // 生成全局消息 ID（时间戳前缀 + 进程内自增序列，防重启碰撞）
