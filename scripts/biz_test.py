@@ -146,6 +146,29 @@ PNG_1X1_B64 = ("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQ
                "hKmMIQAAAABJRU5ErkJggg==")
 
 
+def make_png_b64(w, h, seed=1):
+    # 生成 w×h 随机 RGB PNG（随机像素不可压缩，尺寸可控），用于验证大信封
+    # burst 发送：base64 后需 > 连接层单次读事件上限，回归 kMaxReadPerEvent
+    # 必须 ≥ 最大合法消息 kMaxMessageBytes，否则图片信封会被当洪泛断开
+    import random
+    import struct
+    import zlib
+    rnd = random.Random(seed)
+    raw = bytearray()
+    for _ in range(h):
+        raw.append(0)  # 每行 filter type 0
+        raw += rnd.randbytes(w * 3)
+
+    def chunk(typ, data):
+        c = struct.pack(">I", len(data)) + typ + data
+        return c + struct.pack(">I", zlib.crc32(typ + data) & 0xFFFFFFFF)
+
+    ihdr = struct.pack(">IIBBBBB", w, h, 8, 2, 0, 0, 0)  # 8bit RGB
+    png = (b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", ihdr)
+           + chunk(b"IDAT", zlib.compress(bytes(raw), 6)) + chunk(b"IEND", b""))
+    return base64.b64encode(png).decode()
+
+
 def main():
     ts = int(time.time())
     # 账号规则：10-11 位纯数字（如手机号）。用毫秒级时间戳构造，
@@ -460,6 +483,23 @@ def main():
           and all(m.get("msgType") == "image" for m in himgs))
     pim.close()
     qim.close()
+
+    # burst 大图端到端回归：真实客户端一次性 sendall（不分片慢发）发送 base64
+    # 约 1.45MB 的合法图片。kMaxReadPerEvent 必须 ≥ kMaxMessageBytes，否则连接层
+    # 单次读事件会把合法大信封当洪泛断开（send_slow 分片会掩盖该缺陷）。
+    BIMG = base + "84"
+    BIMGP = base + "85"
+    bimg = WS(); register(bimg, BIMG, "pw1234"); login(bimg, BIMG, "pw1234")
+    bimgp = WS(); register(bimgp, BIMGP, "pw1234"); login(bimgp, BIMGP, "pw1234")
+    big_png = make_png_b64(700, 550, seed=42)
+    assert 1400 * 1024 < len(big_png) < 1536 * 1024, len(big_png)
+    r = send_msg(bimg, BIMGP, big_png, "img-burst-1", msg_type="image")
+    check("image burst send ack ok", r["type"] == "msg.ack" and r["data"]["code"] == 0)
+    r = json.loads(bimgp.recv())
+    check("image burst recv url", r["type"] == "msg.recv"
+          and r["data"]["content"].startswith("/uploads/")
+          and r["data"].get("msgType") == "image")
+    bimg.close(); bimgp.close()
 
     # clientMsgId 幂等去重：同 id 重发只投递一次
     a.send(env("msg.send", {"to": bob, "content": "dup", "clientMsgId": "dup1"}))
@@ -1640,7 +1680,7 @@ def main():
     # 清理本次注册的测试账号及其关联消息（精确账号列表，不误删真实用户）
     import subprocess
     used = [A, B, C, SINK, SPAM, SINK2, SPAM2, D, E, F, G, H, base + "50", G1, G2,
-            M1, M2, M3, M4, PIMG, QIMG] \
+            M1, M2, M3, M4, PIMG, QIMG, BIMG, BIMGP] \
         + cap_accounts + [OVER, X, Y, Z, BL, BL2, BL3, BL4]
     inlist = ",".join("'%s'" % x for x in used)
     # 群表清理必须在 users 删除之前（按 account 查 user_id，无级联外键）

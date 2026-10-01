@@ -31,8 +31,15 @@ inline constexpr size_t kMaxPerIpConnections = 100;
 // ---- Connection（网络读写） ----
 // 读缓冲单次分配大小
 inline constexpr size_t kReadBufferSize = 64 * 1024;
-// 单次读事件累计上限：防 ET 洪泛导致瞬时大内存分配
-inline constexpr size_t kMaxReadPerEvent = 1 * 1024 * 1024;
+// 单次读事件累计上限：防 ET 洪泛导致瞬时大内存分配。
+// 必须 ≥ 最大合法消息 kMaxMessageBytes：一次 read 事件（ET 循环到 EAGAIN）
+// 可能把一个完整大帧全部灌入，若上限小于合法消息大小，图片等大信封会被
+// 误判为洪泛断开（+64KB 为 WebSocket 帧头/掩码等开销留余量）。
+inline constexpr size_t kMaxReadPerEvent = kMaxMessageBytes + 64 * 1024;
+// 编译期不变量：读事件上限必须能容纳一个最大合法消息，否则合法大信封
+// （如图片 1.5MB）在单次 ET 读事件中被误判洪泛断开（2026-10-01 实测回归）
+static_assert(kMaxReadPerEvent >= kMaxMessageBytes,
+              "kMaxReadPerEvent 必须 >= kMaxMessageBytes，否则大消息会被误断");
 // 写缓冲上限：超过则视为慢消费/不可达连接，断开避免内存无限增长
 inline constexpr size_t kMaxWriteBufferBytes = 8 * 1024 * 1024;
 // 优雅关闭（写完剩余缓冲）的 deadline：超时强制关闭，防连接占用
