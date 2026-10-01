@@ -120,7 +120,14 @@ private:
   void onBlockRemove(const std::shared_ptr<Session>& session, const json& data);
   void onBlockList(const std::shared_ptr<Session>& session, const json& data);
   void onGroupSend(const std::shared_ptr<Session>& session, const json& data,
-                   const std::string& content, const std::string& clientMsgId);
+                   const std::string& content, const std::string& clientMsgId,
+                   const std::string& msgType);
+  // 图片发送预检（解码落盘前）：目标解析 + 发送限流 + 权限只读检查。
+  // 返回 0 通过；非 0 为应回的 ack code（ackMsg 回填文案）。
+  // 避免无效目标/无权限/超频时已落盘产生孤儿文件、白耗图片配额。
+  int precheckImageTarget(const std::shared_ptr<Session>& session, const json& data,
+                          const std::string& chatType, int64_t* toOut,
+                          std::string* ackMsg);
   // 推送 pending 好友请求（登录/重连后补发）
   void pushPendingRequests(int64_t userId, const std::shared_ptr<Session>& session);
   // 生成全局消息 ID（时间戳前缀 + 进程内自增序列，防重启碰撞）
@@ -143,6 +150,15 @@ private:
   std::unique_ptr<RateLimiterStore> msgLimiter_; // msg.send 限流（内存/Redis 双后端）
   std::unique_ptr<RateLimiterStore> queryLimiter_; // 重查询限流（history/members；Redis 键前缀 qrate: 独立额度桶）
   std::unique_ptr<RateLimiterStore> registerLimiter_; // 注册限流（按 IP；Redis 键前缀 reg: 独立额度桶）
+  // 图片限流（msgType=image 按用户 10 张/分钟；Redis 键前缀 imgrate: 独立额度桶，
+  // 与 msgLimiter_ 的 rate: 桶隔离，互不消耗配额）
+  std::unique_ptr<RateLimiterStore> imgLimiter_;
+  // 图片落盘目录（环境变量 IM_UPLOADS_DIR 可覆盖，缺省 ./uploads）
+  std::string uploadsDir_ = "./uploads";
+  // 图片解码并发闸（同时最多 kMaxConcurrentImageDecode 路；mutex+条件变量实现）
+  std::mutex imgDecodeMutex_;
+  std::condition_variable imgDecodeCv_;
+  int imgDecodeAvail_ = config::kMaxConcurrentImageDecode;
   // 注册限流额度（环境变量 IM_REGISTER_LIMIT_PER_WINDOW 可覆盖，测试豁免）
   size_t registerLimit_ = config::kRegisterLimitPerWindow;
   // 全局消息序列（生成 messageId）。起点随机化（构造播种）：id 格式为
@@ -152,6 +168,10 @@ private:
   // 离线 TTL 清理线程（间隔秒由 IM_OFFLINE_PURGE_INTERVAL 覆盖，缺省 1800）
   int purgeIntervalSec_ = config::kOfflinePurgeIntervalSec;
   int msgRetentionDays_ = config::kMsgRetentionDays; // 已消费消息保留天数；0=不清理
+  // 媒体 GC 上次执行时间（unix 秒，0=未执行过）与最短间隔（秒，
+  // 由 IM_MEDIA_GC_INTERVAL_SEC 覆盖，缺省 24 小时；测试用小值验证）
+  int64_t lastMediaGc_ = 0;
+  int mediaGcIntervalSec_ = config::kMediaGcIntervalSec;
   std::thread purgeThread_;
   std::mutex purgeMutex_;
   std::condition_variable purgeCv_;

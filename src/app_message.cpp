@@ -1,8 +1,15 @@
 // ============================================================
 // 业务域：消息收发核心（msg.* / chat.*）——服务端最热路径
 // - onSend：单聊/群聊统一入口。处理顺序（有依赖，勿调整）：
-//   参数校验 → 幂等查询（窗口内同 clientMsgId 直接回 ack 0，不消耗限流额度）
-//   → 限流（30 条/10s；空 clientMsgId 更严 5 条）→ 权限校验
+//   msgType 白名单（text/image，兼容 msg_type，非字符串 400）→ 幂等查询
+//   （窗口内同 clientMsgId 直接回 ack 0；空 id 跳过；不消耗限流额度，
+//   图片重发不重复限流/落盘）→ image 走图片分支
+//   （1.5MB 上限 413 → base64 合法 400 → 图片独立限流 429 → 目标/发送限流/
+//   权限预检 400/404/403/429 → 并发闸 2 → 解码落盘 400，content 换 URL 后
+//   并入下述 text 流程；ack 不带 msg_type）
+//   → 参数校验（to 解析；image 已预检通过，直接复用）→ 限流（30 条/10s；
+//   空 clientMsgId 更严 5 条；image 已预检消费，不再重复）
+//   → 权限校验（image 已预检通过，直接复用）
 //   （自己对话框跳过 / 联系人 / allow_temp_chat 临时对话，否则 403）
 //   → 落库（持久化，重启不丢）→ 投递（在线）或记 pending（离线）
 //   → 多端回显（发送者其他在线端，v2.2）
@@ -20,10 +27,12 @@
 #include "appserver.hpp"
 #include "app_util.hpp"
 #include "log.hpp"
+#include "media_store.hpp"
 #include "metrics.hpp"
 #include "session.hpp"
 
 #include <algorithm>
+#include <chrono>
 #include <ctime>
 
 namespace im {
@@ -53,6 +62,7 @@ void AppServer::pushOfflineMessages(int64_t userId,
       {"clientMsgId", m.clientMsgId},
       {"messageId", m.messageId},
       {"chatType", m.chatType},
+      {"msgType", m.msgType},
     });
   }
   // 群离线补发：各群按水位线查行（ts > watermark 且在成员在群期间内），与单聊行按 ts 合并
@@ -78,7 +88,8 @@ void AppServer::pushOfflineMessages(int64_t userId,
                          {"ts", m.ts},
                          {"clientMsgId", m.clientMsgId},
                          {"messageId", m.messageId},
-                         {"chatType", "group"}});
+                         {"chatType", "group"},
+                         {"msgType", m.msgType}});
       maxTs = std::max(maxTs, m.ts);
       groupRepo_->setWatermark(gid, userId, m.ts);
     }
@@ -92,13 +103,96 @@ void AppServer::pushOfflineMessages(int64_t userId,
   session->reply(makeEnvelopeText("msg.offline", json{{"msgs", arr}}));
 }
 
+int AppServer::precheckImageTarget(const std::shared_ptr<Session>& session, const json& data,
+                                   const std::string& chatType, int64_t* toOut,
+                                   std::string* ackMsg) {
+  // 图片解码前置校验（与原位校验同码同文案，行为一致）：
+  // 先目标存在性，再发送限流，最后权限——任一失败直接回码，
+  // 此时尚未落盘，不产生孤儿文件、不白耗图片配额；失败不记幂等。
+  const std::string cid = data.value("clientMsgId", "");
+  const size_t sendLimit = cid.empty() ? kMaxSendNoIdPerWindow : kMaxSendPerWindow;
+  auto allowSend = [&]() -> bool {
+    if (!msgLimiter_->allow(session->userId(), sendLimit, kSendWindow)) {
+      g_metrics.rateLimited.fetch_add(1, std::memory_order_relaxed);
+      *ackMsg = "消息发送过于频繁，请稍后再试";
+      return false;
+    }
+    return true;
+  };
+  if (chatType == "group") {
+    if (!(data.contains("to") && data["to"].is_number_integer())) {
+      *ackMsg = "参数错误";
+      return 400;
+    }
+    const int64_t groupId = data["to"].get<int64_t>();
+    std::string gname;
+    int64_t ownerId = 0;
+    bool dissolved = false;
+    if (!groupRepo_->getGroup(groupId, &gname, &ownerId, nullptr, nullptr, &dissolved)) {
+      *ackMsg = "群不存在";
+      return 404;
+    }
+    if (dissolved) {
+      *ackMsg = "群已解散";
+      return 404;
+    }
+    if (!allowSend()) return 429;
+    if (!groupRepo_->isMember(groupId, session->userId())) {
+      *ackMsg = "非群成员";
+      return 403;
+    }
+    *toOut = groupId;
+    return 0;
+  }
+  const int64_t to = resolveTarget(userStore_.get(), data, "to");
+  if (to == -1) {
+    *ackMsg = "参数错误";
+    return 400;
+  }
+  if (to == -2) {
+    *ackMsg = "目标用户不存在";
+    return 404;
+  }
+  if (to == -3) {
+    *ackMsg = "服务器内部错误";
+    return 500;
+  }
+  if (!allowSend()) return 429;
+  if (to != session->userId()) {
+    if (blockRepo_->isBlockedPair(session->userId(), to)) {
+      if (blockRepo_->isOneWayBlockedBy(session->userId(), to)) {
+        *ackMsg = "你已拉黑对方，请先解除";
+      } else {
+        *ackMsg = "对方已拒收";
+      }
+      return 403;
+    }
+    int allowTemp = 0;
+    if (!contactRepo_->isContact(session->userId(), to)) {
+      if (userStore_->fetchSettings(to, &allowTemp, nullptr, nullptr) != 0) {
+        *ackMsg = "服务器内部错误";
+        return 500;
+      }
+      if (allowTemp != 1) {
+        *ackMsg = "对方未开启临时对话，请先添加联系人";
+        return 403;
+      }
+    }
+  }
+  *toOut = to;
+  return 0;
+}
+
 void AppServer::onSend(const std::shared_ptr<Session>& session, const json& data) {
   // 统一发送入口（单聊）。处理顺序（顺序有依赖，勿调整）：
-  //   1 参数/内容长度校验 → 2 to 解析（账号/兼容数字 userId/0=自己）
-  //   3 幂等查询（窗口内同 clientMsgId 直接回 ack 0——放在限流前，
-  //     合法重试不消耗配额且不受权限状态影响）
-  //   4 限流（30 条/10s；空 id 更严 5 条；被拒不记幂等防误判）
-  //   5 权限校验（to==自己跳过；联系人；allow_temp_chat）
+  //   0 msgType 白名单（非字符串/白名单外 400）→ 1 幂等查询（窗口内同
+  //     clientMsgId 直接回 ack 0——放在图片限流/解码与发送限流之前，
+  //     合法重试不消耗配额、不重复落盘，且不受权限状态影响；空 id 跳过）
+  //   2 图片分支（空/超 1.5MB 判 413 → base64 合法 400 → 图片限流 429 →
+  //     并发闸解码落盘 400，content 换 URL 后并入文本流程）/ 文本内容校验
+  //   3 to 解析（账号/兼容数字 userId/0=自己）→ 4 发送限流（30 条/10s；
+  //     空 id 更严 5 条；被拒不记幂等防误判）→ 5 权限校验
+  //     （to==自己跳过；联系人；allow_temp_chat）
   //   6 落库 → 7 在线投递/离线记 pending → 8 多端回显（v2.2）
   // chatType=group 时分流 onGroupSend（幂等/限流已完成）
   std::string content = data.value("content", "");
@@ -112,44 +206,143 @@ void AppServer::onSend(const std::shared_ptr<Session>& session, const json& data
     ack(400, "参数错误");
     return;
   }
-  // chatType：缺省 "single"；"group" 走群分支（协议 v1.9）；其他值拒绝
+  // chatType：缺省 "single"；"group" 走群分支（协议 v1.9）；其他值拒绝。
+  // msgType 解析 + 幂等查询 + 图片管线在分流之前（单聊/群聊共用）：
+  // 合法重试不消耗图片配额、不重复落盘；图片解码后 content 换 URL 再分流。
   std::string chatType = data.value("chatType", "single");
-  if (chatType == "group") {
-    onGroupSend(session, data, content, clientMsgId);
+  if (chatType != "single" && chatType != "group") {
+    ack(400, "封包格式错误");
     return;
   }
-  if (chatType != "single") {
-    ack(400, "封包格式错误");
+  // 消息类型：缺省 "text"；兼容旧字段名 "msg_type"；非字符串类型
+  // （如数字）与白名单外一律 400，不静默当 text。
+  // ack 不带 msg_type（协议约定，客户端以发送上下文区分）。
+  std::string msgType = "text";
+  if (data.contains("msgType")) {
+    if (!data["msgType"].is_string()) {
+      ack(400, "参数错误");
+      return;
+    }
+    msgType = data["msgType"].get<std::string>();
+  } else if (data.contains("msg_type")) {
+    if (!data["msg_type"].is_string()) {
+      ack(400, "参数错误");
+      return;
+    }
+    msgType = data["msg_type"].get<std::string>();
+  }
+  if (msgType != "text" && msgType != "image") {
+    ack(400, "参数错误");
+    return;
+  }
+  // 幂等查询（只查不记）：窗口内已处理过 → 直接回执成功、不再投递。
+  // 放在 msgType 分流之后、图片限流/解码之前：合法重试不消耗图片配额、
+  // 不产生孤儿文件；同样在文本限流之前，合法重试不消耗发送配额；
+  // 且不受权限状态影响（重发恒回 ack 0）。空 clientMsgId 跳过（不参与去重）。
+  if (!clientMsgId.empty() && msgDedup_->isDuplicate(session->userId(), clientMsgId)) {
+    ack(0, "ok");
+    return;
+  }
+  int64_t precheckTo = 0;  // 图片预检通过的目标（单聊=userId，群聊=groupId）
+  if (msgType == "image") {
+    // 图片廉价检查在前（解码落盘前，顺序有依赖勿调整）：
+    // 空/超 1.5MB → 413；非法 base64 → 400；
+    // 按用户图片限流（独立桶 10 张/分钟，被拒不记幂等）→ 429。
+    if (content.empty() || content.size() > kMaxImageB64Bytes) {
+      ack(413, "图片过大");
+      return;
+    }
+    if (!MediaStore::isValidBase64(content)) {
+      ack(400, "参数错误");
+      return;
+    }
+    if (!imgLimiter_->allow(session->userId(), kImagePerWindow, kImageWindow)) {
+      g_metrics.rateLimited.fetch_add(1, std::memory_order_relaxed);
+      ack(429, "图片发送过于频繁，请稍后再试");
+      return;
+    }
+    // 目标/发送限流/权限预检（解码落盘前）：无效目标与无权限请求
+    // 在此拦截，不落盘（无孤儿文件）、不白耗图片配额；失败不记幂等。
+    std::string preMsg;
+    const int preCode =
+        precheckImageTarget(session, data, chatType, &precheckTo, &preMsg);
+    if (preCode != 0) {
+      ack(preCode, preMsg);
+      return;
+    }
+    // 并发闸（同时最多 2 路解码，RAII 释放；排队超 5 秒直接 429，
+    // 不无限占用工作线程——小池下多路图片不得拖住文本消息）。
+    // 解码校验落盘失败 → 400（只记大小不记字节，见 MediaStore 日志）。
+    struct ImgDecodePermit {
+      AppServer* srv;
+      bool acquired = false;
+      ImgDecodePermit(AppServer* s, std::unique_lock<std::mutex>& lk) : srv(s) {
+        acquired = srv->imgDecodeCv_.wait_for(
+            lk, std::chrono::seconds(5), [this] { return srv->imgDecodeAvail_ > 0; });
+        if (acquired) --srv->imgDecodeAvail_;
+      }
+      ~ImgDecodePermit() {
+        if (!acquired) return;
+        {
+          std::lock_guard<std::mutex> lk(srv->imgDecodeMutex_);
+          ++srv->imgDecodeAvail_;
+        }
+        srv->imgDecodeCv_.notify_one();
+      }
+    };
+    std::string url;
+    {
+      std::unique_lock<std::mutex> lk(imgDecodeMutex_);
+      ImgDecodePermit permit(this, lk);
+      if (!permit.acquired) {
+        g_metrics.rateLimited.fetch_add(1, std::memory_order_relaxed);
+        ack(429, "图片解码繁忙，请稍后再试");
+        return;
+      }
+      lk.unlock();
+      auto stored = MediaStore::decodeAndStore(content, uploadsDir_);
+      if (!stored) {
+        ack(400, "参数错误");
+        return;
+      }
+      url = *stored;
+    }
+    // 内容替换为落盘 URL 后走落库/投递路径（64KB 文本上限不再适用）
+    content = url;
+  }
+  if (chatType == "group") {
+    onGroupSend(session, data, content, clientMsgId, msgType);
     return;
   }
   if (content.empty()) {
     ack(400, "参数错误");
     return;
-  }
-  if (content.size() > kMaxContentBytes) {
+  } else if (content.size() > kMaxContentBytes) {
     ack(413, "消息内容超长（超过64KB）");
     return;
   }
-  // to 为目标登录账号 account（协议 v1.7；兼容旧 userId 数字与 0=自己对话框）
-  const int64_t to = resolveTarget(userStore_.get(), data, "to");
-  if (to == -1) {
-    ack(400, "参数错误");
-    return;
+  // to 为目标登录账号 account（协议 v1.7；兼容旧 userId 数字与 0=自己对话框）。
+  // 图片路径上游预检已做目标解析 + 发送限流 + 权限校验，直接复用结果
+  // （不再重复消费发送额度）；文本路径沿用原位校验（行为不变）。
+  int64_t to = -1;
+  if (msgType == "image") {
+    to = precheckTo;
+  } else {
+    to = resolveTarget(userStore_.get(), data, "to");
+    if (to == -1) {
+      ack(400, "参数错误");
+      return;
+    }
+    if (to == -2) {
+      ack(404, "目标用户不存在");
+      return;
+    }
+    if (to == -3) {
+      ack(500, "服务器内部错误");
+      return;
+    }
   }
-  if (to == -2) {
-    ack(404, "目标用户不存在");
-    return;
-  }
-  if (to == -3) {
-    ack(500, "服务器内部错误");
-    return;
-  }
-  // 幂等查询（只查不记）：窗口内已处理过 → 直接回执成功、不再投递。
-  // 放在限流之前，使合法重试不消耗发送配额；且不受权限状态影响（重发恒回 ack 0）。
-  if (msgDedup_->isDuplicate(session->userId(), clientMsgId)) {
-    ack(0, "ok");
-    return;
-  }
+  if (msgType == "text") {
   // 消息发送限流：空 clientMsgId 不参与去重，走更严限制，遏制无 id 刷消息。
   // 限流失败不记录幂等，避免被拒的请求在重试时被误判为已发送。
   const size_t sendLimit = clientMsgId.empty() ? kMaxSendNoIdPerWindow : kMaxSendPerWindow;
@@ -188,12 +381,13 @@ void AppServer::onSend(const std::shared_ptr<Session>& session, const json& data
       }
     }
   }
+  }  // 文本原位校验结束；图片已在上游预检（目标/限流/权限），此处直接复用 to
   // 自己对话框（to==自己账号）：落库持久化，只回 ack 不回显 msg.recv（发送方即自己）
   if (to == session->userId()) {
     const int64_t now = static_cast<int64_t>(std::time(nullptr));
     const std::string messageId = nextMessageId();
     if (!msgRepo_->saveMessage(messageId, session->userId(), to, content, now,
-                               clientMsgId, chatType, kMsgDelivered)) {
+                                clientMsgId, chatType, kMsgDelivered, 0, msgType)) {
       ack(500, "服务器内部错误");
       return;
     }
@@ -208,7 +402,7 @@ void AppServer::onSend(const std::shared_ptr<Session>& session, const json& data
   const int status = targetOnline ? kMsgDelivered : kMsgOfflinePending;
   // 先持久化成功再确认（避免"内存入队伪装成持久化"）
   if (!msgRepo_->saveMessage(messageId, session->userId(), to, content, now,
-                             clientMsgId, chatType, status)) {
+                             clientMsgId, chatType, status, 0, msgType)) {
     ack(500, "服务器内部错误");
     return;
   }
@@ -228,6 +422,7 @@ void AppServer::onSend(const std::shared_ptr<Session>& session, const json& data
     {"clientMsgId", clientMsgId},
     {"messageId", messageId},
     {"chatType", chatType},
+    {"msgType", msgType},
   };
   if (targetOnline) {
     for (auto& t : onlineMgr_.sessions(to)) {
@@ -302,6 +497,7 @@ void AppServer::onHistory(const std::shared_ptr<Session>& session, const json& d
       {"clientMsgId", m.clientMsgId},
       {"messageId", m.messageId},
       {"chatType", m.chatType},
+      {"msgType", m.msgType},
     });
   }
   session->reply(makeResult("chat.history_res", 0, "ok", json{{"msgs", arr}}));

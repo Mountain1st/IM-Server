@@ -16,6 +16,7 @@
 
 #include "connection.hpp"
 #include "log.hpp"
+#include "media_store.hpp"
 #include "metrics.hpp"
 #include "mysql_message_repository.hpp"
 #include "mysql_user_repository.hpp"
@@ -30,6 +31,7 @@
 #include <algorithm>
 #include <ctime>
 #include <cstdlib>
+#include <filesystem>
 #include <iostream>
 #include <stdexcept>
 
@@ -161,7 +163,8 @@ AppServer::AppServer(uint16_t port, size_t ioThreads, size_t workThreads, size_t
       msgDedup_(makeMsgDedup(redisConfig)),
       msgLimiter_(makeRateLimiter(redisConfig, "发送限流")),
       queryLimiter_(makeRateLimiter(redisConfig, "查询限流", "qrate:")),
-      registerLimiter_(makeRateLimiter(redisConfig, "注册限流", "reg:")) {
+      registerLimiter_(makeRateLimiter(redisConfig, "注册限流", "reg:")),
+      imgLimiter_(makeRateLimiter(redisConfig, "图片限流", "imgrate:")) {
   if (!msgRepo_->ok()) {
     throw std::runtime_error("消息存储连接失败");
   }
@@ -196,6 +199,23 @@ AppServer::AppServer(uint16_t port, size_t ioThreads, size_t workThreads, size_t
   if (const char* v = std::getenv("IM_MSG_RETENTION_DAYS")) {
     const int n = std::atoi(v);
     if (n >= 0) msgRetentionDays_ = n;
+  }
+  // 图片落盘目录：环境变量可覆盖（测试隔离用）；空值回退默认 ./uploads。
+  // 启动时自建目录：建失败记错但不退出（图片发送时再判 500，不影响文字链路）
+  if (const char* v = std::getenv("IM_UPLOADS_DIR")) {
+    if (v[0] != '\0') uploadsDir_ = v;
+  }
+  {
+    std::error_code ec;
+    std::filesystem::create_directories(uploadsDir_, ec);
+    if (ec) {
+      LOG_E("[media] 落盘目录自建失败：dir=" << uploadsDir_);
+    }
+  }
+  // 媒体 GC 最短间隔：环境变量可覆盖（测试用小值验证 GC 调度）
+  if (const char* v = std::getenv("IM_MEDIA_GC_INTERVAL_SEC")) {
+    const int n = std::atoi(v);
+    if (n > 0) mediaGcIntervalSec_ = n;
   }
   LOG_I("[purge] 消息清理线程已启动（间隔 " << purgeIntervalSec_
         << " 秒；离线 TTL "
@@ -273,6 +293,13 @@ void AppServer::purgeLoop() {
       }
       // 同轮做内存缓存低频比对（默认 30 分钟一轮；四条 COUNT 成本可忽略）
       syncCaches();
+      // 媒体 GC：距上次执行超过间隔才跑一轮（默认 24 小时；mtime 超 7 天的
+      // 落盘文件删除，过期即 404 占位语义）。lastMediaGc_ 初值 0 使启动后
+      // 首个 purge 轮即清一次陈旧文件（符合预期）；目录不存在时直接返回 0。
+      if (now - lastMediaGc_ >= mediaGcIntervalSec_) {
+        lastMediaGc_ = now;
+        MediaStore::gcExpired(uploadsDir_, config::kMediaRetentionSec);
+      }
     } catch (const std::exception& e) {
       LOG_E("[purge] 清理轮异常被兜底捕获: " << e.what());
     } catch (...) {

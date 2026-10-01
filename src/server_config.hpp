@@ -31,8 +31,15 @@ inline constexpr size_t kMaxPerIpConnections = 100;
 // ---- Connection（网络读写） ----
 // 读缓冲单次分配大小
 inline constexpr size_t kReadBufferSize = 64 * 1024;
-// 单次读事件累计上限：防 ET 洪泛导致瞬时大内存分配
-inline constexpr size_t kMaxReadPerEvent = 1 * 1024 * 1024;
+// 单次读事件累计上限：防 ET 洪泛导致瞬时大内存分配。
+// 必须 ≥ 最大合法消息 kMaxMessageBytes：一次 read 事件（ET 循环到 EAGAIN）
+// 可能把一个完整大帧全部灌入，若上限小于合法消息大小，图片等大信封会被
+// 误判为洪泛断开（+64KB 为 WebSocket 帧头/掩码等开销留余量）。
+inline constexpr size_t kMaxReadPerEvent = kMaxMessageBytes + 64 * 1024;
+// 编译期不变量：读事件上限必须能容纳一个最大合法消息，否则合法大信封
+// （如图片 1.5MB）在单次 ET 读事件中被误判洪泛断开（2026-10-01 实测回归）
+static_assert(kMaxReadPerEvent >= kMaxMessageBytes,
+              "kMaxReadPerEvent 必须 >= kMaxMessageBytes，否则大消息会被误断");
 // 写缓冲上限：超过则视为慢消费/不可达连接，断开避免内存无限增长
 inline constexpr size_t kMaxWriteBufferBytes = 8 * 1024 * 1024;
 // 优雅关闭（写完剩余缓冲）的 deadline：超时强制关闭，防连接占用
@@ -41,6 +48,14 @@ inline constexpr std::chrono::seconds kCloseFlushDeadline(5);
 // ---- 业务（指令参数） ----
 // 消息内容长度上限（64KB）
 inline constexpr size_t kMaxContentBytes = 64 * 1024;
+// 图片消息（msgType=image）：base64 信封上限 1.5MB（解码后约 1.1MB，
+// 先于 64KB 文本上限分流，图片不走文本路径）
+inline constexpr size_t kMaxImageB64Bytes = 1536 * 1024;
+// 图片发送限流：每用户每 60 秒最多 10 张（独立额度桶，见 AppServer::imgLimiter_）
+inline constexpr std::chrono::seconds kImageWindow(60);
+inline constexpr size_t kImagePerWindow = 10;
+// 图片解码并发闸：同时最多 2 路解码落盘（防大图解码占满工作线程）
+inline constexpr int kMaxConcurrentImageDecode = 2;
 // 登录账号格式：10-11 位纯数字（如手机号）。
 // register 与 chat.create 均按此校验，不合规回 400；
 // auth.login 不校验格式（错误统一按 403 处理，兼容遗留短账号）。
@@ -91,6 +106,10 @@ inline constexpr std::chrono::hours kTokenTtl = std::chrono::hours(7 * 24);
 // 登录限流：窗口内失败次数上限与窗口时长
 inline constexpr int kMaxLoginFailures = 5;
 inline constexpr std::chrono::seconds kLockWindow(60);
+// 图片文件保留时长（秒，7 天）：超过此时长未修改的落盘文件由 GC 删除
+inline constexpr int64_t kMediaRetentionSec = 7 * 24 * 3600;
+// 媒体 GC 两次执行的最短间隔（秒，默认 24 小时；环境变量 IM_MEDIA_GC_INTERVAL_SEC 可覆盖，测试用小值）
+inline constexpr int kMediaGcIntervalSec = 24 * 3600;
 // 工作线程池停机排水超时（毫秒）：超时后放弃队列剩余任务，
 // 防止个别慢任务（DB 超时等）拖住停机流程
 inline constexpr uint32_t kPoolDrainTimeoutMs = 5000;
