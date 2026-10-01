@@ -5,8 +5,9 @@
 // - commit：PENDING→COMMITTED，写入以 HEAD 为准的 size/元数据；
 //   已 COMMITTED 视为成功（幂等），状态查询在锁内完成避免自死锁
 // - markDeleted：标记 status=GC（按 file_id 精确更新）
-// - findPendingOlderThan：供 GC 回收超期 PENDING
-// - isReferenced：media 是否被任何 messages 行引用（media_id 外键）
+// - findPendingOlderThan：供 GC 回收超期 PENDING（olderThanSec 为绝对时间戳上界）
+// - isReferenced：media 是否被任何 messages 行引用（media_id 外键）；
+//   返回 1=被引用，0=确定未引用，-1=查询失败（未知）
 // MySQL 单连接非线程安全：所有方法持 mutex_ 串行化
 // ============================================================
 #include "mysql_media_repository.hpp"
@@ -178,9 +179,10 @@ bool MySqlMediaRepository::commit(const std::string& fileId, int64_t size, int w
   const my_ulonglong affected = mysql_stmt_affected_rows(stmt);
   mysql_stmt_close(stmt);
   if (affected > 0) return true;
-  // 幂等：本次未更新（已非 PENDING）时，若已处于 COMMITTED 及以后视为成功
+  // 幂等：本次未更新（已非 PENDING）时，仅当已处于 COMMITTED 视为成功。
+  // 用 == 而非 >=：避免把已 GC（status=3）误判为 commit 成功
   auto cur = queryByFileIdLocked(client_, fileId);
-  if (cur && cur->status >= kMediaCommitted) return true;
+  if (cur && cur->status == kMediaCommitted) return true;
   return false;
 }
 
@@ -229,9 +231,9 @@ std::vector<MediaRecord> MySqlMediaRepository::findPendingOlderThan(
   return out;
 }
 
-bool MySqlMediaRepository::isReferenced(const std::string& fileId) {
+int MySqlMediaRepository::isReferenced(const std::string& fileId) {
   std::lock_guard<std::mutex> lock(mutex_);
-  if (!client_.ok()) return false;
+  if (!client_.ok()) return -1;
   int errNo = 0;
   MYSQL_STMT* stmt = client_.stmtExec(
       "SELECT 1 FROM messages WHERE media_id=(SELECT id FROM media WHERE file_id=?) "
@@ -239,7 +241,7 @@ bool MySqlMediaRepository::isReferenced(const std::string& fileId) {
       {fileId}, &errNo);
   if (!stmt) {
     LOG_E("[mysql] 媒体引用查询失败 errno=" << errNo);
-    return false;  // 查询失败按未引用处理（fail-closed 由调用方权衡）
+    return -1;  // 查询失败：返回未知，禁止当作「未引用」以免 GC 误删
   }
   MYSQL_BIND res[1];
   int dummy = 0;
@@ -250,13 +252,17 @@ bool MySqlMediaRepository::isReferenced(const std::string& fileId) {
   res[0].buffer = &dummy;
   res[0].is_null = &dummyNull;
   res[0].length = &dummyLen;
-  bool found = false;
-  if (!mysql_stmt_bind_result(stmt, res) && !mysql_stmt_store_result(stmt) &&
-      mysql_stmt_fetch(stmt) == 0) {
-    found = true;
+  if (mysql_stmt_bind_result(stmt, res) || mysql_stmt_store_result(stmt)) {
+    LOG_E("[mysql] 媒体引用结果读取失败: " << client_.errStr());
+    mysql_stmt_close(stmt);
+    return -1;  // 结果读取异常：状态未知
   }
+  const int fetched = mysql_stmt_fetch(stmt);
   mysql_stmt_close(stmt);
-  return found;
+  if (fetched == 0) return 1;   // 查到行 → 被引用
+  if (fetched == MYSQL_NO_DATA) return 0;  // 无行 → 确定未引用
+  LOG_E("[mysql] 媒体引用 fetch 失败");
+  return -1;  // fetch 异常 → 状态未知
 }
 
 }  // namespace im

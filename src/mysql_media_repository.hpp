@@ -22,10 +22,12 @@ class MySqlMediaRepository : public MediaRepository {
   bool commit(const std::string& fileId, int64_t size, int width, int height,
               int duration) override;
   bool markDeleted(const std::string& fileId) override;
-  // 返回 createdAt < olderThanSec 的 PENDING 记录（供 GC 清理对象），limit 条
+  // 返回 createdAt < olderThanSec 的 PENDING 记录（供 GC 清理对象），limit 条。
+  // 注意：olderThanSec 实为「绝对时间戳上界」，调用方须传 now - ttlSec。
   std::vector<MediaRecord> findPendingOlderThan(int64_t olderThanSec,
                                                 int limit) override;
-  bool isReferenced(const std::string& fileId) override;
+  // 1=被引用，0=确定未引用，-1=查询失败（未知）
+  int isReferenced(const std::string& fileId) override;
 
  private:
   MySqlClient client_;

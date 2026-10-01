@@ -30,9 +30,10 @@ class MediaRepository {
   // commit：PENDING→COMMITTED，写入以 HEAD 为准的 size 与元数据；幂等（已 COMMITTED 返回 true）
   virtual bool commit(const std::string& fileId, int64_t size, int width, int height, int duration) = 0;
   virtual bool markDeleted(const std::string& fileId) = 0;
-  // GC：返回超期 PENDING（< olderThan）或已删记录，供清理对象
+  // GC：返回 created_at < olderThanSec 的 PENDING 记录，供清理对象。
+  // 注意：olderThanSec 实为「绝对时间戳上界」，调用方须传 now - ttlSec，而非 ttl 秒数差。
   virtual std::vector<MediaRecord> findPendingOlderThan(int64_t olderThanSec, int limit) = 0;
-  // 是否被任何消息引用
-  virtual bool isReferenced(const std::string& fileId) = 0;
+  // 是否被任何消息引用：1=被引用，0=确定未引用，-1=查询失败（未知，不可当作未引用）
+  virtual int isReferenced(const std::string& fileId) = 0;
 };
 } // namespace im
