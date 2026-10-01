@@ -292,12 +292,16 @@ int64_t MediaService::gcOnce() {
   auto list = repo_->findPendingOlderThan(upperBound, config::kMediaGcBatch);
   int64_t removed = 0;
   for (const auto& m : list) {
+    // 对象存储不可用（未装配或未启用）时无法确认对象删除：
+    // 若此时仍 markDeleted，会跳过删对象而留下永久孤儿对象。
+    // 故直接跳过本行，保留 PENDING，待对象存储恢复后下轮重试（可能本轮无进展）。
+    if (!store_ || !store_->enabled()) {
+      continue;
+    }
     // 先删对象（对象可能从未上传，deleteObject 幂等）
-    if (store_ && store_->enabled() && !m.objectKey.empty()) {
-      if (!store_->deleteObject(m.objectKey)) {
-        // 删除失败：保持 PENDING，待下轮重试，避免留下永久孤儿对象
-        continue;
-      }
+    if (!m.objectKey.empty() && !store_->deleteObject(m.objectKey)) {
+      // 删除失败：保持 PENDING，待下轮重试，避免留下永久孤儿对象
+      continue;
     }
     repo_->markDeleted(m.fileId);
     ++removed;
