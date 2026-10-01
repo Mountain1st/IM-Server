@@ -49,6 +49,14 @@
 | 路径风格 | Path Style（MinIO 友好），endpoint/bucket/region/AK/SK 全配置化 |
 | 分期 | V1 图片全链路 → V2 权限/批量/GC → V3 全媒体类型 → V4 OSS/生产 |
 
+### 3.1 服务端对象操作（HEAD/DELETE）决策
+
+签名代码**只写一套预签名实现**（方法参数化，支持 GET/PUT/HEAD/DELETE）。服务端对 MinIO 的 `HEAD`/`DELETE` 也通过**生成的预签名 URL + libcurl** 执行，不写第二套 header 认证 SigV4。
+
+- 新增依赖：`libcurl4-openssl-dev`（builder 阶段编译期；runtime 镜像已含 `curl` 运行时库）。
+- 若 libcurl dev 头缺失，CMake 显式 FATAL_ERROR 提示安装（与 mysqlclient 处理一致）。
+- 对象存储配置缺失时，媒体功能降级关闭（不影响文本链路）。
+
 ## 4. 数据模型
 
 ### 4.1 新表 `media`（`db/migrate_media.sql`，幂等守卫）
@@ -183,14 +191,13 @@ V1 唯一实现 `MinioObjectStore`（`src/minio_object_store.{hpp,cpp}`）。`Me
 
 ### 8.1 SigV4 实现边界（V1）
 
-只实现 **预签名 PUT / GET**（query-string 认证），不实现完整 S3 客户端：
+只实现 **预签名（方法参数化：GET/PUT/HEAD/DELETE）**（query-string 认证），不实现完整 S3 客户端：
 - 复用 `src/util.cpp` 的 `sha256Raw` / `hmacSha256Raw`（手写，无 OpenSSL）。
 - **前置任务**：先为 SHA256/HMAC 补 RFC 4231 / FIPS 180 确定性向量单测（当前零覆盖）。
 - **顺带修正** `src/util.cpp:3` 错误注释（声称 OpenSSL，实为手写）。
 - 签名流程：CanonicalURI → CanonicalQuery（排序+编码）→ CanonicalHeaders（V1 只签 `host`）→ CanonicalRequest → SHA256 → StringToSign（`s3/aws4_request` scope）→ 派生 SigningKey（4 次 HMAC 链）→ HMAC → hex → 拼接 URL。
 - **预签名细节**：`X-Amz-SignedHeaders` 的 payload 用 `UNSIGNED-PAYLOAD`；只签 `host` 时客户端 PUT 可带未签名头（Content-Type 不参与校验）——故 mime 以 media 表存值 + commit HEAD 为准。
-- **不写**：header 认证、POST 表单上传、Multipart、ListObjects、OSS V4。
-- HEAD/DELETE 用服务端 AK/SK 直接调用，不走预签名。
+- **不写**：header 认证、POST 表单上传、Multipart、ListObjects、OSS V4。HEAD/DELETE 亦走预签名 URL（方法参数化），由 libcurl 执行。
 
 ### 8.2 配置（环境变量）
 
