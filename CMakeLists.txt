@@ -66,6 +66,7 @@ add_executable(imserver
     src/rate_limiter_store.cpp
     src/metrics.cpp
     src/appserver.cpp
+    src/media_store.cpp
     src/app_auth.cpp
     src/app_message.cpp
     src/app_contact.cpp
@@ -102,6 +103,7 @@ enable_testing()
 # 测试目标共用的纯逻辑源码（不依赖网络层/MySQL）
 set(UNIT_TEST_SOURCES
     src/util.cpp
+    src/media_store.cpp
     src/websocket.cpp
     src/msg_dedup.cpp
     src/rate_limiter_store.cpp
@@ -127,3 +129,4 @@ im_add_unit_test(target_parse_test tests/target_parse_test.cpp)
 im_add_unit_test(login_guard_test tests/login_guard_test.cpp)
 im_add_unit_test(tcpserver_test tests/tcpserver_test.cpp)
 im_add_unit_test(threadpool_test tests/threadpool_test.cpp)
+im_add_unit_test(media_store_test tests/test_media_store.cpp)
