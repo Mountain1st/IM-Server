@@ -75,7 +75,8 @@ TEST(hmac_sha256_rfc4231) {
   std::string k1(20, (char)0x0b);
   CHECK_EQ(hmacSha256Raw(k1, "Hi There"),
       std::string("\xb0\x34\x4c\x61\xd8\xdb\x38\x53\x5c\xa8\xaf\xce\xaf\x0b\xf1\x2b"
-                  "\x88\x1d\xc2\x00\xc9\x83\x3d\xa7\x26\xe9\x37\x6c\x2e\x32\xcf\xf7"));
+                  "\x88\x1d\xc2\x00\xc9\x83\x3d\xa7\x26\xe9\x37\x6c\x2e\x32\xcf\xf7", 32));
+  // 注意：第 19 字节为 \x00，必须显式给长度 32，否则 std::string(const char*) 截断到 19
   // TC3: key=20B 0xaa, data=50B 0xdd
   std::string k3(20, (char)0xaa), d3(50, (char)0xdd);
   CHECK_EQ(hmacSha256Raw(k3, d3),
