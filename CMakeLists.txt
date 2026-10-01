@@ -103,6 +103,7 @@ enable_testing()
 # 测试目标共用的纯逻辑源码（不依赖网络层/MySQL）
 set(UNIT_TEST_SOURCES
     src/util.cpp
+    src/sigv4.cpp
     src/media_store.cpp
     src/websocket.cpp
     src/msg_dedup.cpp
@@ -131,3 +132,4 @@ im_add_unit_test(tcpserver_test tests/tcpserver_test.cpp)
 im_add_unit_test(threadpool_test tests/threadpool_test.cpp)
 im_add_unit_test(media_store_test tests/test_media_store.cpp)
 im_add_unit_test(crypto_test tests/crypto_test.cpp)
+im_add_unit_test(sigv4_test tests/sigv4_test.cpp)
