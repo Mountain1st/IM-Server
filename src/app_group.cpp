@@ -532,17 +532,20 @@ void AppServer::onGroupHistory(const std::shared_ptr<Session>& session, const js
                        {"ts", m.ts},
                        {"clientMsgId", m.clientMsgId},
                        {"messageId", m.messageId},
-                       {"chatType", "group"}});
+                       {"chatType", "group"},
+                       {"msgType", m.msgType}});
   }
   session->reply(makeResult("group.history_res", 0, "ok", json{{"msgs", arr}}));
 }
 
 void AppServer::onGroupSend(const std::shared_ptr<Session>& session, const json& data,
-  // 群发（onSend 按 chatType=group 分流进入，幂等/限流已在上游完成）：
+  // 群发（onSend 按 chatType=group 分流进入，msgType/幂等/图片管线已在上游完成，
+  // content 已是正文或落盘 URL；发送限流在本函数内执行）：
   // 群存在/未解散/发送者是现成员 → 落库（单行 to_user=0, group_id=G）→
   // 逐成员投递：在线端直接推 msg.recv；离线成员按各水位线
   // （watermark）记 pending，重连补发；发送者其他在线端回显（v2.2）
-                            const std::string& content, const std::string& clientMsgId) {
+                            const std::string& content, const std::string& clientMsgId,
+                            const std::string& msgType) {
   auto ack = [&](int code, const std::string& msg) {
     session->reply(makeEnvelopeText("msg.ack",
         json{{"code", code}, {"msg", msg}, {"clientMsgId", clientMsgId}}));
@@ -569,15 +572,12 @@ void AppServer::onGroupSend(const std::shared_ptr<Session>& session, const json&
     ack(400, "参数错误");
     return;
   }
-  if (content.size() > kMaxContentBytes) {
+  // 文本沿用 64KB 上限；图片上游已解码换 URL（短串），不再适用文本上限
+  if (msgType == "text" && content.size() > kMaxContentBytes) {
     ack(413, "消息内容超长（超过64KB）");
     return;
   }
-  // 幂等 + 限流（与单聊同一套，按发送方去重）
-  if (msgDedup_->isDuplicate(session->userId(), clientMsgId)) {
-    ack(0, "ok");
-    return;
-  }
+  // 发送限流（与单聊同一套，按发送方去重；幂等查询已在上游完成，此处只记成功）
   const size_t sendLimit = clientMsgId.empty() ? kMaxSendNoIdPerWindow : kMaxSendPerWindow;
   if (!msgLimiter_->allow(session->userId(), sendLimit, kSendWindow)) {
     g_metrics.rateLimited.fetch_add(1, std::memory_order_relaxed);
@@ -591,7 +591,7 @@ void AppServer::onGroupSend(const std::shared_ptr<Session>& session, const json&
   const int64_t now = static_cast<int64_t>(std::time(nullptr));
   const std::string messageId = nextMessageId();
   if (!msgRepo_->saveMessage(messageId, session->userId(), 0, content, now, clientMsgId,
-                             "group", kMsgDelivered, groupId)) {
+                             "group", kMsgDelivered, groupId, msgType)) {
     ack(500, "服务器内部错误");
     return;
   }
@@ -609,7 +609,8 @@ void AppServer::onGroupSend(const std::shared_ptr<Session>& session, const json&
                    {"ts", now},
                    {"clientMsgId", clientMsgId},
                    {"messageId", messageId},
-                   {"chatType", "group"}};
+                   {"chatType", "group"},
+                   {"msgType", msgType}};
   for (const int64_t uid : groupRepo_->listMemberIds(groupId)) {
     bool pushed = false;
     for (auto& t : onlineMgr_.sessions(uid)) {

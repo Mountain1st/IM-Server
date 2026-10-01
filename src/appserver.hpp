@@ -120,7 +120,8 @@ private:
   void onBlockRemove(const std::shared_ptr<Session>& session, const json& data);
   void onBlockList(const std::shared_ptr<Session>& session, const json& data);
   void onGroupSend(const std::shared_ptr<Session>& session, const json& data,
-                   const std::string& content, const std::string& clientMsgId);
+                   const std::string& content, const std::string& clientMsgId,
+                   const std::string& msgType);
   // 推送 pending 好友请求（登录/重连后补发）
   void pushPendingRequests(int64_t userId, const std::shared_ptr<Session>& session);
   // 生成全局消息 ID（时间戳前缀 + 进程内自增序列，防重启碰撞）
@@ -161,6 +162,10 @@ private:
   // 离线 TTL 清理线程（间隔秒由 IM_OFFLINE_PURGE_INTERVAL 覆盖，缺省 1800）
   int purgeIntervalSec_ = config::kOfflinePurgeIntervalSec;
   int msgRetentionDays_ = config::kMsgRetentionDays; // 已消费消息保留天数；0=不清理
+  // 媒体 GC 上次执行时间（unix 秒，0=未执行过）与最短间隔（秒，
+  // 由 IM_MEDIA_GC_INTERVAL_SEC 覆盖，缺省 24 小时；测试用小值验证）
+  int64_t lastMediaGc_ = 0;
+  int mediaGcIntervalSec_ = config::kMediaGcIntervalSec;
   std::thread purgeThread_;
   std::mutex purgeMutex_;
   std::condition_variable purgeCv_;

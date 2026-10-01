@@ -99,6 +99,10 @@ inline constexpr std::chrono::hours kTokenTtl = std::chrono::hours(7 * 24);
 // 登录限流：窗口内失败次数上限与窗口时长
 inline constexpr int kMaxLoginFailures = 5;
 inline constexpr std::chrono::seconds kLockWindow(60);
+// 图片文件保留时长（秒，7 天）：超过此时长未修改的落盘文件由 GC 删除
+inline constexpr int64_t kMediaRetentionSec = 7 * 24 * 3600;
+// 媒体 GC 两次执行的最短间隔（秒，默认 24 小时；环境变量 IM_MEDIA_GC_INTERVAL_SEC 可覆盖，测试用小值）
+inline constexpr int kMediaGcIntervalSec = 24 * 3600;
 // 工作线程池停机排水超时（毫秒）：超时后放弃队列剩余任务，
 // 防止个别慢任务（DB 超时等）拖住停机流程
 inline constexpr uint32_t kPoolDrainTimeoutMs = 5000;

@@ -3,6 +3,8 @@
 #include "media_store.hpp"
 
 #include <cstdio>
+#include <filesystem>
+#include <fstream>
 #include <string>
 #include <vector>
 
@@ -66,12 +68,42 @@ TEST(media_png_kind_and_size) {
   CHECK(h == 1);
 }
 
+TEST(media_gc_expired_only_old_legal) {
+  const std::string dir = "/tmp/uploads-gc-test";
+  std::error_code ec;
+  std::filesystem::remove_all(dir, ec);
+  std::filesystem::create_directories(dir, ec);
+  auto writeFile = [&](const std::string& name) {
+    std::ofstream f(dir + "/" + name, std::ios::binary);
+    f << "x";
+  };
+  const std::string oldLegal(std::string(64, 'a') + ".png");
+  const std::string newLegal(std::string(64, 'b') + ".jpg");
+  writeFile(oldLegal);
+  writeFile(newLegal);
+  writeFile("notmedia.txt");                        // 非法名旧文件也不删
+  writeFile(std::string(64, 'c') + ".png.tmp");     // tmp 不删
+  // 回拨旧文件的 mtime 到 8 天前
+  const auto past = std::filesystem::file_time_type::clock::now() - std::chrono::hours(8 * 24);
+  std::filesystem::last_write_time(dir + "/" + oldLegal, past, ec);
+  std::filesystem::last_write_time(dir + "/notmedia.txt", past, ec);
+  // 符号链接指向旧合法文件：只看链接本身，必须跳过
+  std::filesystem::create_symlink(oldLegal, dir + "/" + std::string(64, 'd') + ".png", ec);
+  CHECK(MediaStore::gcExpired(dir, 7 * 24 * 3600) == 1);
+  CHECK(!std::filesystem::exists(dir + "/" + oldLegal));
+  CHECK(std::filesystem::exists(dir + "/" + newLegal));
+  CHECK(std::filesystem::exists(dir + "/notmedia.txt"));
+  CHECK(std::filesystem::exists(dir + "/" + std::string(64, 'c') + ".png.tmp"));
+  std::filesystem::remove_all(dir, ec);
+}
+
 int main() {
   RUN(media_png_1x1_store_ok);
   RUN(media_invalid_b64_reject);
   RUN(media_svg_reject);
   RUN(media_oversize_dimension_reject);
   RUN(media_png_kind_and_size);
+  RUN(media_gc_expired_only_old_legal);
   std::printf("media_store_test: %d failures\n", g_failures);
   return g_failures == 0 ? 0 : 1;
 }

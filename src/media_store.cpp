@@ -12,6 +12,7 @@
 #include <algorithm>
 #include <array>
 #include <cctype>
+#include <chrono>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -104,6 +105,47 @@ const char* kindMime(MediaKind k) {
 }
 
 }  // namespace
+
+// 对象键命名模式检查：64 位小写 hex + 图片扩展名
+bool isMediaObjectName(const std::string& name) {
+  const size_t dot = name.rfind('.');
+  if (dot != 64) return false;
+  for (size_t i = 0; i < 64; ++i) {
+    const char c = name[i];
+    if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f'))) return false;
+  }
+  const std::string ext = name.substr(65);
+  return ext == "png" || ext == "jpg" || ext == "jpeg" || ext == "gif" || ext == "webp";
+}
+
+size_t MediaStore::gcExpired(const std::string& dir, int64_t olderThanSec) {
+  size_t removed = 0;
+  std::error_code ec;
+  if (!std::filesystem::is_directory(dir, ec) || ec) return 0;
+  const auto now = std::filesystem::file_time_type::clock::now();
+  std::filesystem::directory_iterator it(dir, ec);
+  if (ec) return 0;
+  for (const auto& entry : it) {
+    // 符号链接一律跳过（只看链接本身不跟随目标，防删出界）
+    std::error_code sec;
+    if (entry.is_symlink(sec) || sec) continue;
+    if (!entry.is_regular_file(sec) || sec) continue;
+    const std::string name = entry.path().filename().string();
+    if (!isMediaObjectName(name)) continue;
+    std::error_code tec;
+    const auto mtime = std::filesystem::last_write_time(entry.path(), tec);
+    if (tec) continue;
+    // 同一 file_clock 下求年龄（秒），避免跨时钟换算
+    const int64_t ageSec =
+        std::chrono::duration_cast<std::chrono::seconds>(now - mtime).count();
+    if (ageSec <= olderThanSec) continue;
+    std::error_code rec;
+    if (std::filesystem::remove(entry.path(), rec) && !rec) ++removed;
+  }
+  // 只记数量与目录，不打文件名（防日志膨胀）
+  if (removed > 0) LOG_I("[media] 过期清理删除 " << removed << " 个文件：dir=" << dir);
+  return removed;
+}
 
 bool MediaStore::isValidBase64(std::string_view s) {
   if (s.empty() || s.size() % 4 != 0) return false;

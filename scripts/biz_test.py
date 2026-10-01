@@ -1219,6 +1219,23 @@ def main():
         echo = None
     a.s.settimeout(5)
     check("group no echo to sender", echo is None)
+    # 任务 5：群聊图片消息（msgType=image 全员收 URL，历史带 msgType）
+    a.send(env("msg.send", {"to": gid, "content": PNG_1X1_B64, "clientMsgId": "g-img-1",
+                            "chatType": "group", "msgType": "image"}))
+    r = json.loads(a.recv())
+    check("group image send ack ok", r["type"] == "msg.ack" and r["data"]["code"] == 0)
+    r = json.loads(b.recv())
+    check("group image recv url", r["type"] == "msg.recv"
+          and r["data"]["content"].startswith("/uploads/")
+          and r["data"]["content"].endswith(".png"))
+    check("group image recv msgType", r["type"] == "msg.recv"
+          and r["data"].get("msgType") == "image")
+    b.send(env("group.history", {"groupId": gid}))
+    r = json.loads(b.recv())
+    gimgs = [m for m in r["data"]["data"]["msgs"] if m["content"].startswith("/uploads/")]
+    check("group image history has msgType", r["type"] == "group.history_res"
+          and r["data"]["code"] == 0 and len(gimgs) >= 1
+          and all(m.get("msgType") == "image" for m in gimgs))
     # 非成员 g1 发送 403
     g1.send(env("msg.send", {"to": gid, "content": "x", "clientMsgId": "g2",
                              "chatType": "group"}))

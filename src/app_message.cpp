@@ -85,7 +85,8 @@ void AppServer::pushOfflineMessages(int64_t userId,
                          {"ts", m.ts},
                          {"clientMsgId", m.clientMsgId},
                          {"messageId", m.messageId},
-                         {"chatType", "group"}});
+                         {"chatType", "group"},
+                         {"msgType", m.msgType}});
       maxTs = std::max(maxTs, m.ts);
       groupRepo_->setWatermark(gid, userId, m.ts);
     }
@@ -122,13 +123,11 @@ void AppServer::onSend(const std::shared_ptr<Session>& session, const json& data
     ack(400, "参数错误");
     return;
   }
-  // chatType：缺省 "single"；"group" 走群分支（协议 v1.9）；其他值拒绝
+  // chatType：缺省 "single"；"group" 走群分支（协议 v1.9）；其他值拒绝。
+  // msgType 解析 + 幂等查询 + 图片管线在分流之前（单聊/群聊共用）：
+  // 合法重试不消耗图片配额、不重复落盘；图片解码后 content 换 URL 再分流。
   std::string chatType = data.value("chatType", "single");
-  if (chatType == "group") {
-    onGroupSend(session, data, content, clientMsgId);
-    return;
-  }
-  if (chatType != "single") {
+  if (chatType != "single" && chatType != "group") {
     ack(400, "封包格式错误");
     return;
   }
@@ -208,7 +207,12 @@ void AppServer::onSend(const std::shared_ptr<Session>& session, const json& data
     }
     // 内容替换为落盘 URL 后走落库/投递路径（64KB 文本上限不再适用）
     content = url;
-  } else if (content.empty()) {
+  }
+  if (chatType == "group") {
+    onGroupSend(session, data, content, clientMsgId, msgType);
+    return;
+  }
+  if (content.empty()) {
     ack(400, "参数错误");
     return;
   } else if (content.size() > kMaxContentBytes) {

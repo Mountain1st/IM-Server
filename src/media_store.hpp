@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstddef>
 #include <cstdint>
 #include <optional>
 #include <string>
@@ -25,6 +26,10 @@ class MediaStore {
   static MediaKind detectKind(const std::vector<uint8_t>& bytes, int* w = nullptr, int* h = nullptr);
   // 解码→校验→HMAC 对象键落盘，成功返回 "/uploads/<64hex>.<ext>"
   static std::optional<std::string> decodeAndStore(std::string_view b64, const std::string& dir);
+  // 过期清理：删除 dir 下超过 olderThanSec 未修改的媒体文件，返回删除数。
+  // 只删命名模式 ^[0-9a-f]{64}\.(png|jpg|jpeg|gif|webp)$ 的常规文件；
+  // 跳过符号链接、*.tmp 与其他文件（防删出界）。
+  static size_t gcExpired(const std::string& dir, int64_t olderThanSec);
 
   // 单测辅助：base64 编码（便于构造 SVG 用例）
   static std::string b64EncodeForTest(const std::string& s);
