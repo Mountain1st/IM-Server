@@ -9,6 +9,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     make \
     libmysqlclient-dev \
     libhiredis-dev \
+    libcurl4-openssl-dev \
     && rm -rf /var/lib/apt/lists/*
 WORKDIR /src
 COPY CMakeLists.txt ./

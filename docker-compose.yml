@@ -54,6 +54,21 @@ services:
     networks:
       imnet:
 
+  minio:
+    image: minio/minio:latest
+    # 对象存储（图片）：仅供 imserver 内网访问，不映射公网端口
+    # （生产换 OSS；控制台 9001 也仅在内网）
+    command: ["server", "/data", "--console-address", ":9001"]
+    environment:
+      TZ: Asia/Shanghai
+      # AK/SK 经 .env 注入（IM_S3_*），缺省 minioadmin 仅本地/CI 可用
+      MINIO_ROOT_USER: ${IM_S3_ACCESS_KEY:-minioadmin}
+      MINIO_ROOT_PASSWORD: ${IM_S3_SECRET_KEY:-minioadmin}
+    volumes:
+      - minio_data:/data
+    networks:
+      imnet:
+
   nginx:
     image: nginx:1.27-alpine
     # 访问日志时间按北京时间（与 imserver 日志/MySQL NOW() 一致）
@@ -105,6 +120,14 @@ services:
       # .env 配随机值——默认密钥全网相同，同内容同 URL 可跨用户链接预测；
       # 轮换密钥后旧图 URL 即 404，见 docs/protocol.md 图片消息节）
       IM_MEDIA_HMAC_KEY: "${IM_MEDIA_HMAC_KEY:-}"
+      # 对象存储（MinIO）S3 配置：endpoint 为容器内服务名 minio:9000，
+      # path style 供 MinIO 使用；AK/SK 经 .env（IM_S3_*）注入
+      IM_S3_ENDPOINT: minio:9000
+      IM_S3_REGION: us-east-1
+      IM_S3_BUCKET: media
+      IM_S3_ACCESS_KEY: ${IM_S3_ACCESS_KEY:-minioadmin}
+      IM_S3_SECRET_KEY: ${IM_S3_SECRET_KEY:-minioadmin}
+      IM_S3_PATH_STYLE: "true"
     # 仅绑 127.0.0.1：不经 Nginx 的直连通道不暴露公网（对外入口只有
     # Nginx 的 8080）
     ports:
@@ -140,3 +163,4 @@ volumes:
   mysql_data:
   redis_data:
   uploads_data:
+  minio_data:
