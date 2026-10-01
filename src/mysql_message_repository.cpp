@@ -225,6 +225,40 @@ bool MySqlMessageRepository::hasConversation(int64_t userA, int64_t userB) {
   return found;
 }
 
+bool MySqlMessageRepository::hasMediaAccess(int64_t userId, const std::string& fileId) {
+  std::lock_guard<std::mutex> lock(mutex_);
+  if (!client_.ok() || userId <= 0 || fileId.empty()) return false;
+  int errNo = 0;
+  // 单聊可达（from/to=userId）或群聊可达（userId 为引用该媒体的群消息的现成员）。
+  // media_id 以子查询按 file_id 映射；EXISTS 命中即返回，避免排序临时表。
+  MYSQL_STMT* stmt = client_.stmtExec(
+      "SELECT EXISTS(SELECT 1 FROM messages WHERE media_id="
+      "(SELECT id FROM media WHERE file_id=?) "
+      "AND ((group_id=0 AND (from_user=? OR to_user=?)) "
+      "OR (group_id>0 AND EXISTS(SELECT 1 FROM group_members gm WHERE "
+      "gm.group_id=messages.group_id AND gm.user_id=? AND gm.left_ts=0))))",
+      {fileId, std::to_string(userId), std::to_string(userId),
+       std::to_string(userId)},
+      &errNo);
+  if (!stmt) {
+    LOG_E("[mysql] 媒体访问查询失败 errno=" << errNo);
+    return false; // 查询失败 fail-closed
+  }
+  MYSQL_BIND res[1];
+  int found = 0;
+  memset(res, 0, sizeof res);
+  res[0].buffer_type = MYSQL_TYPE_LONG;
+  res[0].buffer = &found;
+  bool allow = false;
+  if (mysql_stmt_bind_result(stmt, res) || mysql_stmt_store_result(stmt)) {
+    LOG_E("[mysql] 媒体访问结果读取失败: " << client_.errStr());
+  } else if (mysql_stmt_fetch(stmt) == 0) {
+    allow = (found == 1);
+  }
+  mysql_stmt_close(stmt);
+  return allow;
+}
+
 void MySqlMessageRepository::markRead(int64_t toUser, int64_t fromUser, int64_t readTs) {  std::lock_guard<std::mutex> lock(mutex_);
   if (!client_.ok()) return;
   int errNo = 0;
