@@ -1031,3 +1031,19 @@ git commit -m "docs: 媒体系统协议与部署文档（v3.0）"
 **V1 权限/GC 的简化边界（V2 补全）：**
 - `canAccess` 在 V1 取"存在任一 from/to 或群成员引用的消息"**保守放行**；群聊"消息可见窗口（入群/退群时间）"的精确判定属 V2。
 - `gcOnce` 在 V1 只回收**超期 PENDING**；"COMMITTED 但无消息引用"的回收依赖任务 4 的 `isReferenced`，V1 仅提供接口与单测，**实际调度在 V2 开启**（避免 V1 过度删除尚未发送但已 commit 的对象）。
+
+## 环境适配裁定（2026-10-01，已批准，不改变架构决策）
+
+**libcurl / CMake：**
+- 优先 `find_package(CURL)`；失败则读环境变量 `IM_CURL_ROOT`（前缀含 `include/` 与 `lib/`）查找头与库，封装为导入目标 `CURL::libcurl`。
+- **严禁**把 `/tmp/opencode/curlroot` 等机器特定路径写入仓库仓库文件。
+- 两种方式都失败 → CMake `FATAL_ERROR` 并说明如何设置 `IM_CURL_ROOT`。
+- 本机执行：`export IM_CURL_ROOT=/tmp/opencode/curlroot`（已备好 `usr/include/x86_64-linux-gnu/curl/curl.h` 与 `usr/lib/x86_64-linux-gnu/libcurl.so`）。运行时经系统 `libcurl.so.4` 加载，本机无需 `LD_LIBRARY_PATH`。
+
+**MinIO 集成测试：**
+- 本机用静态 MinIO 二进制：`http://127.0.0.1:9000`，bucket `media`，`minioadmin/minioadmin`（**仅本地测试，禁提交仓库**，经环境变量注入）。
+- 任务 5/6/10 的真机集成测试连本地 MinIO。
+- 任务 9 仍保留 compose 的 minio 服务定义（标准开发/CI 用），但**本机不验证其启动**（镜像拉取被本地网络拒），只做 `docker compose config` 语法/完整性检查。
+- 文档必须区分"静态二进制 MinIO 集成测试"与"Compose MinIO 环境验证"，不得混称。
+
+**测试报告要求**（每项独立记录，未执行的标"未验证"，不得互相替代）：SHA256/HMAC 向量、SigV4 单测、本机静态 MinIO 集成、CMake 系统 CURL 查找、`IM_CURL_ROOT` 回退、Compose 配置检查。
