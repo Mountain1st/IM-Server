@@ -25,7 +25,7 @@
 namespace im {
 
 namespace {
-constexpr int kMsgCols = 10; // message_id,from_user,to_user,content,ts,client_msg_id,chat_type,status,group_id,msg_type
+constexpr int kMsgCols = 11; // message_id,from_user,to_user,content,ts,client_msg_id,chat_type,status,group_id,msg_type,media_id
 
 // 从一条 MySQL 行构造 StoredMessage（row[] 对应查询列的字符串表示，
 // 数字列也由 mysql_fetch_row 以字符串返回）。
@@ -48,6 +48,8 @@ StoredMessage rowToMessage(MYSQL_ROW row, unsigned long* lens) {
     m.msgType = str(9);
     if (m.msgType.empty()) m.msgType = "text";
   }
+  // 空/NULL 兜 0（历史数据无 media_id）
+  m.mediaId = (row[10] == nullptr) ? 0 : std::strtoll(row[10], nullptr, 10);
   return m;
 }
 } // namespace
@@ -62,17 +64,19 @@ bool MySqlMessageRepository::saveMessage(const std::string& messageId, int64_t f
                                          int64_t toUser, const std::string& content,
                                          int64_t ts, const std::string& clientMsgId,
                                          const std::string& chatType, int status,
-                                         int64_t groupId, const std::string& msgType) {
+                                         int64_t groupId, const std::string& msgType,
+                                         int64_t mediaId) {
   std::lock_guard<std::mutex> lock(mutex_);
   if (!client_.ok()) return false;
   const std::string sql =
       "INSERT INTO messages (message_id, from_user, to_user, content, ts, "
-      "client_msg_id, chat_type, status, group_id, msg_type) VALUES (?,?,?,?,?,?,?,?,?,?)";
+      "client_msg_id, chat_type, status, group_id, msg_type, media_id) "
+      "VALUES (?,?,?,?,?,?,?,?,?,?,?)";
   int errNo = 0;
   MYSQL_STMT* stmt = client_.stmtExec(sql,
       {messageId, std::to_string(fromUser), std::to_string(toUser), content,
        std::to_string(ts), clientMsgId, chatType, std::to_string(status),
-       std::to_string(groupId), msgType},
+       std::to_string(groupId), msgType, std::to_string(mediaId)},
       &errNo);
   if (!stmt) {
     LOG_E("[mysql] 保存消息失败 errno=" << errNo);
@@ -125,7 +129,7 @@ std::vector<StoredMessage> MySqlMessageRepository::fetchOffline(int64_t toUser) 
   if (!client_.ok()) return out;
   const std::string sql =
       "SELECT message_id, from_user, to_user, content, ts, client_msg_id, chat_type, status, "
-      "group_id, msg_type FROM messages WHERE to_user = " + std::to_string(toUser) +
+      "group_id, msg_type, media_id FROM messages WHERE to_user = " + std::to_string(toUser) +
       " AND status = " + std::to_string(kMsgOfflinePending) +
       " AND group_id = 0 ORDER BY ts ASC, id ASC LIMIT " +
       std::to_string(config::kOfflineMaxPerUser);
@@ -173,7 +177,7 @@ std::vector<StoredMessage> MySqlMessageRepository::fetchHistory(int64_t userA,
   if (limit > 200) limit = 200;
   const std::string sql =
       "SELECT message_id, from_user, to_user, content, ts, client_msg_id, chat_type, status, "
-      "group_id, msg_type FROM messages WHERE ((from_user = " + std::to_string(userA) +
+      "group_id, msg_type, media_id FROM messages WHERE ((from_user = " + std::to_string(userA) +
       " AND to_user = " + std::to_string(userB) + ") OR (from_user = " +
       std::to_string(userB) + " AND to_user = " + std::to_string(userA) +
       ")) AND group_id = 0 ORDER BY ts DESC, id DESC LIMIT " + std::to_string(limit);
@@ -243,7 +247,7 @@ std::vector<StoredMessage> MySqlMessageRepository::fetchGroupMessages(
   if (limit > 200) limit = 200;
   std::string sql =
       "SELECT message_id, from_user, to_user, content, ts, client_msg_id, chat_type, status, "
-      "group_id, msg_type FROM messages WHERE group_id = " + std::to_string(groupId) +
+      "group_id, msg_type, media_id FROM messages WHERE group_id = " + std::to_string(groupId) +
       " AND ts > " + std::to_string(sinceTs);
   if (untilTs > 0) sql += " AND ts <= " + std::to_string(untilTs);
   sql += asc ? " ORDER BY ts ASC, id ASC LIMIT " : " ORDER BY ts DESC, id DESC LIMIT ";

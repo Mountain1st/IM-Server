@@ -3,6 +3,7 @@
 #include "block_repository.hpp"
 #include "contact_repository.hpp"
 #include "group_repository.hpp"
+#include "media_repository.hpp"
 #include "message.hpp"
 #include "message_repository.hpp"
 #include "msg_dedup.hpp"
@@ -121,10 +122,10 @@ private:
   void onBlockList(const std::shared_ptr<Session>& session, const json& data);
   void onGroupSend(const std::shared_ptr<Session>& session, const json& data,
                    const std::string& content, const std::string& clientMsgId,
-                   const std::string& msgType);
-  // 图片发送预检（解码落盘前）：目标解析 + 发送限流 + 权限只读检查。
+                   const std::string& msgType, int64_t mediaId = 0);
+  // 图片发送目标校验：目标解析 + 发送限流 + 权限只读检查。
   // 返回 0 通过；非 0 为应回的 ack code（ackMsg 回填文案）。
-  // 避免无效目标/无权限/超频时已落盘产生孤儿文件、白耗图片配额。
+  // 注意：base64 图片管线已移除，本函数保留供 mediaId 图片消息复用目标/权限校验。
   int precheckImageTarget(const std::shared_ptr<Session>& session, const json& data,
                           const std::string& chatType, int64_t* toOut,
                           std::string* ackMsg);
@@ -141,6 +142,9 @@ private:
   std::vector<std::string> trustedProxies_; // 可信代理 IP；空=忽略 X-Forwarded-For
   std::unique_ptr<UserStore> userStore_;    // MySQL 用户存储（连接失败时构造抛错）
   std::unique_ptr<MessageRepository> msgRepo_; // MySQL 消息存储（离线/历史/已读）
+  // 媒体元数据存储（media 表）：msgType=image 时按 fileId 校验归属/COMMITTED
+  // 并取 media.id 落库。MediaService/协议路由装配在任务 8 接入。
+  std::shared_ptr<MediaRepository> mediaRepo_;
   std::unique_ptr<ContactRepository> contactRepo_; // 联系人/请求/设置存储
   std::unique_ptr<GroupRepository> groupRepo_;  // 群/成员/水位线存储
   std::unique_ptr<BlockRepository> blockRepo_;  // 拉黑存储（v2.4，第四个纳入自愈的缓存）

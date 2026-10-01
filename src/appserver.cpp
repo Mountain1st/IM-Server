@@ -18,6 +18,7 @@
 #include "log.hpp"
 #include "media_store.hpp"
 #include "metrics.hpp"
+#include "mysql_media_repository.hpp"
 #include "mysql_message_repository.hpp"
 #include "mysql_user_repository.hpp"
 #include "redis_msg_dedup.hpp"
@@ -147,6 +148,9 @@ AppServer::AppServer(uint16_t port, size_t ioThreads, size_t workThreads, size_t
       // msgRepo/contactRepo/groupRepo → presence → onlineMgr(presence_) →
       // msgDedup/msgLimiter/queryLimiter
       msgRepo_(std::make_unique<MySqlMessageRepository>(
+          userConfig.mysqlHost, userConfig.mysqlPort, userConfig.mysqlUser,
+          userConfig.mysqlPassword, userConfig.mysqlDb)),
+      mediaRepo_(std::make_shared<MySqlMediaRepository>(
           userConfig.mysqlHost, userConfig.mysqlPort, userConfig.mysqlUser,
           userConfig.mysqlPassword, userConfig.mysqlDb)),
       contactRepo_(std::make_unique<ContactRepository>(

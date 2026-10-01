@@ -17,7 +17,8 @@ struct StoredMessage {
   std::string chatType;
   int status;             // 0=offline_pending 1=delivered 2=read
   int64_t groupId = 0;    // 0=单聊；>0=群聊（群消息单行：from=发送者, to=0）
-  std::string msgType = "text";  // 消息类型：text=文本，image=图片（content 为 /uploads/ 路径）
+  std::string msgType = "text";  // 消息类型：text=文本，image=图片（content 为 fileId）
+  int64_t mediaId = 0;    // 0=无媒体；>0 关联 media.id
 };
 
 // 消息状态（与 messages 表 status 列一致）
@@ -43,7 +44,8 @@ public:
                            int64_t ts, const std::string& clientMsgId,
                            const std::string& chatType, int status,
                            int64_t groupId = 0,
-                           const std::string& msgType = "text") = 0;
+                           const std::string& msgType = "text",
+                           int64_t mediaId = 0) = 0;
   // 取某接收方的离线消息（status=offline_pending），按 ts 升序。不移除。
   virtual std::vector<StoredMessage> fetchOffline(int64_t toUser) = 0;
   // 删除超过 TTL 仍未领取的单聊离线消息（ts < nowSec - 7 天）。返回删除条数。
