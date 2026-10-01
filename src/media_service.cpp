@@ -15,6 +15,7 @@
 #include <cstdio>
 #include <ctime>
 #include <random>
+#include <utility>
 
 namespace im {
 namespace {
@@ -107,7 +108,12 @@ PresignResult MediaService::presign(int64_t userId, const std::string& fileName,
     r.msg = "不支持的媒体格式";
     return r;
   }
-  if (size <= 0 || size > static_cast<int64_t>(config::kMediaSizeMaxBytes)) {
+  if (size <= 0) {
+    r.code = 400;
+    r.msg = "文件大小非法";
+    return r;
+  }
+  if (size > static_cast<int64_t>(config::kMediaSizeMaxBytes)) {
     r.code = 413;
     r.msg = "文件过大";
     return r;
@@ -117,8 +123,14 @@ PresignResult MediaService::presign(int64_t userId, const std::string& fileName,
     r.msg = "对象存储不可用";
     return r;
   }
-  if (limiter_ && !limiter_->allow(userId, config::kMediaPresignPerWindow,
-                                   config::kMediaWindow)) {
+  // 限流器缺失时与 store_ 一致 fail-closed，避免无限流绕过
+  if (!limiter_) {
+    r.code = 503;
+    r.msg = "限流服务不可用";
+    return r;
+  }
+  if (!limiter_->allow(userId, config::kMediaPresignPerWindow,
+                       config::kMediaWindow)) {
     r.code = 429;
     r.msg = "请求过于频繁，请稍后再试";
     return r;
@@ -141,6 +153,8 @@ PresignResult MediaService::presign(int64_t userId, const std::string& fileName,
 
   PresignedUrl put = store_->presignPut(m.objectKey, config::kMediaPutTtlSec);
   if (put.url.empty()) {
+    // 补偿：签名失败则回收已落的 PENDING 行，避免遗留孤儿记录
+    repo_->markDeleted(m.fileId);
     r.code = 500;
     r.msg = "签名失败";
     return r;
@@ -202,6 +216,13 @@ CommitResult MediaService::commit(int64_t userId, const std::string& fileId,
     r.msg = "对象不存在，请先上传";
     return r;
   }
+  // 以 HEAD 实际大小为准复核上限，防止「声明小 size 拿签名 → 传超大对象」绕过
+  if (info.size == 0 ||
+      info.size > static_cast<uint64_t>(config::kMediaSizeMaxBytes)) {
+    r.code = 413;
+    r.msg = "文件过大";
+    return r;
+  }
   // 客户端声明大小须与 HEAD 实际一致；入库以 HEAD 为准
   if (size != static_cast<int64_t>(info.size)) {
     r.code = 400;
@@ -244,6 +265,12 @@ UrlResult MediaService::url(int64_t userId, const std::string& fileId,
     r.msg = "媒体不存在";
     return r;
   }
+  // 仅已 COMMITTED 的媒体可访问；PENDING/GC 记录不签发 GET URL
+  if (rec->status != kMediaCommitted) {
+    r.code = 404;
+    r.msg = "媒体不存在";
+    return r;
+  }
   PresignedUrl get = store_->presignGet(rec->objectKey, config::kMediaGetTtlSec);
   if (get.url.empty()) {
     r.code = 500;
@@ -267,7 +294,10 @@ int64_t MediaService::gcOnce() {
   for (const auto& m : list) {
     // 先删对象（对象可能从未上传，deleteObject 幂等）
     if (store_ && store_->enabled() && !m.objectKey.empty()) {
-      store_->deleteObject(m.objectKey);
+      if (!store_->deleteObject(m.objectKey)) {
+        // 删除失败：保持 PENDING，待下轮重试，避免留下永久孤儿对象
+        continue;
+      }
     }
     repo_->markDeleted(m.fileId);
     ++removed;
