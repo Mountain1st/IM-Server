@@ -1,6 +1,9 @@
 // ============================================================
 // 业务域：消息收发核心（msg.* / chat.*）——服务端最热路径
 // - onSend：单聊/群聊统一入口。处理顺序（有依赖，勿调整）：
+//   msgType 白名单（text/image，兼容 msg_type）→ image 走图片分支
+//   （1.5MB 上限 413 → base64 合法 400 → 图片独立限流 429 → 并发闸 2 →
+//   解码落盘 400，content 换 URL 后并入下述 text 流程；ack 不带 msg_type）
 //   参数校验 → 幂等查询（窗口内同 clientMsgId 直接回 ack 0，不消耗限流额度）
 //   → 限流（30 条/10s；空 clientMsgId 更严 5 条）→ 权限校验
 //   （自己对话框跳过 / 联系人 / allow_temp_chat 临时对话，否则 403）
@@ -20,6 +23,7 @@
 #include "appserver.hpp"
 #include "app_util.hpp"
 #include "log.hpp"
+#include "media_store.hpp"
 #include "metrics.hpp"
 #include "session.hpp"
 
@@ -53,6 +57,7 @@ void AppServer::pushOfflineMessages(int64_t userId,
       {"clientMsgId", m.clientMsgId},
       {"messageId", m.messageId},
       {"chatType", m.chatType},
+      {"msgType", m.msgType},
     });
   }
   // 群离线补发：各群按水位线查行（ts > watermark 且在成员在群期间内），与单聊行按 ts 合并
@@ -122,11 +127,69 @@ void AppServer::onSend(const std::shared_ptr<Session>& session, const json& data
     ack(400, "封包格式错误");
     return;
   }
-  if (content.empty()) {
+  // 消息类型：缺省 "text"；兼容旧字段名 "msg_type"；白名单外直接 400。
+  // ack 不带 msg_type（协议约定，客户端以发送上下文区分）。
+  std::string msgType = "text";
+  if (data.contains("msgType") && data["msgType"].is_string()) {
+    msgType = data["msgType"].get<std::string>();
+  } else if (data.contains("msg_type") && data["msg_type"].is_string()) {
+    msgType = data["msg_type"].get<std::string>();
+  }
+  if (msgType != "text" && msgType != "image") {
     ack(400, "参数错误");
     return;
   }
-  if (content.size() > kMaxContentBytes) {
+  if (msgType == "image") {
+    // 图片廉价检查在前（解码落盘前，顺序有依赖勿调整）：
+    // 空/超 1.5MB → 413；非法 base64 → 400；
+    // 按用户图片限流（独立桶 10 张/分钟，被拒不记幂等）→ 429。
+    if (content.empty() || content.size() > kMaxImageB64Bytes) {
+      ack(413, "图片过大");
+      return;
+    }
+    if (!MediaStore::isValidBase64(content)) {
+      ack(400, "参数错误");
+      return;
+    }
+    if (!imgLimiter_->allow(session->userId(), kImagePerWindow, kImageWindow)) {
+      g_metrics.rateLimited.fetch_add(1, std::memory_order_relaxed);
+      ack(429, "图片发送过于频繁，请稍后再试");
+      return;
+    }
+    // 并发闸（同时最多 2 路解码，RAII 释放）→ 解码校验落盘；
+    // 失败 → 400（只记大小不记字节，见 MediaStore 日志）。
+    struct ImgDecodePermit {
+      AppServer* srv;
+      ImgDecodePermit(AppServer* s, std::unique_lock<std::mutex>& lk) : srv(s) {
+        srv->imgDecodeCv_.wait(lk, [this] { return srv->imgDecodeAvail_ > 0; });
+        --srv->imgDecodeAvail_;
+      }
+      ~ImgDecodePermit() {
+        {
+          std::lock_guard<std::mutex> lk(srv->imgDecodeMutex_);
+          ++srv->imgDecodeAvail_;
+        }
+        srv->imgDecodeCv_.notify_one();
+      }
+    };
+    std::string url;
+    {
+      std::unique_lock<std::mutex> lk(imgDecodeMutex_);
+      ImgDecodePermit permit(this, lk);
+      lk.unlock();
+      auto stored = MediaStore::decodeAndStore(content, uploadsDir_);
+      if (!stored) {
+        ack(400, "参数错误");
+        return;
+      }
+      url = *stored;
+    }
+    // 内容替换为落盘 URL 后走原幂等/落库/投递路径（64KB 文本上限不再适用）
+    content = url;
+  } else if (content.empty()) {
+    ack(400, "参数错误");
+    return;
+  } else if (content.size() > kMaxContentBytes) {
     ack(413, "消息内容超长（超过64KB）");
     return;
   }
@@ -193,7 +256,7 @@ void AppServer::onSend(const std::shared_ptr<Session>& session, const json& data
     const int64_t now = static_cast<int64_t>(std::time(nullptr));
     const std::string messageId = nextMessageId();
     if (!msgRepo_->saveMessage(messageId, session->userId(), to, content, now,
-                               clientMsgId, chatType, kMsgDelivered)) {
+                                clientMsgId, chatType, kMsgDelivered, 0, msgType)) {
       ack(500, "服务器内部错误");
       return;
     }
@@ -208,7 +271,7 @@ void AppServer::onSend(const std::shared_ptr<Session>& session, const json& data
   const int status = targetOnline ? kMsgDelivered : kMsgOfflinePending;
   // 先持久化成功再确认（避免"内存入队伪装成持久化"）
   if (!msgRepo_->saveMessage(messageId, session->userId(), to, content, now,
-                             clientMsgId, chatType, status)) {
+                             clientMsgId, chatType, status, 0, msgType)) {
     ack(500, "服务器内部错误");
     return;
   }
@@ -228,6 +291,7 @@ void AppServer::onSend(const std::shared_ptr<Session>& session, const json& data
     {"clientMsgId", clientMsgId},
     {"messageId", messageId},
     {"chatType", chatType},
+    {"msgType", msgType},
   };
   if (targetOnline) {
     for (auto& t : onlineMgr_.sessions(to)) {
@@ -302,6 +366,7 @@ void AppServer::onHistory(const std::shared_ptr<Session>& session, const json& d
       {"clientMsgId", m.clientMsgId},
       {"messageId", m.messageId},
       {"chatType", m.chatType},
+      {"msgType", m.msgType},
     });
   }
   session->reply(makeResult("chat.history_res", 0, "ok", json{{"msgs", arr}}));

@@ -283,8 +283,10 @@ ParseResult FrameParser::parseOne(Frame* frame) {
     uint64_t v;
     std::memcpy(&v, buf_.data() + offset, 8);
     len = be64toh(v);
-    // RFC 6455 §5.2：64 位长度最高位必须为 0，且最小长度编码（≥65536）
-    if ((v & 0x8000000000000000ULL) != 0) return ParseResult::ProtocolError;
+    // RFC 6455 §5.2：64 位长度最高位必须为 0，且最小长度编码（≥65536）。
+    // 注意用转换后的主机序 len 判断：小端机上 v 是网络序原样拷贝，
+    // 其最高位实为长度最低字节的最高位，直接判 v 会误杀合法大帧。
+    if ((len & 0x8000000000000000ULL) != 0) return ParseResult::ProtocolError;
     if (len < 65536) return ParseResult::ProtocolError;
     offset += 8;
   }

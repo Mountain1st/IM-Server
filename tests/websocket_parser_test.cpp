@@ -124,6 +124,28 @@ TEST(parser_nonminimal_length_rejected) {
   CHECK(p.parseOne(&f) == ws::ParseResult::ProtocolError);
 }
 
+TEST(parser_64bit_length_lowbyte_highbit_accepted) {
+  // 8 字节长度编码且长度低字节最高位为 1（如 70088=0x111B8）必须接受：
+  // 最高位检查须用主机序转换后的值，小端机上误用网络序原值会误杀
+  //（任务 4 图片 413 路径的 1.5MB+ 信封帧必经此分支）
+  ws::FrameParser p;
+  p.setMaxBytes(2 * 1024 * 1024);
+  auto raw = buildMaskedFrame(ws::Opcode::Text, std::string(70088, 'A'));
+  // 分片喂入，模拟 TCP 跨包到达
+  size_t off = 0;
+  ws::Frame f;
+  ws::ParseResult pr = ws::ParseResult::NeedMore;
+  while (off < raw.size()) {
+    size_t n = std::min<size_t>(32768, raw.size() - off);
+    p.feed(raw.data() + off, n);
+    off += n;
+    pr = p.parseOne(&f);
+    if (pr != ws::ParseResult::NeedMore) break;
+  }
+  CHECK(pr == ws::ParseResult::Complete);
+  CHECK(f.payload.size() == size_t(70088));
+}
+
 TEST(parser_utf8_valid) {
   CHECK(ws::isValidUtf8("hello"));
   CHECK(ws::isValidUtf8("中文消息"));
@@ -217,6 +239,7 @@ int main() {
   RUN(parser_control_frame_fragmented_rejected);
   RUN(parser_control_frame_too_long_rejected);
   RUN(parser_nonminimal_length_rejected);
+  RUN(parser_64bit_length_lowbyte_highbit_accepted);
   RUN(parser_utf8_valid);
   RUN(parser_utf8_invalid);
   RUN(parser_close_code_valid);

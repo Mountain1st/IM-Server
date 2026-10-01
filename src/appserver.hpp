@@ -143,6 +143,15 @@ private:
   std::unique_ptr<RateLimiterStore> msgLimiter_; // msg.send 限流（内存/Redis 双后端）
   std::unique_ptr<RateLimiterStore> queryLimiter_; // 重查询限流（history/members；Redis 键前缀 qrate: 独立额度桶）
   std::unique_ptr<RateLimiterStore> registerLimiter_; // 注册限流（按 IP；Redis 键前缀 reg: 独立额度桶）
+  // 图片限流（msgType=image 按用户 10 张/分钟；Redis 键前缀 imgrate: 独立额度桶，
+  // 与 msgLimiter_ 的 rate: 桶隔离，互不消耗配额）
+  std::unique_ptr<RateLimiterStore> imgLimiter_;
+  // 图片落盘目录（环境变量 IM_UPLOADS_DIR 可覆盖，缺省 ./uploads）
+  std::string uploadsDir_ = "./uploads";
+  // 图片解码并发闸（同时最多 kMaxConcurrentImageDecode 路；mutex+条件变量实现）
+  std::mutex imgDecodeMutex_;
+  std::condition_variable imgDecodeCv_;
+  int imgDecodeAvail_ = config::kMaxConcurrentImageDecode;
   // 注册限流额度（环境变量 IM_REGISTER_LIMIT_PER_WINDOW 可覆盖，测试豁免）
   size_t registerLimit_ = config::kRegisterLimitPerWindow;
   // 全局消息序列（生成 messageId）。起点随机化（构造播种）：id 格式为

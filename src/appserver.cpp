@@ -161,7 +161,8 @@ AppServer::AppServer(uint16_t port, size_t ioThreads, size_t workThreads, size_t
       msgDedup_(makeMsgDedup(redisConfig)),
       msgLimiter_(makeRateLimiter(redisConfig, "发送限流")),
       queryLimiter_(makeRateLimiter(redisConfig, "查询限流", "qrate:")),
-      registerLimiter_(makeRateLimiter(redisConfig, "注册限流", "reg:")) {
+      registerLimiter_(makeRateLimiter(redisConfig, "注册限流", "reg:")),
+      imgLimiter_(makeRateLimiter(redisConfig, "图片限流", "imgrate:")) {
   if (!msgRepo_->ok()) {
     throw std::runtime_error("消息存储连接失败");
   }
@@ -196,6 +197,10 @@ AppServer::AppServer(uint16_t port, size_t ioThreads, size_t workThreads, size_t
   if (const char* v = std::getenv("IM_MSG_RETENTION_DAYS")) {
     const int n = std::atoi(v);
     if (n >= 0) msgRetentionDays_ = n;
+  }
+  // 图片落盘目录：环境变量可覆盖（测试隔离用）；空值回退默认 ./uploads
+  if (const char* v = std::getenv("IM_UPLOADS_DIR")) {
+    if (v[0] != '\0') uploadsDir_ = v;
   }
   LOG_I("[purge] 消息清理线程已启动（间隔 " << purgeIntervalSec_
         << " 秒；离线 TTL "

@@ -43,6 +43,24 @@ class WS:
         data = payload.encode()
         self._send_frame(0x1, data)
 
+    def send_slow(self, payload, chunk_size=32768, delay=0.02):
+        # 大帧分片慢发：服务端单次读事件上限 1MB（防洪泛断开），
+        # 一次性 burst 发 1.5MB+ 信封会被直接断开；分片慢发使整帧到达业务层
+        data = payload.encode()
+        n = len(data)
+        if n < 126:
+            hdr = bytes([0x81, 0x80 | n])
+        elif n <= 0xFFFF:
+            hdr = bytes([0x81, 0xFE]) + struct.pack("!H", n)
+        else:
+            hdr = bytes([0x81, 0xFF]) + struct.pack("!Q", n)
+        mask = os.urandom(4)
+        self.s.sendall(hdr + mask)
+        masked = bytes(b ^ mask[i % 4] for i, b in enumerate(data))
+        for off in range(0, len(masked), chunk_size):
+            self.s.sendall(masked[off:off + chunk_size])
+            time.sleep(delay)
+
     def _send_frame(self, opcode, data, masked=True):
         n = len(data)
         hdr = bytes([0x80 | opcode, (0x80 if masked else 0) | (n if n < 126 else (126 if n <= 0xFFFF else 127))])
@@ -114,9 +132,18 @@ def login(ws, u, p):
     return json.loads(ws.recv())
 
 
-def send_msg(ws, to, content, cid):
-    ws.send(env("msg.send", {"to": to, "content": content, "clientMsgId": cid}))
+def send_msg(ws, to, content, cid, msg_type=None):
+    # msg_type 为 None 时不带该字段（保持原文本用例行为不变）
+    d = {"to": to, "content": content, "clientMsgId": cid}
+    if msg_type is not None:
+        d["msgType"] = msg_type
+    ws.send(env("msg.send", d))
     return json.loads(ws.recv())
+
+
+# 任务 4 用：1x1 透明 PNG 的 base64（解码后 1x1，MediaStore 可接受）
+PNG_1X1_B64 = ("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGA"
+               "hKmMIQAAAABJRU5ErkJggg==")
 
 
 def main():
@@ -370,9 +397,64 @@ def main():
     check("chatType single ok", r["type"] == "msg.ack" and r["data"]["code"] == 0)
     json.loads(b.recv())  # 消费单聊推送
     a.send(env("msg.send", {"to": bob, "content": "x", "clientMsgId": "ct2",
-                            "chatType": "invalid"}))
+                             "chatType": "invalid"}))
     r = json.loads(a.recv())
     check("chatType invalid 400", r["type"] == "msg.ack" and r["data"]["code"] == 400)
+
+    # ---- 任务 4：单聊图片消息（msgType=image，独立账号隔离限流额度）----
+    # 图片用独立后缀 75/76：避开群满员用例的 cap 段（16~30/38~49/51~59/62~74）
+    # 与 NOBODY(77)/OVER(78)/M段(80~83)
+    PIMG = base + "75"
+    QIMG = base + "76"
+    pim = WS()
+    r = register(pim, PIMG, "pw1234")
+    check("image register ok", r["type"] == "auth.register_res" and r["data"]["code"] == 0)
+    r = login(pim, PIMG, "pw1234")
+    check("image login ok", r["type"] == "auth.login_res" and r["data"]["code"] == 0)
+    qim = WS()
+    r = register(qim, QIMG, "pw1234")
+    check("image peer register ok", r["type"] == "auth.register_res" and r["data"]["code"] == 0)
+    r = login(qim, QIMG, "pw1234")
+    check("image peer login ok", r["type"] == "auth.login_res" and r["data"]["code"] == 0)
+    # 成功：1x1 PNG 应 ack 0，接收方 content 为 /uploads/*.png
+    r = send_msg(pim, QIMG, PNG_1X1_B64, "img-ok-1", msg_type="image")
+    check("image send ack ok", r["type"] == "msg.ack" and r["data"]["code"] == 0)
+    check("image ack has no msg_type", r["type"] == "msg.ack"
+          and "msgType" not in r["data"] and "msg_type" not in r["data"])
+    r = json.loads(qim.recv())
+    check("image recv url", r["type"] == "msg.recv"
+          and r["data"]["content"].startswith("/uploads/")
+          and r["data"]["content"].endswith(".png"))
+    check("image recv msgType", r["type"] == "msg.recv"
+          and r["data"].get("msgType") == "image")
+    # 非法 msgType 白名单外 → 400
+    pim.send(env("msg.send", {"to": QIMG, "content": "x", "clientMsgId": "img-bad-0",
+                              "msgType": "video"}))
+    r = json.loads(pim.recv())
+    check("image bad msgType 400", r["type"] == "msg.ack" and r["data"]["code"] == 400)
+    # 1.51MB 信封 → 413（分片慢发，避开连接层单次 1MB 读上限）
+    pim.send_slow(env("msg.send", {"to": QIMG, "content": "A" * 1584000,
+                                   "clientMsgId": "img-big-1", "msgType": "image"}))
+    r = json.loads(pim.recv())
+    check("image oversize 413", r["type"] == "msg.ack" and r["data"]["code"] == 413)
+    # 非法 base64 → 400
+    r = send_msg(pim, QIMG, "not-valid-base64!!!", "img-bad-1", msg_type="image")
+    check("image bad base64 400", r["type"] == "msg.ack" and r["data"]["code"] == 400)
+    # 超频：10 张/分钟（img-ok-1 已占 1 个额度，再发 9 张占满，第 10 张 → 429）
+    for i in range(9):
+        r = send_msg(pim, QIMG, PNG_1X1_B64, "img-flood-%d" % i, msg_type="image")
+        assert r["data"]["code"] == 0, r
+        json.loads(qim.recv())  # 消费投递，防队列污染
+    r = send_msg(pim, QIMG, PNG_1X1_B64, "img-flood-9", msg_type="image")
+    check("image rate limit 429", r["type"] == "msg.ack" and r["data"]["code"] == 429)
+    # 历史透传：URL 行带 msgType=image
+    pim.send(env("chat.history", {"to": QIMG}))
+    r = json.loads(pim.recv())
+    himgs = [m for m in r["data"]["data"]["msgs"] if m["content"].startswith("/uploads/")]
+    check("image history has msgType", len(himgs) >= 1
+          and all(m.get("msgType") == "image" for m in himgs))
+    pim.close()
+    qim.close()
 
     # clientMsgId 幂等去重：同 id 重发只投递一次
     a.send(env("msg.send", {"to": bob, "content": "dup", "clientMsgId": "dup1"}))
@@ -1536,7 +1618,7 @@ def main():
     # 清理本次注册的测试账号及其关联消息（精确账号列表，不误删真实用户）
     import subprocess
     used = [A, B, C, SINK, SPAM, SINK2, SPAM2, D, E, F, G, H, base + "50", G1, G2,
-            M1, M2, M3, M4] \
+            M1, M2, M3, M4, PIMG, QIMG] \
         + cap_accounts + [OVER, X, Y, Z, BL, BL2, BL3, BL4]
     inlist = ",".join("'%s'" % x for x in used)
     # 群表清理必须在 users 删除之前（按 account 查 user_id，无级联外键）

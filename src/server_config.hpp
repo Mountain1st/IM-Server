@@ -41,6 +41,14 @@ inline constexpr std::chrono::seconds kCloseFlushDeadline(5);
 // ---- 业务（指令参数） ----
 // 消息内容长度上限（64KB）
 inline constexpr size_t kMaxContentBytes = 64 * 1024;
+// 图片消息（msgType=image）：base64 信封上限 1.5MB（解码后约 1.1MB，
+// 先于 64KB 文本上限分流，图片不走文本路径）
+inline constexpr size_t kMaxImageB64Bytes = 1536 * 1024;
+// 图片发送限流：每用户每 60 秒最多 10 张（独立额度桶，见 AppServer::imgLimiter_）
+inline constexpr std::chrono::seconds kImageWindow(60);
+inline constexpr size_t kImagePerWindow = 10;
+// 图片解码并发闸：同时最多 2 路解码落盘（防大图解码占满工作线程）
+inline constexpr int kMaxConcurrentImageDecode = 2;
 // 登录账号格式：10-11 位纯数字（如手机号）。
 // register 与 chat.create 均按此校验，不合规回 400；
 // auth.login 不校验格式（错误统一按 403 处理，兼容遗留短账号）。
