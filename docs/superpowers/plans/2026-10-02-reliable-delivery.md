@@ -10,10 +10,11 @@
 - `fetchGroupMessages(groupId, sinceTs, sinceId, untilTs, limit, asc)`：谓词严格序（spec §5）。
 - 验收：`ctest` 通过；同秒分页不丢。
 
-## T2 协议：`msg.ack.messageId` + `msg.delivered`
+## T2 协议：`msg.ack.messageId` + 双 ACK
 - `msg.ack`（单/群）`data` 增 `messageId`（成功回显；失败空）。
-- 新增 `msg.delivered {messageIds}` / `msg.delivered_res`；`msg.offline_ack` 复用同一处理器。
-- 更新 `docs/protocol.md` §17x/§5、`docs/client_api.md`。
+- 单聊确认沿用 `msg.offline_ack {messageIds}`（在线+离线统一）；新增群确认 `group.offline_ack {messageIds}` / `group.offline_ack_res`。
+- 两种 ACK 在阶段 A/B 均接收；是否驱动投递事实由 `IM_DELIVERY_ACK_REQUIRED` 决定（T4）。
+- 更新 `docs/protocol.md`（升 v3.3）、`docs/client_api.md`。
 - 验收：协议文档一致；`msg.ack` 含 ID。
 
 ## T3 交付确认处理器 `applyDeliveryAcks`
@@ -23,10 +24,12 @@
 - 指标：`messagesPushed`（推送）与 `messagesDelivered`（确认）分离。
 - 验收：群"推送未确认即断开→重登补发"。
 
-## T4 单聊在线确认制（开关）
-- `server_config.hpp` 增 `IM_DELIVERY_ACK_REQUIRED`（默认过渡期 `off`）。
-- `onSend` 单聊：`off` 保持现状（在线置 1）；`on` 时一律置 `0`（自己对话框仍 1），delivered 仅由确认产生。
-- 验收：`on` 时在线未确认即断线→重登补发；`off` 行为不变。
+## T4 确认制全局开关（单聊+群聊整体）
+- `server_config.hpp` 增 `IM_DELIVERY_ACK_REQUIRED`（默认阶段 A `off`），控制**整个** delivery semantics。
+- `off`（阶段 A）：维持旧语义（单聊在线置 1；群推送/补发时推进水位）；两种 ACK 仅接收不改事实。
+- `on`（阶段 B）：单聊一律置 `0`（自己对话框仍 1），仅 ACK 驱动 `0→1`；群**移除**推送/补发时推进，仅 ACK 驱动游标。
+- **禁止单聊/群聊分灰度**（群游标用户级，混合设备会漏收）。
+- 验收：`on` 时在线未确认即断线→重登补发（单+群）；`off` 行为不变。
 
 ## T5 群离线补发严格游标
 - `pushOfflineMessages` 用 `(sinceTs,sinceId)`；初值 `(max(wm,joined-1),0)`；补发不推进水位。

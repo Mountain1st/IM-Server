@@ -28,22 +28,18 @@
 - 精确一次（exactly-once）：保持 **at-least-once + 客户端 `messageId` 去重**。
 - 多设备已读游标/跨设备同步语义扩展。
 
-## 3. 投递确认协议（关键决策）
+## 3. 投递确认协议（已定：双 ACK）
 
-统一一个**交付确认**消息，客户端对每条"已进入本地消息模型"的 `msg.recv`/`msg.offline` 回执：
+客户端对每条"已进入本地消息模型"的接收消息回执。**单聊与群聊各用一种 ACK**（群消息 `to_user=0`，无法复用单聊处理器）：
 
-```json
-{ "type": "msg.delivered", "data": { "messageIds": ["<id>", "..."] } }
-```
+- **单聊**（在线 `msg.recv` 与离线 `msg.offline` 统一）：
+  `{ "type": "msg.offline_ack", "data": { "messageIds": ["<id>", "..."] } }` → `msg.offline_ack_res`
+- **群聊**（在线群 `msg.recv` 与离线 `msg.offline` 群段统一）：
+  `{ "type": "group.offline_ack", "data": { "messageIds": ["<id>", "..."] } }` → `group.offline_ack_res`
 
-- **推荐新增 `msg.delivered`**（语义清晰）；同时**保留 `msg.offline_ack` 并复用同一处理器**（旧客户端/离线批确认继续可用，等价于 delivered）。二者都触发同一 `applyDeliveryAcks(userId, ids)`。
-- 单聊：`applyDeliveryAcks` 对每条 `to_user=me AND status=0` 执行 `0→1`，写 `delivered_ts`（即现有 `markDelivered` 语义）。
-- 群：对每条 `messageId` 反查 `(group_id, ts, id)`；若该用户是该群成员，推进成员游标 `cursor = max(cursor, (ts,id))`（见 §5 的推进策略与安全性）。
-- 单批上限沿用 `kMaxOfflineAckIds=1000`；回执 `msg.delivered_res`/`offline_ack_res` `{code,msg,data:{}}`。
-
-> **决策点 A**：新增 `msg.delivered`（推荐）还是直接把 `msg.offline_ack` 扩展为通用确认（不新增类型）？默认按"新增 + 复用处理"实现，二者对服务端等价。
-
-> **决策点 B（兼容策略）**：新客户端上线前，旧客户端从不确认在线消息 → 消息长期 `PENDING`，每次登录重复补发。建议：配置开关 `IM_DELIVERY_ACK_REQUIRED`（默认 **off** 的过渡期→稳定后 **on**）。默认方案见 §6。
+- 单批上限沿用 `kMaxOfflineAckIds=1000`；撤回占位也回执（视为"已收到"）。
+- 服务端在**阶段 A 与 B 都接收**这两种 ACK；是否据此改变投递事实由全局开关（§6）决定。阶段 A 下 ACK 仅用于幂等/统计，不改变旧语义。
+- **不新增 `msg.delivered`**（已被上述两类型取代）。
 
 ## 4. `msg.ack` 回显 `messageId`
 
@@ -77,15 +73,20 @@ WHERE group_id=? AND ( ts > :sinceTs OR (ts = :sinceTs AND id > :sinceId) )
 
 **在线群推送**：正常向在线成员 `reply(msg.recv)`；**不再** setWatermark；由成员确认推进。
 
-## 6. 单聊状态机变更
+## 6. 确认制开关（控制单聊 + 群聊，整体切换）
 
-- `onSend` 单聊：**一律以 `kMsgOfflinePending(0)` 落库**（自己对话框仍 `kMsgDelivered`），不再按 `targetOnline` 决定初始状态；随后向在线端推送 `msg.recv`。指标拆分：`messagesPushed`（推送数）与 `messagesDelivered`（确认数）。
-- delivered 仅由 `applyDeliveryAcks` 产生。
-- 已读 `2` 语义不变（`msg.read`，`status IN (0,1)`）。
+新增配置 `IM_DELIVERY_ACK_REQUIRED`（默认 **off**），**控制整个 delivery semantics**（非仅单聊）：
 
-**兼容策略（决策点 B）**：
-- 过渡期：`IM_DELIVERY_ACK_REQUIRED=off` → 在线单聊**仍**先置 `1`（保留旧行为），仅新增群确认与 ack messageId；新客户端上线并验证后切 `on`，单聊改为确认制。
-- 或一次性切换（`on`）并要求客户端同步发布。**推荐分两步**（先 off 上线协议，再 on 收紧），降低两端不同步风险。
+- **`off`（兼容模式，阶段 A）**：在线推送成功即可视为 delivered——单聊落库即 `status=1`；群按旧语义在推送/补发时推进水位线。两种 ACK 可接收但**不改变投递事实**（仅幂等/统计）。
+- **`on`（确认模式，阶段 B）**：发送后保持 `PENDING(0)`；**只有收到客户端 ACK 才推进 delivered fact**——单聊 `status 0→1` + `delivered_ts`；群推进成员投递游标 `(ts,id)`。单聊与群聊**同步切换**。
+
+指标拆分：`messagesPushed`（推送）与 `messagesDelivered`（确认）。已读 `2` 语义不变（`msg.read`，`status IN (0,1)`）。自己对话框恒 `kMsgDelivered`。
+
+> **为何禁止单聊/群聊分灰度**：群游标是**用户级**而非设备级。若只对新客户端开启群确认，而同一账号仍有旧设备不 ACK，新设备 ACK 会把用户级游标推过旧设备未收到的消息 → 旧设备**永久漏收**。故必须：单账号全部在用客户端都具备 ACK 能力后，用**同一开关整体切换**（不引入账号级设备能力协商）。
+
+**发布阶段**：
+- **阶段 A**：服务端上线双 ACK 接收 + `off`（维持旧语义）；客户端实现并发送两种 ACK；协议文档 v3.3。
+- **阶段 B**：全量客户端更新确认后，`IM_DELIVERY_ACK_REQUIRED=on` 整体切换为确认制。
 
 ## 7. 注册 / 登录限流真实 IP（#4）
 
