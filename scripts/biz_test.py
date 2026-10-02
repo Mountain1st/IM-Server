@@ -6,23 +6,49 @@
 覆盖: 注册/重复注册/登录/错误密码/登录限流/消息收发/404/400/401/登出/离线补发/消息发送限流。
 """
 import base64
+import hashlib
+import hmac
 import json
 import os
 import socket
 import struct
 import sys
 import time
+import urllib.parse
 import urllib.request
 
 HOST = sys.argv[1] if len(sys.argv) > 1 else "127.0.0.1"
 PORT = int(sys.argv[2]) if len(sys.argv) > 2 else 9191
 
 results = []
+skipped = []
 
 
 def check(name, cond):
     results.append((name, cond))
     print(("PASS " if cond else "FAIL ") + name)
+
+
+def skip(name, reason=""):
+    # 记录并显式打印跳过项（环境不满足的用例段），最终统计可体现
+    skipped.append((name, reason))
+    print("SKIP " + name + ((" (%s)" % reason) if reason else ""))
+
+
+def media_ok(resp):
+    # media.*_res 顶层 code==0 判定（防御式：非 dict/字段缺失返回 False，不抛 KeyError）
+    if not isinstance(resp, dict):
+        return False
+    data = resp.get("data")
+    return isinstance(data, dict) and data.get("code") == 0
+
+
+def media_data(resp):
+    # 取 media.*_res 的 data.data（code!=0 或字段缺失返回 {}，避免 KeyError）
+    if not media_ok(resp):
+        return {}
+    d = resp.get("data", {}).get("data")
+    return d if isinstance(d, dict) else {}
 
 
 class WS:
@@ -413,107 +439,116 @@ def main():
     # 流：presign → 真机 PUT 到 MinIO → commit → msg.send(mediaId=fileId)
     #     → 接收方 msg.recv 带 mediaId → 查看方 media.url → GET 校验字节一致。
     # 账号后缀 75/76：避开群满员用例的 cap 段与 NOBODY(77)/OVER(78)/M段(80~83)
+    # 环境门禁：服务端未配置对象存储（IM_S3_* 缺失 → store 未启用 → presign
+    # 返回 503）时，显式跳过整段媒体用例（不静默、不 KeyError 中断后续用例）。
+    medias_enabled = bool(os.environ.get("IM_S3_ENDPOINT"))
     PIMG = base + "75"
     QIMG = base + "76"
-    pim = WS()
-    r = register(pim, PIMG, "pw1234")
-    check("image register ok", r["type"] == "auth.register_res" and r["data"]["code"] == 0)
-    r = login(pim, PIMG, "pw1234")
-    check("image login ok", r["type"] == "auth.login_res" and r["data"]["code"] == 0)
-    qim = WS()
-    r = register(qim, QIMG, "pw1234")
-    check("image peer register ok", r["type"] == "auth.register_res" and r["data"]["code"] == 0)
-    r = login(qim, QIMG, "pw1234")
-    check("image peer login ok", r["type"] == "auth.login_res" and r["data"]["code"] == 0)
-
-    png = base64.b64decode(PNG_1X1_B64)
-
-    # 负例：未登录 presign 拒绝（onEnvelope 登录门禁，error 401）
-    anon = WS()
-    r = send(anon, "media.presign", {"fileName": "p.png", "mimeType": "image/png",
-                                     "size": len(png), "kind": "image"})
-    check("media presign not login 401",
-          r["type"] == "error" and r["data"]["code"] == 401)
-    anon.close()
-
-    # 正例：presign → 真机 PUT → commit
-    r = send(pim, "media.presign", {"fileName": "p.png", "mimeType": "image/png",
-                                    "size": len(png), "kind": "image"})
-    check("media presign ok", r["type"] == "media.presign_res" and r["data"]["code"] == 0)
-    upload_url = r["data"]["data"]["uploadUrl"]
-    fid = r["data"]["data"]["fileId"]
-    check("media presign fileId 32hex",
-          len(fid) == 32 and all(c in "0123456789abcdef" for c in fid))
-    check("media PUT upload ok", put(upload_url, png) in (200, 204))
-    # 负例：commit 未上传对象失败（presign 后不 PUT，HEAD 不存在 → 400）
-    r = send(pim, "media.presign", {"fileName": "missing.png", "mimeType": "image/png",
-                                    "size": len(png), "kind": "image"})
-    fid_missing = r["data"]["data"]["fileId"]
-    r = send(pim, "media.commit", {"fileId": fid_missing, "size": len(png),
-                                   "width": 1, "height": 1})
-    check("media commit missing object rejected",
-          r["type"] == "media.commit_res" and r["data"]["code"] == 400)
-    # 负例：伪造 fileId commit 失败（查无记录 → 404）
-    r = send(pim, "media.commit", {"fileId": "f" * 32, "size": len(png),
-                                   "width": 1, "height": 1})
-    check("media commit forged fileId 404",
-          r["type"] == "media.commit_res" and r["data"]["code"] == 404)
-    # 负例：他人 fileId commit 拒绝（非 uploader → 403）
-    r = send(qim, "media.commit", {"fileId": fid, "size": len(png), "width": 1, "height": 1})
-    check("media commit other uploader 403",
-          r["type"] == "media.commit_res" and r["data"]["code"] == 403)
-    # 正例：commit 成功 + 重复 commit 幂等
-    r = send(pim, "media.commit", {"fileId": fid, "size": len(png), "width": 1, "height": 1})
-    check("media commit ok", r["type"] == "media.commit_res" and r["data"]["code"] == 0)
-    r = send(pim, "media.commit", {"fileId": fid, "size": len(png), "width": 1, "height": 1})
-    check("media commit idempotent",
-          r["type"] == "media.commit_res" and r["data"]["code"] == 0)
-
-    # 正例：发图片消息 → 接收方收 msg.recv 带 mediaId(fileId)
-    r = send_msg(pim, QIMG, "", "img-ok-1", msg_type="image", media_id=fid)
-    check("image send ack ok", r["type"] == "msg.ack" and r["data"]["code"] == 0)
-    check("image ack has no msg_type", r["type"] == "msg.ack"
-          and "msgType" not in r["data"] and "msg_type" not in r["data"])
-    r = json.loads(qim.recv())
-    check("image recv mediaId", r["type"] == "msg.recv"
-          and r["data"].get("mediaId") == fid and r["data"].get("msgType") == "image")
-    # 查看方 media.url → GET URL → 下载字节一致
-    r = send(qim, "media.url", {"fileId": fid})
-    check("media url receiver ok", r["type"] == "media.url_res" and r["data"]["code"] == 0)
-    ent = r["data"]["data"]["urls"][fid]
-    check("media url receiver returns url", "url" in ent and ent["url"].startswith("http"))
-    check("media GET bytes match", get(ent["url"]) == png)
-    # 发送方（uploader/from）同样可达
-    r = send(pim, "media.url", {"fileId": fid})
-    check("media url sender ok",
-          r["data"]["data"]["urls"][fid].get("url", "").startswith("http"))
-    # 负例：media.url 越权（非消息相关方 → 403）
+    # 越权用例账号在媒体段外定义：无论媒体段是否跳过，清理列表都需引用它
     CIMG = base + "86"
-    cim = WS(); register(cim, CIMG, "pw1234"); login(cim, CIMG, "pw1234")
-    r = send(cim, "media.url", {"fileId": fid})
-    check("media url stranger 403", r["data"]["data"]["urls"][fid].get("code") == 403)
-    cim.close()
-    # 负例：伪造 fileId 的 msg.send 拒绝（404）
-    r = send_msg(pim, QIMG, "", "img-forged-1", msg_type="image", media_id="f" * 32)
-    check("image send forged mediaId 404", r["type"] == "msg.ack" and r["data"]["code"] == 404)
-    # 负例：他人 fileId 的 msg.send 拒绝（非 uploader → 403）
-    r = send_msg(qim, PIMG, "", "img-other-1", msg_type="image", media_id=fid)
-    check("image send other uploader 403", r["type"] == "msg.ack" and r["data"]["code"] == 403)
-    # 负例：非法 msgType 白名单外 → 400
-    pim.send(env("msg.send", {"to": QIMG, "content": "x", "clientMsgId": "img-bad-0",
-                              "msgType": "video"}))
-    r = json.loads(pim.recv())
-    check("image bad msgType 400", r["type"] == "msg.ack" and r["data"]["code"] == 400)
-    # 历史透传：mediaId 行带 msgType=image
-    pim.send(env("chat.history", {"to": QIMG}))
-    r = json.loads(pim.recv())
-    himgs = [m for m in r["data"]["data"]["msgs"] if m.get("msgType") == "image"]
-    check("image history has mediaId", len(himgs) >= 1
-          and all(m.get("mediaId") == fid for m in himgs))
-    # 注：过期 PUT URL 上传失败为可选负例——预签名 TTL 固定 900s，测试不便等待；
-    # 单测/集成已在任务 5 覆盖签名过期语义，此处标注未执行。
-    pim.close()
-    qim.close()
+    if medias_enabled:
+      pim = WS()
+      r = register(pim, PIMG, "pw1234")
+      check("image register ok", r["type"] == "auth.register_res" and r["data"]["code"] == 0)
+      r = login(pim, PIMG, "pw1234")
+      check("image login ok", r["type"] == "auth.login_res" and r["data"]["code"] == 0)
+      qim = WS()
+      r = register(qim, QIMG, "pw1234")
+      check("image peer register ok", r["type"] == "auth.register_res" and r["data"]["code"] == 0)
+      r = login(qim, QIMG, "pw1234")
+      check("image peer login ok", r["type"] == "auth.login_res" and r["data"]["code"] == 0)
+
+      png = base64.b64decode(PNG_1X1_B64)
+
+      # 负例：未登录 presign 拒绝（onEnvelope 登录门禁，error 401）
+      anon = WS()
+      r = send(anon, "media.presign", {"fileName": "p.png", "mimeType": "image/png",
+                                       "size": len(png), "kind": "image"})
+      check("media presign not login 401",
+            r["type"] == "error" and r["data"]["code"] == 401)
+      anon.close()
+
+      # 正例：presign → 真机 PUT → commit
+      r = send(pim, "media.presign", {"fileName": "p.png", "mimeType": "image/png",
+                                      "size": len(png), "kind": "image"})
+      check("media presign ok", media_ok(r))
+      upload_url = media_data(r).get("uploadUrl", "")
+      fid = media_data(r).get("fileId", "")
+      check("media presign fileId 32hex",
+            len(fid) == 32 and all(c in "0123456789abcdef" for c in fid))
+      check("media PUT upload ok", bool(upload_url) and put(upload_url, png) in (200, 204))
+      # 负例：commit 未上传对象失败（presign 后不 PUT，HEAD 不存在 → 400）
+      r = send(pim, "media.presign", {"fileName": "missing.png", "mimeType": "image/png",
+                                      "size": len(png), "kind": "image"})
+      fid_missing = media_data(r).get("fileId", "")
+      r = send(pim, "media.commit", {"fileId": fid_missing, "size": len(png),
+                                     "width": 1, "height": 1})
+      check("media commit missing object rejected",
+            r["type"] == "media.commit_res" and r["data"]["code"] == 400)
+      # 负例：伪造 fileId commit 失败（查无记录 → 404）
+      r = send(pim, "media.commit", {"fileId": "f" * 32, "size": len(png),
+                                     "width": 1, "height": 1})
+      check("media commit forged fileId 404",
+            r["type"] == "media.commit_res" and r["data"]["code"] == 404)
+      # 负例：他人 fileId commit 拒绝（非 uploader → 403）
+      r = send(qim, "media.commit", {"fileId": fid, "size": len(png), "width": 1, "height": 1})
+      check("media commit other uploader 403",
+            r["type"] == "media.commit_res" and r["data"]["code"] == 403)
+      # 正例：commit 成功 + 重复 commit 幂等
+      r = send(pim, "media.commit", {"fileId": fid, "size": len(png), "width": 1, "height": 1})
+      check("media commit ok", r["type"] == "media.commit_res" and r["data"]["code"] == 0)
+      r = send(pim, "media.commit", {"fileId": fid, "size": len(png), "width": 1, "height": 1})
+      check("media commit idempotent",
+            r["type"] == "media.commit_res" and r["data"]["code"] == 0)
+
+      # 正例：发图片消息 → 接收方收 msg.recv 带 mediaId(fileId)
+      r = send_msg(pim, QIMG, "", "img-ok-1", msg_type="image", media_id=fid)
+      check("image send ack ok", r["type"] == "msg.ack" and r["data"]["code"] == 0)
+      check("image ack has no msg_type", r["type"] == "msg.ack"
+            and "msgType" not in r["data"] and "msg_type" not in r["data"])
+      r = json.loads(qim.recv())
+      check("image recv mediaId", r["type"] == "msg.recv"
+            and r["data"].get("mediaId") == fid and r["data"].get("msgType") == "image")
+      # 查看方 media.url → GET URL → 下载字节一致
+      r = send(qim, "media.url", {"fileId": fid})
+      check("media url receiver ok", media_ok(r))
+      ent = media_data(r).get("urls", {}).get(fid, {})
+      check("media url receiver returns url",
+            "url" in ent and ent["url"].startswith("http"))
+      check("media GET bytes match",
+            "url" in ent and get(ent["url"]) == png)
+      # 发送方（uploader/from）同样可达
+      r = send(pim, "media.url", {"fileId": fid})
+      sent_ent = media_data(r).get("urls", {}).get(fid, {})
+      check("media url sender ok", sent_ent.get("url", "").startswith("http"))
+      # 负例：media.url 越权（非消息相关方 → 403）
+      cim = WS(); register(cim, CIMG, "pw1234"); login(cim, CIMG, "pw1234")
+      r = send(cim, "media.url", {"fileId": fid})
+      check("media url stranger 403", media_data(r).get("urls", {}).get(fid, {}).get("code") == 403)
+      cim.close()
+      # 负例：伪造 fileId 的 msg.send 拒绝（404）
+      r = send_msg(pim, QIMG, "", "img-forged-1", msg_type="image", media_id="f" * 32)
+      check("image send forged mediaId 404", r["type"] == "msg.ack" and r["data"]["code"] == 404)
+      # 负例：他人 fileId 的 msg.send 拒绝（非 uploader → 403）
+      r = send_msg(qim, PIMG, "", "img-other-1", msg_type="image", media_id=fid)
+      check("image send other uploader 403", r["type"] == "msg.ack" and r["data"]["code"] == 403)
+      # 负例：非法 msgType 白名单外 → 400
+      pim.send(env("msg.send", {"to": QIMG, "content": "x", "clientMsgId": "img-bad-0",
+                                "msgType": "video"}))
+      r = json.loads(pim.recv())
+      check("image bad msgType 400", r["type"] == "msg.ack" and r["data"]["code"] == 400)
+      # 历史透传：mediaId 行带 msgType=image
+      pim.send(env("chat.history", {"to": QIMG}))
+      r = json.loads(pim.recv())
+      himgs = [m for m in r["data"]["data"]["msgs"] if m.get("msgType") == "image"]
+      check("image history has mediaId", len(himgs) >= 1
+            and all(m.get("mediaId") == fid for m in himgs))
+      # 注：过期 PUT URL 上传失败为可选负例——预签名 TTL 固定 900s，测试不便等待；
+      # 单测/集成已在任务 5 覆盖签名过期语义，此处标注未执行。
+      pim.close()
+      qim.close()
+    else:
+      skip("media single-chat suite", "IM_S3_ENDPOINT not set (object store disabled)")
 
     # clientMsgId 幂等去重：同 id 重发只投递一次
     a.send(env("msg.send", {"to": bob, "content": "dup", "clientMsgId": "dup1"}))
@@ -1274,37 +1309,43 @@ def main():
     a.s.settimeout(5)
     check("group no echo to sender", echo is None)
     # 任务 10：群聊图片消息改走对象存储直传（全员收 mediaId，历史带 mediaId）
-    png_g = base64.b64decode(PNG_1X1_B64)
-    r = send(a, "media.presign", {"fileName": "g.png", "mimeType": "image/png",
-                                  "size": len(png_g), "kind": "image"})
-    check("group image presign ok", r["data"]["code"] == 0)
-    g_up = r["data"]["data"]["uploadUrl"]
-    g_fid = r["data"]["data"]["fileId"]
-    check("group image PUT ok", put(g_up, png_g) in (200, 204))
-    r = send(a, "media.commit", {"fileId": g_fid, "size": len(png_g), "width": 1, "height": 1})
-    check("group image commit ok", r["data"]["code"] == 0)
-    a.send(env("msg.send", {"to": gid, "content": "", "clientMsgId": "g-img-1",
-                            "chatType": "group", "msgType": "image", "mediaId": g_fid}))
-    r = json.loads(a.recv())
-    check("group image send ack ok", r["type"] == "msg.ack" and r["data"]["code"] == 0)
-    r = json.loads(b.recv())
-    check("group image recv mediaId", r["type"] == "msg.recv"
-          and r["data"].get("mediaId") == g_fid and r["data"].get("msgType") == "image")
-    # 群成员 B 取 GET URL → 字节一致
-    r = send(b, "media.url", {"fileId": g_fid})
-    gent = r["data"]["data"]["urls"][g_fid]
-    check("group image member url ok",
-          "url" in gent and get(gent["url"]) == png_g)
-    # 负例：群聊图片非成员取 url 拒绝（g1 从未加入 → 403）
-    r = send(g1, "media.url", {"fileId": g_fid})
-    check("group image non-member url 403",
-          r["data"]["data"]["urls"][g_fid].get("code") == 403)
-    b.send(env("group.history", {"groupId": gid}))
-    r = json.loads(b.recv())
-    gimgs = [m for m in r["data"]["data"]["msgs"] if m.get("msgType") == "image"]
-    check("group image history has mediaId", r["type"] == "group.history_res"
-          and r["data"]["code"] == 0 and len(gimgs) >= 1
-          and all(m.get("mediaId") == g_fid for m in gimgs))
+    # 环境门禁与单聊一致：未配置对象存储时显式跳过，不中断后续用例。
+    if medias_enabled:
+      png_g = base64.b64decode(PNG_1X1_B64)
+      r = send(a, "media.presign", {"fileName": "g.png", "mimeType": "image/png",
+                                    "size": len(png_g), "kind": "image"})
+      check("group image presign ok",
+            r["type"] == "media.presign_res" and media_ok(r))
+      g_up = media_data(r).get("uploadUrl", "")
+      g_fid = media_data(r).get("fileId", "")
+      check("group image PUT ok", bool(g_up) and put(g_up, png_g) in (200, 204))
+      r = send(a, "media.commit", {"fileId": g_fid, "size": len(png_g), "width": 1, "height": 1})
+      check("group image commit ok",
+            r["type"] == "media.commit_res" and r["data"]["code"] == 0)
+      a.send(env("msg.send", {"to": gid, "content": "", "clientMsgId": "g-img-1",
+                              "chatType": "group", "msgType": "image", "mediaId": g_fid}))
+      r = json.loads(a.recv())
+      check("group image send ack ok", r["type"] == "msg.ack" and r["data"]["code"] == 0)
+      r = json.loads(b.recv())
+      check("group image recv mediaId", r["type"] == "msg.recv"
+            and r["data"].get("mediaId") == g_fid and r["data"].get("msgType") == "image")
+      # 群成员 B 取 GET URL → 字节一致
+      r = send(b, "media.url", {"fileId": g_fid})
+      gent = media_data(r).get("urls", {}).get(g_fid, {})
+      check("group image member url ok",
+            "url" in gent and get(gent["url"]) == png_g)
+      # 负例：群聊图片非成员取 url 拒绝（g1 从未加入 → 403）
+      r = send(g1, "media.url", {"fileId": g_fid})
+      check("group image non-member url 403",
+            media_data(r).get("urls", {}).get(g_fid, {}).get("code") == 403)
+      b.send(env("group.history", {"groupId": gid}))
+      r = json.loads(b.recv())
+      gimgs = [m for m in r["data"]["data"]["msgs"] if m.get("msgType") == "image"]
+      check("group image history has mediaId", r["type"] == "group.history_res"
+            and r["data"]["code"] == 0 and len(gimgs) >= 1
+            and all(m.get("mediaId") == g_fid for m in gimgs))
+    else:
+      skip("media group suite", "IM_S3_ENDPOINT not set (object store disabled)")
     # 非成员 g1 发送 403
     g1.send(env("msg.send", {"to": gid, "content": "x", "clientMsgId": "g2",
                              "chatType": "group"}))
@@ -1739,7 +1780,10 @@ def main():
         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
     fails = [n for n, c in results if not c]
-    print(f"\n{len(results)} tests, {len(fails)} failures")
+    suffix = ""
+    if skipped:
+        suffix = f", {len(skipped)} skipped (" + "; ".join(r for _, r in skipped) + ")"
+    print(f"\n{len(results)} tests, {len(fails)} failures{suffix}")
     return 1 if fails else 0
 
 
