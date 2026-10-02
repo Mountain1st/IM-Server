@@ -51,9 +51,12 @@ public:
   std::vector<int64_t> listMemberIds(int64_t groupId);    // 现成员 userId 列表
   std::vector<int64_t> listUserGroups(int64_t userId);    // 某用户所在现群 groupId 列表
 
-  // ---- 水位线 ----
-  int64_t getWatermark(int64_t groupId, int64_t userId);
-  void setWatermark(int64_t groupId, int64_t userId, int64_t ts);
+  // ---- 投递游标（v3.3，语义=客户端已确认收到的位置，账号级）----
+  // 返回 (ts, id) 游标分量（无行返回 0,0）。ts/id 出参：last_delivered_ts / last_delivered_id
+  void getDeliveredCursor(int64_t groupId, int64_t userId, int64_t* ts, int64_t* id);
+  // 严格只进推进：仅当新游标 (ts,id) 按字典序 > 旧游标才更新（幂等，ACK 重复/回退无副作用）。
+  // 返回 true=成功写库或无需更新；false=DB 错误。
+  bool advanceDeliveredCursor(int64_t groupId, int64_t userId, int64_t ts, int64_t id);
 
 private:
   void loadMembersCache();

@@ -42,8 +42,13 @@ public:
   bool hasMediaAccess(int64_t userId, const std::string& fileId) override;
   std::vector<StoredMessage> fetchGroupMessages(int64_t groupId,
                                                 int64_t sinceTs,
+                                                int64_t sinceId,
                                                 int64_t untilTs,
                                                 int limit, bool asc) override;
+  // 按 message_id 反查 (ts, id, group_id)：群投递 ACK 游标推进用。
+  // 找到返回 true（写出 ts/id/groupId）；不存在返回 false。
+  bool fetchMessageCursor(const std::string& messageId, int64_t* ts, int64_t* id,
+                          int64_t* groupId);
   // 会话列表（v3.2）：单聊派生聚合 + 末条点查 + 群末条 ts 聚合
   std::vector<ConversationEntry> fetchSingleConversations(int64_t userId) override;
   bool fetchLastMessageSingle(int64_t userA, int64_t userB,
