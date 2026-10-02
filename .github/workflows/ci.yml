@@ -54,10 +54,10 @@ jobs:
           # 二进制（minio/minio 镜像匿名拉取被拒，见 2026-10-02 CI run）。
           set -e
           echo "---- 1. 下载 MinIO / mc（dl.min.io，curl -f 下载失败立即终止）----"
-          curl -fsSL -o /tmp/minio https://dl.min.io/server/minio/release/linux-amd64/minio
+          curl -fsSL -o /tmp/minio https://dl.minio.org.cn/server/minio/release/linux-amd64/minio
           chmod +x /tmp/minio
           /tmp/minio --version
-          curl -fsSL -o /tmp/mc https://dl.min.io/client/mc/release/linux-amd64/mc
+          curl -fsSL -o /tmp/mc https://dl.minio.org.cn/client/mc/release/linux-amd64/mc
           chmod +x /tmp/mc
           /tmp/mc --version
 
