@@ -79,6 +79,8 @@ inline constexpr int kMaxConcurrentPbkdf2 = 2;
 inline constexpr size_t kMaxClientMsgIdBytes = 64;
 // msg.offline_ack 单次确认数量上限（防单包触发海量 DB 更新）
 inline constexpr size_t kMaxOfflineAckIds = 1000;
+// 消息撤回时间窗：发送者可在消息落库后 120 秒内撤回（msg.recall）
+inline constexpr int64_t kRecallWindowSec = 120;
 
 // ---- 存储（内存态，防膨胀） ----
 // 每用户离线消息上限
