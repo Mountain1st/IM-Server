@@ -48,16 +48,32 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y default-libmysqlclient-dev libhiredis-dev libboost-dev libcurl4-openssl-dev
 
-      - name: 启动 MinIO（静态二进制，免 Docker 镜像分发策略）
+      - name: 启动 MinIO（静态二进制，取自本仓库 Release 资产）
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          # 方案 A：与本地验证方式同构——不用 Docker service，直接跑官方静态
-          # 二进制（minio/minio 镜像匿名拉取被拒，见 2026-10-02 CI run）。
+          # 方案 A：与本地验证方式同构——不用 Docker service，直接跑静态二进制。
+          # 下载源为本仓库 Release 资产（vendor-binaries，版本锁定）：
+          #   dl.min.io 全路径 410 下线（2026-10-02 实测），dl.minio.org.cn 对
+          #   GitHub runner 返回 403（地域限制）；github.com/releases/download
+          #   端点对 fine-grained 认证 404——故用 API assets 端点
+          #   （api.github.com/.../releases/assets/{id} + Accept: octet-stream，
+          #   GITHUB_TOKEN 为 Actions 内置、仅本仓库只读，无泄漏面）。
           set -e
-          echo "---- 1. 下载 MinIO / mc（dl.min.io，curl -f 下载失败立即终止）----"
-          curl -fsSL -o /tmp/minio https://dl.minio.org.cn/server/minio/release/linux-amd64/minio
+          API="https://api.github.com/repos/northwest2hugekongming/IM-Server/releases/assets"
+          # 资产 id（vendor-binaries release）：mc / minio；sha256 与本地验证一致
+          MC_ID=605081043
+          MINIO_ID=605073834
+          MINIO_SHA256=eef6581f6509f43ece007a6f2eb4c5e3ce41498c8956e919a7ac7b4b170fa431
+
+          echo "---- 1. 下载 MinIO / mc（API 资产端点，curl -f 失败立即终止）----"
+          curl -fsSL -H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/octet-stream" \
+            -o /tmp/minio "$API/$MINIO_ID"
           chmod +x /tmp/minio
+          echo "$MINIO_SHA256  /tmp/minio" | sha256sum -c -
           /tmp/minio --version
-          curl -fsSL -o /tmp/mc https://dl.minio.org.cn/client/mc/release/linux-amd64/mc
+          curl -fsSL -H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/octet-stream" \
+            -o /tmp/mc "$API/$MC_ID"
           chmod +x /tmp/mc
           /tmp/mc --version
 
