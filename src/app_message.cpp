@@ -20,6 +20,8 @@
 // - onHistory / onGroupHistory：单聊/群历史拉取（受查询限流 20 次/10s）
 // - onRead：已读回执（更新 read_ts，并推送 msg.read_notify 给其他端，
 //   有会话往来门槛防 userId 枚举）
+// - onRecall：消息撤回（发送者+120s 窗内；存储层单条 UPDATE 原子校验；
+//   recall_notify 扇出对端/群成员/多端；重复撤回幂等）
 // - pushOfflineMessages：登录/重连后离线消息补发（非破坏性）
 // - nextMessageId：全局消息 ID（时间戳前缀 + 进程内自增，防重启碰撞）
 // 线程：工作线程池（AppServer::onEnvelope 分发）
@@ -42,28 +44,40 @@ std::string AppServer::nextMessageId() {
          std::to_string(seq);
 }
 
+json AppServer::messageToJson(const StoredMessage& m, const std::string& groupName) {
+  // 撤回终态：正文/媒体在唯一出口剥离（四出口共用本函数，防单点遗漏）
+  const bool recalled = (m.status == kMsgRecalled);
+  std::string fromNick;
+  userStore_->nickname(m.fromUser, &fromNick);
+  std::string fromAccount;
+  if (!userStore_->accountOf(m.fromUser, &fromAccount)) fromAccount.clear();
+  json j = {
+    {"from", fromAccount},
+    {"fromNick", fromNick},
+    {"content", recalled ? std::string() : m.content},
+    {"ts", m.ts},
+    {"clientMsgId", m.clientMsgId},
+    {"messageId", m.messageId},
+    {"chatType", m.chatType},
+    {"msgType", m.msgType},
+    // 媒体消息透传 fileId（存于 content）；撤回后剥离
+    {"mediaId", (!recalled && m.msgType == "image") ? m.content : std::string()},
+  };
+  if (recalled) j["recalled"] = true;
+  if (m.groupId != 0) {
+    j["groupId"] = m.groupId;
+    if (!groupName.empty()) j["groupName"] = groupName;
+  }
+  return j;
+}
+
 void AppServer::pushOfflineMessages(int64_t userId,
                                     const std::shared_ptr<Session>& session) {
   // 从消息存储读取该用户的离线消息（status=offline_pending），按 ts 升序
   auto stored = msgRepo_->fetchOffline(userId);
   json arr = json::array();
   for (const auto& m : stored) {
-    std::string fromNick;
-    userStore_->nickname(m.fromUser, &fromNick);
-    std::string fromAccount;
-    if (!userStore_->accountOf(m.fromUser, &fromAccount)) fromAccount.clear();
-    arr.push_back(json{
-      {"from", fromAccount},
-      {"fromNick", fromNick},
-      {"content", m.content},
-      {"ts", m.ts},
-      {"clientMsgId", m.clientMsgId},
-      {"messageId", m.messageId},
-      {"chatType", m.chatType},
-      {"msgType", m.msgType},
-      // 媒体消息透传 fileId（存于 content），非媒体为空串
-      {"mediaId", m.msgType == "image" ? m.content : std::string()},
-    });
+    arr.push_back(messageToJson(m));
   }
   // 群离线补发：各群按水位线查行（ts > watermark 且在成员在群期间内），与单聊行按 ts 合并
   int64_t maxTs = 0;
@@ -76,22 +90,9 @@ void AppServer::pushOfflineMessages(int64_t userId,
     std::string gname;
     groupRepo_->getGroup(gid, &gname, nullptr);
     for (const auto& m : grows) {
-      if (m.fromUser == userId) continue;  // 跳过发送者自己的消息（与在线路径一致）
-      std::string fromNick, fromAccount;
-      userStore_->nickname(m.fromUser, &fromNick);
-      if (!userStore_->accountOf(m.fromUser, &fromAccount)) fromAccount.clear();
-      arr.push_back(json{{"from", fromAccount},
-                         {"fromNick", fromNick},
-                         {"groupId", gid},
-                         {"groupName", gname},
-                         {"content", m.content},
-                         {"ts", m.ts},
-                         {"clientMsgId", m.clientMsgId},
-                         {"messageId", m.messageId},
-                         {"chatType", "group"},
-                         {"msgType", m.msgType},
-                         // 媒体消息透传 fileId（存于 content）
-                         {"mediaId", m.msgType == "image" ? m.content : std::string()}});
+      if (m.fromUser == userId) continue;      // 跳过发送者自己的消息（与在线路径一致）
+      if (m.status == kMsgRecalled) continue;  // 已撤回不补发（未见过的人不收占位符）
+      arr.push_back(messageToJson(m, gname));
       maxTs = std::max(maxTs, m.ts);
       groupRepo_->setWatermark(gid, userId, m.ts);
     }
@@ -471,22 +472,7 @@ void AppServer::onHistory(const std::shared_ptr<Session>& session, const json& d
   auto stored = msgRepo_->fetchHistory(session->userId(), to, limit);
   json arr = json::array();
   for (const auto& m : stored) {
-    std::string fromNick;
-    userStore_->nickname(m.fromUser, &fromNick);
-    std::string fromAccount;
-    if (!userStore_->accountOf(m.fromUser, &fromAccount)) fromAccount.clear();
-    arr.push_back(json{
-      {"from", fromAccount},
-      {"fromNick", fromNick},
-      {"content", m.content},
-      {"ts", m.ts},
-      {"clientMsgId", m.clientMsgId},
-      {"messageId", m.messageId},
-      {"chatType", m.chatType},
-      {"msgType", m.msgType},
-      // 媒体消息透传 fileId（存于 content），非媒体为空串
-      {"mediaId", m.msgType == "image" ? m.content : std::string()},
-    });
+    arr.push_back(messageToJson(m));
   }
   session->reply(makeResult("chat.history_res", 0, "ok", json{{"msgs", arr}}));
 }
@@ -520,6 +506,79 @@ void AppServer::onRead(const std::shared_ptr<Session>& session, const json& data
         t->reply(makeEnvelopeText("msg.read_notify", rd));
       }
     }
+  }
+}
+
+void AppServer::onRecall(const std::shared_ptr<Session>& session, const json& data) {
+  // 消息撤回（msg.recall）：仅发送者、落库后 kRecallWindowSec 内可撤。
+  // 原子校验在存储层单条 UPDATE 完成（存在+权限+时间窗+状态，免 TOCTOU）。
+  // 成功回执后扇出 msg.recall_notify：单聊=对端全部在线端 + 发送者其他端；
+  // 群聊=除发起端外全部在线成员端。重复撤回幂等回 0 且不重复扇出。
+  const char* kRes = "msg.recall_res";
+  if (!data.contains("messageId") || !data["messageId"].is_string() ||
+      data["messageId"].get<std::string>().empty()) {
+    session->reply(makeResult(kRes, 400, "参数错误", json::object()));
+    return;
+  }
+  // 限流：与消息发送同桶（撤回频率远低于发送，不设专桶）
+  if (!msgLimiter_->allow(session->userId(), kMaxSendPerWindow, kSendWindow)) {
+    g_metrics.rateLimited.fetch_add(1, std::memory_order_relaxed);
+    session->reply(makeResult(kRes, 429, "操作过于频繁，请稍后再试", json::object()));
+    return;
+  }
+  const std::string messageId = data["messageId"].get<std::string>();
+  const int64_t now = static_cast<int64_t>(std::time(nullptr));
+  RecallInfo info;  // RecallResult/RecallInfo 为命名空间级类型，用非限定名
+  const auto r =
+      msgRepo_->recallMessage(messageId, session->userId(), now, config::kRecallWindowSec, &info);
+  switch (r) {
+    case RecallResult::kOk:
+      break;
+    case RecallResult::kAlready:  // 幂等成功（首次已扇出）
+      session->reply(makeResult(kRes, 0, "ok", json::object()));
+      return;
+    case RecallResult::kNotFound:
+      session->reply(makeResult(kRes, 404, "消息不存在", json::object()));
+      return;
+    case RecallResult::kForbidden:
+      session->reply(makeResult(kRes, 403, "无权撤回该消息", json::object()));
+      return;
+    case RecallResult::kExpired:
+      session->reply(makeResult(kRes, 410, "超过可撤回时间", json::object()));
+      return;
+    case RecallResult::kError:
+      session->reply(makeResult(kRes, 500, "服务器内部错误", json::object()));
+      return;
+  }
+  session->reply(makeResult(kRes, 0, "ok", json::object()));
+  // notify 扇出：先回执后推送（与 onSend ack-then-deliver 同序）；
+  // 回查失败/信息缺失时静默跳过——撤回已生效，同步缺失由占位符兜底
+  // （与 msg.read_notify 免 ACK 同先例）
+  if (info.chatType.empty()) return;
+  std::string fromAccount;
+  if (!userStore_->accountOf(session->userId(), &fromAccount)) fromAccount.clear();
+  json nd = {{"messageId", messageId}, {"chatType", info.chatType},
+             {"from", fromAccount}};
+  if (info.chatType == "group") {
+    if (info.groupId <= 0) return;
+    nd["groupId"] = info.groupId;
+    for (const int64_t uid : groupRepo_->listMemberIds(info.groupId)) {
+      for (auto& t : onlineMgr_.sessions(uid)) {
+        if (t.get() == session.get()) continue;  // 发起端不收（发送者其他端仍收）
+        t->reply(makeEnvelopeText("msg.recall_notify", nd));
+      }
+    }
+    return;
+  }
+  // 单聊：对端全部在线端 + 发送者其他端；自己对话框（to==自己）只发其他端
+  if (info.toUser != session->userId()) {
+    for (auto& t : onlineMgr_.sessions(info.toUser)) {
+      t->reply(makeEnvelopeText("msg.recall_notify", nd));
+    }
+  }
+  for (auto& t : onlineMgr_.sessions(session->userId())) {
+    if (t.get() == session.get()) continue;
+    t->reply(makeEnvelopeText("msg.recall_notify", nd));
   }
 }
 

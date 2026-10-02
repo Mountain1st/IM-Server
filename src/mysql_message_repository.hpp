@@ -32,6 +32,9 @@ public:
   std::vector<StoredMessage> fetchHistory(int64_t userA, int64_t userB,
                                           int limit) override;
   void markRead(int64_t toUser, int64_t fromUser, int64_t readTs) override;
+  RecallResult recallMessage(const std::string& messageId, int64_t senderId,
+                             int64_t nowSec, int64_t windowSec,
+                             RecallInfo* info) override;
   // 两用户间是否存在单聊消息记录（任一方向）
   bool hasConversation(int64_t userA, int64_t userB) override;
   // 媒体访问可达性：单聊 from/to=userId，或 userId 为引用该媒体的群消息群成员。

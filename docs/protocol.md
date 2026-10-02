@@ -1,9 +1,10 @@
-# IM 协议文档（v3.0）
+# IM 协议文档（v3.1）
 
 > 本协议为服务端、Qt 客户端、Web 客户端三端共用的统一消息协议。
 > 传输层为 WebSocket 文本帧（UTF-8 编码的 JSON 字符串）。
 
-**版本变更（v0.1 → v3.0）**
+**版本变更（v0.1 → v3.1）**
+- v3.1 **消息撤回（msg.recall）**：发送者可在消息落库后 **120 秒**内撤回自己发的单聊/群聊消息（仅发送者可撤，服务端原子状态迁移 `messages.status=3 RECALLED` 终态）。撤回后：历史/离线出口统一剥离正文返回 `recalled:true` 占位符（`content`/`mediaId` 为空串，消息行保留在原位置不跳号）；已撤回 pending 离线消息不再补发；已撤回图片经 `media.url` 拒绝（403）。多端/对端经免 ACK 的 `msg.recall_notify` 同步（丢失靠重登补发与历史拉取自愈）；重复撤回幂等回 0。见 §5 指令表与字段细则
 - v3.0 **媒体系统（对象存储直传）**：图片从「WS base64 内联 + 本地盘 `/uploads/`」升级为「对象存储（MinIO/S3）预签名直传」——客户端先 `media.presign` 拿 PUT 预签名 URL 直传对象存储，`media.commit` 由服务端 HEAD 校验后落 `media` 表，`msg.send(msgType=image, mediaId)` 只携带媒体引用（不再内联 base64，旧 1.5MB 信封上限移除）；查看时 `media.url` 鉴权后签发短期 GET URL。移除本地盘对象键与 nginx `/uploads/` 静态托管。单文件上限 20MB、PUT/GET 预签名分别 15/60 分钟、presign 每用户 30 次/分钟；`msg.recv`/`msg.offline`/历史透传 `mediaId`（fileId 字符串）。见 §4/§5 及 `docs/superpowers/specs/2026-10-01-media-system-design.md`
 - v2.4 **拉黑（黑名单）**：新增 `block.add/remove/list`。语义为**双向断联**：A 拉黑 B 期间，双方单聊双向 403 拒绝不落库（文案分方向：拉黑方「你已拉黑对方，请先解除」/被拉黑方「对方已拒收」），双向好友请求拒绝（被拉黑方文案与 `allowAdd` 关相同——**模糊防探测**）；**群聊不受影响**（群治理靠踢人）；**不追溯**——拉黑前已落库消息照常可见、未领取的 pending 离线消息照常补发。拉黑自动解除联系人关系并关闭双向好友请求；解除后恢复通信能力、**不恢复联系人关系**（需重新走好友请求）。拉黑优先级高于临时对话开关与联系人状态。无 S2C 推送（被拉黑方全程无感；操作方多端靠 `block.list` 同步，与 settings 同策略）。拉黑缓存纳入 syncCaches 自愈（第四个）
 - v2.3 **停机优雅化 + 架构四项收敛**：**客户端可见**——服务端停机（部署重启/SIGTERM）时在线连接先收到 WS Close(1001 Going Away) 再断开（此前为裸 TCP 断开），停机前工作队列排空（已入队消息任务处理完，落库不丢；排水超 5 秒放弃）；**服务端内部（客户端无感）**——指令路由由 29 层 if-else 改哈希表（O(1) 查表）；联系人/群成员内存缓存随清理线程低频比对库计数、漂移即全量重建（绕过服务端直改库最迟约 30 分钟自愈）；新连接从 `fd % N` 取模改为**最少连接优先**分配 IO 线程（消除负载倾斜）；**MySQL 断线自愈**（v2.3.1，2026-09-29 生产故障根治：闲置超 `wait_timeout` 被服务端踢掉（errno 4031/2006/2013）后自动重建连接重试一次，登录不再持续失败到重启）
@@ -105,6 +106,7 @@
 | `msg.offline_ack` | `{ "messageIds": ["...", ...] }` | 客户端确认已收到 `msg.offline` 中的消息，服务端标记为已投递（确认后不再补发）；回 `msg.offline_ack_res` |
 | `chat.history` | `{ "to": "<account>", "limit": 50(可选) }` | 拉取与目标用户的单聊历史（`to` 为目标登录账号，v1.7；兼容旧协议传数字 `userId`），按 ts 倒序，最新在前，默认 50 条，上限 200；回 `chat.history_res` |
 | `msg.read` | `{ "from": "<account>", "ts": 1720000000(可选) }` | 已读回执（`from` 为对方登录账号，v1.7；兼容旧协议传数字 `userId`）：把与 `from` 用户截至 `ts` 的未读消息标记为已读；回 `msg.read_res` |
+| `msg.recall` | `{ "messageId": "..." }` | 撤回消息（v3.1）：仅消息发送者可在落库后 120 秒内撤回（单聊/群聊均限发送者本人）；回 `msg.recall_res` |
 | `user.search` | `{ "keyword": "...", "limit": 20(可选) }` | 按账号/昵称模糊搜索（v1.8，受目标 `searchable` 控制，排除自己），回 `user.search_res` |
 | `contact.request` | `{ "account": "<对方账号>" }` | 发送好友请求（v1.8），回 `contact.request_res`；成功在线推送对方 `contact.request` 事件、离线登录补发 |
 | `contact.accept` | `{ "account": "<对方账号>" }` | 同意好友请求（v1.8），双方成为联系人，回 `contact.accept_res`；成功推送对方 `contact.added` 事件；**若对方也向你发过待处理请求（互相添加），该反向请求一并自动关闭** |
@@ -168,12 +170,14 @@
 | `auth.logout_res` | `{ "code": 0, "msg": "ok", "data": {} }` | 登出结果 |
 | `msg.recv` | `{ "from": "<account>", "fromNick": "发送方昵称", "content": "...", "ts": 1720000000, "clientMsgId": "...", "messageId": "全局消息ID", "chatType": "single", "mediaId": "<fileId或空串>" }` | 收到的新消息（单聊推送）；`from` 为发送方登录账号（v1.7）；`fromNick` 供直接展示；`messageId` 为服务器生成的全局唯一 ID（v1.4 起，客户端可忽略）；**媒体消息（v3.0）`mediaId` 为 fileId 字符串，非媒体为空串**（客户端据此调 `media.url` 取图）；**群聊推送结构相同，另含 `groupId`（数字群标识）/`groupName` 且 `chatType` 为 `"group"`（v1.9）**；**v2.2 多端一致：发送者自己的其他在线端也会收到该消息（发起连接不回显），多设备会话视图一致**。注意边界：**仅覆盖在线端**——某端离线期间本账号其他端发的消息不会经 `msg.offline` 补发给该端（消息已落库），客户端重登后应拉 `chat.history` / `group.history` 对齐视图 |
 | `msg.read_notify` | `{ "from": "<account>", "readTs": 1720000000 }` | 已读同步（v2.2）：该用户某一端调用 `msg.read` 后，其**其他在线端**收到此推送（`from` 为会话对方账号），客户端应将对应会话未读清零；免 ACK，且仅推在线端（离线端重登不补，靠 `chat.history` 拉取自愈） |
+| `msg.recall_notify` | `{ "messageId": "...", "chatType": "single"/"group", "groupId": 1, "from": "<撤回者account>" }` | 撤回同步（v3.1）：`groupId` 仅群聊携带。扇出规则——单聊：接收方全部在线端 + 发送者其他在线端（发起端不收；自己对话框只发其他端）；群聊：全部在线成员端除发起端。免 ACK（丢失靠占位符兜底），无 content（正文已剥离，不重复下发） |
 | `msg.ack` | `{ "code": 0, "msg": "ok", "clientMsgId": "..." }` | 服务端已接收消息的回执，`clientMsgId` 对齐发送端 |
 | `msg.offline` | `{ "msgs": [ { "from": "<account>", "fromNick": "...", "content": "...", "ts": 1720000000, "clientMsgId": "...", "messageId": "...", "chatType": "single", "mediaId": "<fileId或空串>" }, ... ] }` | 登录后补发的离线消息列表；`msgs[]` 元素结构与 `msg.recv` 相同（`from` 为发送方登录账号；**媒体消息 `mediaId` 为 fileId 字符串（v3.0）；群消息元素另含 `groupId`/`groupName` 且 `chatType` 为 `"group"`（v1.9，单聊与群按水位线合并补发）**）；**非破坏性补发**（v1.5：确认前保留，收到后应发 `msg.offline_ack`，确认后不再补发） |
 | `chat.create_res` | `{ "code": 0, "msg": "ok", "data": { "userId": 1, "account": "登录账号", "username": "昵称" } }` | 新建对话结果；成功返回目标用户 `userId`、**`account`** 与昵称；`404` 表示账号不存在 |
 | `msg.offline_ack_res` | `{ "code": 0, "msg": "ok", "data": {} }` | 离线消息确认结果 |
 | `chat.history_res` | `{ "code": 0, "msg": "ok", "data": { "msgs": [ { "from": "<account>", "fromNick": "...", "content": "...", "ts": 1720000000, "clientMsgId": "...", "messageId": "...", "chatType": "single", "mediaId": "<fileId或空串>" }, ... ] } }` | 单聊历史；`msgs[]` 元素结构与 `msg.recv` 相同（`from` 为发送方登录账号；**媒体消息 `mediaId` 为 fileId 字符串（v3.0）**），**按 ts 倒序（最新在前）**；已加群隔离，群消息不在此返回（群历史用 `group.history_res`） |
 | `msg.read_res` | `{ "code": 0, "msg": "ok", "data": {} }` | 已读回执结果 |
+| `msg.recall_res` | `{ "code": 0, "msg": "ok", "data": {} }` | 撤回结果（v3.1）：`0` 成功（**重复撤回同一消息幂等回 0**，且不重复扇出 notify）；`400` 参数错误（messageId 缺失/非字符串/空串）、`403` 无权撤回（非发送者）、`404` 消息不存在、`410` 超过可撤回时间（120 秒）、`429` 操作过于频繁（与消息发送同额度桶 30 条/10s）、`500` 服务器内部错误 |
 | `user.search_res` | `{ "code": 0, "msg": "ok", "data": { "users": [ { "account": "...", "username": "昵称", "isContact": true }, ... ] } }` | 搜索结果；`isContact` 表示目标是否已是我的联系人 |
 | `contact.request_res` | `{ "code": 0, "msg": "ok", "data": {} }` | 好友请求结果；`403` 对方未开启添加、`409` 对方已是联系人 / 已存在待处理请求、`400` 不能添加自己、`404` 目标用户不存在 |
 | `contact.accept_res` | `{ "code": 0, "msg": "ok", "data": {} }` | 同意好友请求结果；`404` 不存在该待处理请求 |
@@ -213,6 +217,7 @@
 
 - `msg.recv.chatType` 为 `"single"`（单聊）或 `"group"`（群聊，v1.9）；`msg.offline.msgs[]` 元素结构与 `msg.recv` 相同，同样携带 `chatType`、`clientMsgId`、`fromNick`、`messageId` 与 `mediaId`（v3.0，媒体消息为 fileId 字符串，非媒体为空串）
 - **群载荷（v1.9）**：群消息的 `msg.recv` / `msg.offline.msgs[]` / `group.history_res.msgs[]` 元素含 `groupId`（数字群标识）、`groupName`，`chatType` 为 `"group"`，`from` 为发送方 `account`；客户端按 `chatType` 区分单聊与群聊会话
+- **撤回占位符（v3.1）**：已撤回消息在 `chat.history_res.msgs[]` / `group.history_res.msgs[]` 中**保留原位置**，元素多一个 `"recalled": true`，且 `content` 与 `mediaId` 均为空串（正文服务端剥离，原文不留接口面）；客户端按 `recalled` 渲染「XXX 撤回了一条消息」占位气泡。已撤回的 pending 离线消息**不再**进入 `msg.offline` 补发；`msg.recall` 服务端状态机：`0 PENDING / 1 DELIVERED / 2 READ → 3 RECALLED（终态）`
 - **离线补发与确认（v1.5）**：离线消息持久化到 MySQL；登录/重连时 `msg.offline` 推送 `status=pending` 的消息。客户端收到后应发送 `msg.offline_ack { messageIds }` 确认，服务端将已确认消息标记为 **delivered**，此后不再补发；**未确认的消息保留**（补发中断不丢失，重登仍会推送），供客户端重试。建议客户端用 `messageId` 去重，避免重复展示
 - **`fromNick` 为发送方昵称**：客户端直接用于气泡展示，无需再按 `from` 发起查询
 - 客户端应**忽略信封及 data 中的未知字段**，保证协议向后兼容

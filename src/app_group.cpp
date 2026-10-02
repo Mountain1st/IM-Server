@@ -521,21 +521,7 @@ void AppServer::onGroupHistory(const std::shared_ptr<Session>& session, const js
   groupRepo_->getGroup(groupId, &gname, nullptr);
   json arr = json::array();
   for (const auto& m : stored) {
-    std::string fromNick, fromAccount;
-    userStore_->nickname(m.fromUser, &fromNick);
-    if (!userStore_->accountOf(m.fromUser, &fromAccount)) fromAccount.clear();
-    arr.push_back(json{{"from", fromAccount},
-                       {"fromNick", fromNick},
-                       {"groupId", groupId},
-                       {"groupName", gname},
-                       {"content", m.content},
-                       {"ts", m.ts},
-                       {"clientMsgId", m.clientMsgId},
-                       {"messageId", m.messageId},
-                       {"chatType", "group"},
-                       {"msgType", m.msgType},
-                       // 媒体消息透传 fileId（存于 content）
-                       {"mediaId", m.msgType == "image" ? m.content : std::string()}});
+    arr.push_back(messageToJson(m, gname));
   }
   session->reply(makeResult("group.history_res", 0, "ok", json{{"msgs", arr}}));
 }

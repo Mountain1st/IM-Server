@@ -253,6 +253,7 @@ void AppServer::buildRoutes() {
     {"msg.offline_ack", &AppServer::onOfflineAck},
     {"chat.history", &AppServer::onHistory},
     {"msg.read", &AppServer::onRead},
+    {"msg.recall", &AppServer::onRecall},
     {"user.search", &AppServer::onSearch},
     {"contact.request", &AppServer::onContactRequest},
     {"contact.accept", &AppServer::onContactAccept},

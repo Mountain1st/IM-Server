@@ -98,6 +98,11 @@ private:
   void onHistory(const std::shared_ptr<Session>& session, const json& data);
   // 已读回执：记录与某用户的消息已读
   void onRead(const std::shared_ptr<Session>& session, const json& data);
+  void onRecall(const std::shared_ptr<Session>& session, const json& data);
+  // 消息出站序列化（单一出口）：status=RECALLED 时剥离 content/mediaId，
+  // 输出 recalled:true 占位符；正常消息与既有字段逐一对齐（行为不变）。
+  // groupName 非空时追加 groupName 字段（群历史/群补发用）。
+  json messageToJson(const StoredMessage& m, const std::string& groupName = "");
   void onSearch(const std::shared_ptr<Session>& session, const json& data);
   void onContactRequest(const std::shared_ptr<Session>& session, const json& data);
   void onContactAccept(const std::shared_ptr<Session>& session, const json& data);

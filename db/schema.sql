@@ -28,6 +28,7 @@ CREATE TABLE IF NOT EXISTS users (
 --   0 = OFFLINE_PENDING  目标离线，待补发
 --   1 = DELIVERED        已投递（在线投递 或 离线消息已由客户端确认）
 --   2 = READ             接收方已读（msg.read）
+--   3 = RECALLED         已撤回（终态，msg.recall；历史/离线出口剥离正文）
 CREATE TABLE IF NOT EXISTS messages (
   id            BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
   message_id    VARCHAR(64)  NOT NULL,           -- 全局唯一 ID（对外，供确认/去重）
@@ -43,6 +44,7 @@ CREATE TABLE IF NOT EXISTS messages (
   status        TINYINT      NOT NULL DEFAULT 0,
   delivered_ts  BIGINT       NOT NULL DEFAULT 0,
   read_ts       BIGINT       NOT NULL DEFAULT 0,
+  recalled_ts   BIGINT       NOT NULL DEFAULT 0, -- 撤回时间（msg.recall；0=未撤回）
   KEY idx_to_status (to_user, status),
   KEY idx_pair_ts  (from_user, to_user, ts),
   -- 全局唯一（数据库级强制）：防自愈重试双插（连接断时 INSERT 可能已
