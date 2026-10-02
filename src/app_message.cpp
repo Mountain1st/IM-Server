@@ -87,16 +87,21 @@ void AppServer::pushOfflineMessages(int64_t userId,
   for (const int64_t gid : groupRepo_->listUserGroups(userId)) {
     int64_t joined = 0, left = 0;
     if (!groupRepo_->memberPeriod(gid, userId, &joined, &left)) continue;
-    const int64_t wm = groupRepo_->getWatermark(gid, userId);
-    auto grows = msgRepo_->fetchGroupMessages(gid, std::max(wm, joined - 1), left, 100, true);
+    // 投递游标（v3.3）：客户端已确认位置，严格只进；补发不在此推进（由 group.offline_ack 推进）
+    int64_t cts = 0, cid = 0;
+    groupRepo_->getDeliveredCursor(gid, userId, &cts, &cid);
+    // 游标 = max(已确认游标, 入群前一刻)：入群前消息不可见（joined-1 使同秒可见）
+    const int64_t sinceTs = std::max(cts, joined - 1);
+    const int64_t sinceId = (sinceTs == cts) ? cid : 0;
+    auto grows = msgRepo_->fetchGroupMessages(gid, sinceTs, sinceId, left, 100, true);
     std::string gname;
     groupRepo_->getGroup(gid, &gname, nullptr);
     for (const auto& m : grows) {
-      if (m.fromUser == userId) continue;      // 跳过发送者自己的消息（与在线路径一致）
-      if (m.status == kMsgRecalled) continue;  // 已撤回不补发（未见过的人不收占位符）
+      if (m.fromUser == userId) continue;      // 跳过自身消息（不可交付，不阻塞游标）
+      if (m.status == kMsgRecalled) continue;  // 已撤回不补发（不可交付，不阻塞游标）
       arr.push_back(messageToJson(m, gname));
       maxTs = std::max(maxTs, m.ts);
-      groupRepo_->setWatermark(gid, userId, m.ts);
+      // 注意：不在此推进游标——由客户端 group.offline_ack 确认后严格只进推进
     }
   }
   if (!arr.empty()) {
@@ -381,11 +386,12 @@ void AppServer::onSend(const std::shared_ptr<Session>& session, const json& data
     ack(0, "ok");
     return;
   }
-  // 目标在线与否决定消息初始状态：在线=delivered，离线=offline_pending
+  // 投递确认语义 v2：单聊一律先落 PENDING，由客户端 msg.offline_ack 推进为 delivered
+  // （在线也如此——“服务端已发送”≠“客户端已确认收到”）。targetOnline 仅决定是否即时推送。
   const int64_t now = static_cast<int64_t>(std::time(nullptr));
   const std::string messageId = nextMessageId();
   const bool targetOnline = !onlineMgr_.sessions(to).empty();
-  const int status = targetOnline ? kMsgDelivered : kMsgOfflinePending;
+  const int status = kMsgOfflinePending;  // v3.3：恒 PENDING，ACK 后由 markDelivered 推 0→1
   // 先持久化成功再确认（避免"内存入队伪装成持久化"）
   if (!msgRepo_->saveMessage(messageId, session->userId(), to, content, now,
                              clientMsgId, chatType, status, 0, msgType,
@@ -431,8 +437,9 @@ void AppServer::onSend(const std::shared_ptr<Session>& session, const json& data
 }
 
 void AppServer::onOfflineAck(const std::shared_ptr<Session>& session, const json& data) {
-  // 客户端确认已收到 msg.offline 中的消息，服务端标记为已投递
-  // 数组数量上限：超限直接拒绝，防单包触发海量 DB 更新
+  // 通用投递确认（v3.3）：单聊在线/离线通用（在线也落 PENDING，见 onSend）。
+  // 服务端把对应单聊消息 status 0→1（markDelivered 谓词 to_user/status=0，幂等）。
+  // 群消息不走此指令（群 to_user=0，经 group.offline_ack 推进成员游标）。
   if (data.contains("messageIds") && data["messageIds"].is_array() &&
       data["messageIds"].size() > kMaxOfflineAckIds) {
     session->reply(makeResult("msg.offline_ack_res", 400, "确认数量超限", json::object()));

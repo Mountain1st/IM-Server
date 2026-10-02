@@ -109,12 +109,18 @@ public:
   // 单聊 from/to=userId；群聊 userId 为群现成员（left_ts=0）。
   // V1 不校验群消息可见时间窗口（保守放行，精确窗口属 V2）；查询失败 fail-closed。
   virtual bool hasMediaAccess(int64_t userId, const std::string& fileId) = 0;
-  // 拉取某群在时间窗内的消息：ts > sinceTs（水位线），untilTs==0 表示无上界；
-  // asc=true 按 ts 升序（补发），false 按 ts 倒序（历史）；limit 条。
+  // 拉取某群消息：游标 (sinceTs, sinceId) 严格序（ts > sinceTs 或 ts==sinceTs 且 id>sinceId）；
+  // untilTs==0 表示无上界；asc=true 按 (ts,id) 升序（补发），false 倒序（历史）；limit 条。
   virtual std::vector<StoredMessage> fetchGroupMessages(int64_t groupId,
                                                         int64_t sinceTs,
+                                                        int64_t sinceId,
                                                         int64_t untilTs,
                                                         int limit, bool asc) = 0;
+
+  // 按 message_id 反查 (ts, id, group_id)：群投递 ACK 游标推进用。
+  // 找到返回 true（写出 ts/id/groupId）；不存在返回 false。
+  virtual bool fetchMessageCursor(const std::string& messageId, int64_t* ts, int64_t* id,
+                                  int64_t* groupId) = 0;
 
   // 会话列表（v3.2）：单聊条目，派生自 messages 事实源（收发双方向合并）。
   // unread=收方向 SUM(status IN (0,1))；lastReadTs=收方向 MAX(read_ts)；

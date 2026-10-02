@@ -516,7 +516,8 @@ void AppServer::onGroupHistory(const std::shared_ptr<Session>& session, const js
   }
   int limit = data.value("limit", 50);
   // joined-1：sinceTs 语义为严格大于，传 joined-1 使同秒消息可见（与离线路径一致）
-  auto stored = msgRepo_->fetchGroupMessages(groupId, joined - 1, left, limit, false);
+  // joined-1：sinceTs 语义为严格大于（sinceId<0 无 id 约束），传 joined-1 使同秒消息可见
+  auto stored = msgRepo_->fetchGroupMessages(groupId, joined - 1, -1, left, limit, false);
   std::string gname;
   groupRepo_->getGroup(groupId, &gname, nullptr);
   json arr = json::array();
@@ -524,6 +525,41 @@ void AppServer::onGroupHistory(const std::shared_ptr<Session>& session, const js
     arr.push_back(messageToJson(m, gname));
   }
   session->reply(makeResult("group.history_res", 0, "ok", json{{"msgs", arr}}));
+}
+
+void AppServer::onGroupOfflineAck(const std::shared_ptr<Session>& session, const json& data) {
+  // 群投递确认（v3.3）：cumulative ACK——客户端声明“截至该 (ts,messageId) 的连续前缀已收到”。
+  // 服务端把该成员投递游标严格只进推进到该位置（重复/回退幂等）。账号级语义（任一设备确认即推进）。
+  // 客户端须只对连续前缀末端发送 ACK（协议义务）；服务端仅保证单调只进，不承担空洞检测。
+  const char* kRes = "group.offline_ack_res";
+  if (!data.contains("groupId") || !data["groupId"].is_number_integer() ||
+      !data.contains("ts") || !data["ts"].is_number_integer() ||
+      !data.contains("messageId") || !data["messageId"].is_string()) {
+    session->reply(makeResult(kRes, 400, "参数错误", json::object()));
+    return;
+  }
+  const int64_t groupId = data["groupId"].get<int64_t>();
+  const std::string messageId = data["messageId"].get<std::string>();
+  if (groupId <= 0 || messageId.empty()) {
+    session->reply(makeResult(kRes, 400, "参数错误", json::object()));
+    return;
+  }
+  if (!groupRepo_->isMember(groupId, session->userId())) {
+    session->reply(makeResult(kRes, 403, "非群成员", json::object()));
+    return;
+  }
+  int64_t mts = 0, mid = 0, mgid = 0;
+  if (!msgRepo_->fetchMessageCursor(messageId, &mts, &mid, &mgid) || mgid != groupId) {
+    // 统一 404：消息不存在或不属于该群（不过度泄露细节）
+    session->reply(makeResult(kRes, 404, "消息不存在或不属于该群", json::object()));
+    return;
+  }
+  // 以反查所得 (mts,mid) 为候选游标（不信任客户端 ts），严格只进推进（幂等）
+  if (!groupRepo_->advanceDeliveredCursor(groupId, session->userId(), mts, mid)) {
+    session->reply(makeResult(kRes, 500, "服务器内部错误", json::object()));
+    return;
+  }
+  session->reply(makeResult(kRes, 0, "ok", json::object()));
 }
 
 void AppServer::onGroupSend(const std::shared_ptr<Session>& session, const json& data,
@@ -614,7 +650,7 @@ void AppServer::onGroupSend(const std::shared_ptr<Session>& session, const json&
       pushed = true;
     }
     if (pushed) {
-      groupRepo_->setWatermark(groupId, uid, now);
+      // v3.3：在线投递不再推进投递游标——由客户端 group.offline_ack 严格只进推进
       g_metrics.messagesDelivered.fetch_add(1, std::memory_order_relaxed);
     } else {
       g_metrics.messagesOffline.fetch_add(1, std::memory_order_relaxed);

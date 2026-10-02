@@ -368,16 +368,28 @@ RecallResult MySqlMessageRepository::recallMessage(
 }
 
 std::vector<StoredMessage> MySqlMessageRepository::fetchGroupMessages(
-    int64_t groupId, int64_t sinceTs, int64_t untilTs, int limit, bool asc) {
+    int64_t groupId, int64_t sinceTs, int64_t sinceId, int64_t untilTs, int limit,
+    bool asc) {
   std::lock_guard<std::mutex> lock(mutex_);
   std::vector<StoredMessage> out;
   if (!client_.ok() || groupId <= 0) return out;
   if (limit <= 0) limit = 50;
   if (limit > 200) limit = 200;
+  // 游标语义：
+  //   sinceId >= 0：(ts,id) 严格游标——ts > sinceTs 或 (ts==sinceTs 且 id>sinceId)
+  //   sinceId < 0 ：无 id 约束，仅 ts > sinceTs（历史/入群下界：严格大于，使同秒可见）
+  // 排序与游标同构 (ts,id)，防“查询排序≠ACK游标排序”边界 bug
+  std::string cursorCond;
+  if (sinceId < 0) {
+    cursorCond = "ts > " + std::to_string(sinceTs);
+  } else {
+    cursorCond = "(ts > " + std::to_string(sinceTs) + " OR (ts = " +
+                 std::to_string(sinceTs) + " AND id > " + std::to_string(sinceId) + "))";
+  }
   std::string sql =
       "SELECT message_id, from_user, to_user, content, ts, client_msg_id, chat_type, status, "
-      "group_id, msg_type, media_id FROM messages WHERE group_id = " + std::to_string(groupId) +
-      " AND ts > " + std::to_string(sinceTs);
+      "group_id, msg_type, media_id FROM messages WHERE group_id = " +
+      std::to_string(groupId) + " AND " + cursorCond;
   if (untilTs > 0) sql += " AND ts <= " + std::to_string(untilTs);
   sql += asc ? " ORDER BY ts ASC, id ASC LIMIT " : " ORDER BY ts DESC, id DESC LIMIT ";
   sql += std::to_string(limit);
@@ -394,6 +406,39 @@ std::vector<StoredMessage> MySqlMessageRepository::fetchGroupMessages(
   }
   mysql_free_result(res);
   return out;
+}
+
+bool MySqlMessageRepository::fetchMessageCursor(const std::string& messageId, int64_t* ts,
+                                                int64_t* id, int64_t* groupId) {
+  std::lock_guard<std::mutex> lock(mutex_);
+  if (!client_.ok() || messageId.empty()) return false;
+  int errNo = 0;
+  // messageId 为客户端输入 → 预处理语句防注入
+  MYSQL_STMT* stmt = client_.stmtExec(
+      "SELECT ts, id, group_id FROM messages WHERE message_id = ? LIMIT 1",
+      {messageId}, &errNo);
+  if (!stmt) {
+    LOG_E("[mysql] 反查消息游标失败 errno=" << errNo);
+    return false;
+  }
+  int64_t vts = 0, vid = 0, vgid = 0;
+  MYSQL_BIND res[3];
+  memset(res, 0, sizeof res);
+  res[0].buffer_type = MYSQL_TYPE_LONGLONG;
+  res[0].buffer = &vts;
+  res[1].buffer_type = MYSQL_TYPE_LONGLONG;
+  res[1].buffer = &vid;
+  res[2].buffer_type = MYSQL_TYPE_LONGLONG;
+  res[2].buffer = &vgid;
+  const bool ok = !mysql_stmt_bind_result(stmt, res) && !mysql_stmt_store_result(stmt) &&
+                  mysql_stmt_fetch(stmt) == 0;
+  mysql_stmt_close(stmt);
+  if (ok) {
+    if (ts) *ts = vts;
+    if (id) *id = vid;
+    if (groupId) *groupId = vgid;
+  }
+  return ok;
 }
 
 std::vector<ConversationEntry> MySqlMessageRepository::fetchSingleConversations(

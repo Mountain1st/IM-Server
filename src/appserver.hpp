@@ -124,6 +124,7 @@ private:
   void onGroupList(const std::shared_ptr<Session>& session, const json& data);
   void onGroupMembers(const std::shared_ptr<Session>& session, const json& data);
   void onGroupHistory(const std::shared_ptr<Session>& session, const json& data);
+  void onGroupOfflineAck(const std::shared_ptr<Session>& session, const json& data);
   // v2.4 拉黑（block.add/remove/list；语义见 docs/protocol.md §4）
   void onBlockAdd(const std::shared_ptr<Session>& session, const json& data);
   void onBlockRemove(const std::shared_ptr<Session>& session, const json& data);

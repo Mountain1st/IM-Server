@@ -645,19 +645,28 @@ def main():
     r = login(b2, B, "pw1234")
     check("relogin bob ok", r["type"] == "auth.login_res" and r["data"]["code"] == 0)
     r = json.loads(b2.recv())
-    check("offline delivery", r["type"] == "msg.offline"
-          and len(r["data"]["msgs"]) == 1
-          and r["data"]["msgs"][0]["content"] == "offline msg")
+    # 投递语义 v2：在线消息未 ACK 会在重登补发，故 msgs 可能含历史未确认消息。
+    # 断言目标消息存在（而非精确条数）。
+    off_msgs = r["data"]["msgs"] if r["type"] == "msg.offline" else []
+    target = [m for m in off_msgs if m["content"] == "offline msg"]
+    check("offline delivery", len(target) == 1)
     # v1.7：离线消息 from 为发送方登录账号 account（userId 对客户端不透明）
-    check("offline from is account", r["data"]["msgs"][0]["from"] == A)
-    # 离线确认：msg.offline_ack 后不再补发
-    b2.send(env("msg.offline_ack", {"messageIds": [r["data"]["msgs"][0]["messageId"]]}))
+    check("offline from is account", len(target) == 1 and target[0]["from"] == A)
+    # 离线确认：msg.offline_ack 后不再补发（本次确认全部已收）
+    b2.send(env("msg.offline_ack", {"messageIds": [m["messageId"] for m in off_msgs]}))
     r = json.loads(b2.recv())
     check("offline_ack ok", r["type"] == "msg.offline_ack_res" and r["data"]["code"] == 0)
     # 安全加固：offline_ack 的 messageIds 数组超限（>1000）必须拒绝，不能逐条打 DB
     b3 = WS()
     r = login(b3, B, "pw1234")
     check("relogin bob for ack-limit ok", r["type"] == "auth.login_res" and r["data"]["code"] == 0)
+    # 投递语义 v2：重登可能先收到未确认消息的 msg.offline 补发，先消费再测超限拒绝
+    b3.s.settimeout(1.0)
+    try:
+        json.loads(b3.recv())
+    except Exception:
+        pass
+    b3.s.settimeout(5)
     b3.send(env("msg.offline_ack", {"messageIds": ["x"] * 1500}))
     r = json.loads(b3.recv())
     check("offline_ack oversized rejected", r["type"] == "msg.offline_ack_res" and r["data"]["code"] == 400)
@@ -721,7 +730,8 @@ def main():
     r = json.loads(b4.recv())
     contents = [m["content"] for m in r["data"]["msgs"]]
     check("purge login offline has fresh and 10min",
-          r["type"] == "msg.offline" and sorted(contents) == ["fresh offline", "recent"])
+          r["type"] == "msg.offline"
+          and {"fresh offline", "recent"}.issubset(set(contents)))
     b4.send(env("msg.offline_ack", {"messageIds": [m["messageId"] for m in r["data"]["msgs"]]}))
     json.loads(b4.recv())
     b4.close()
@@ -2035,12 +2045,157 @@ def main():
     v1.close(); v2.close(); v3.close()
 
 
+    # ================= 投递确认语义 v2（delivery ack）=================
+    # 单会话纪律：同一用户任一时刻只保留一条连接，避免补发/在线投递扇出到多会话
+    # 导致帧计数错位。重登校验用 关旧连接→开新连接 的方式。
+    D1, D2, D3 = base + "94", base + "95", base + "96"
+    d1 = WS(); d2 = WS(); d3 = WS()
+    for w, acct in ((d1, D1), (d2, D2), (d3, D3)):
+        assert register(w, acct, "pw1234")["data"]["code"] == 0
+        assert login(w, acct, "pw1234")["data"]["code"] == 0
+    d1.send(env("contact.request", {"account": D2})); json.loads(d1.recv())
+    d2.send(env("contact.accept", {"account": D1})); json.loads(d2.recv())
+    json.loads(d1.recv()); json.loads(d2.recv())
+    time.sleep(1.1)
+
+    # 1. 单聊在线未 ACK → 重登补发；ACK 后不再补；ACK 幂等
+    r = send_msg(d1, D2, "在线未确认", "ds1-" + base)
+    check("dlv single send ok", r["data"]["code"] == 0)
+    r = json.loads(d2.recv())
+    check("dlv single online recv", r["type"] == "msg.recv")
+    mid1 = r["data"]["messageId"]
+    d2.close()
+    d2b = WS(); assert login(d2b, D2, "pw1234")["data"]["code"] == 0
+    off = json.loads(d2b.recv())
+    check("dlv single unacked re-delivered", off["type"] == "msg.offline"
+          and any(m["messageId"] == mid1 for m in off["data"]["msgs"]))
+    r = send(d2b, "msg.offline_ack", {"messageIds": [mid1]})
+    check("dlv single ack ok", r["data"]["code"] == 0)
+    r = send(d2b, "msg.offline_ack", {"messageIds": [mid1]})
+    check("dlv single ack idempotent", r["data"]["code"] == 0)
+    d2b.close()
+    d2c = WS(); assert login(d2c, D2, "pw1234")["data"]["code"] == 0
+    got = None
+    try:
+        d2c.s.settimeout(1.5); got = json.loads(d2c.recv())
+    except Exception:
+        got = None
+    d2c.s.settimeout(5)
+    miss = got is None or got.get("type") != "msg.offline" \
+        or all(m["messageId"] != mid1 for m in got["data"]["msgs"])
+    check("dlv single acked not re-delivered", miss)
+    d2 = d2c
+
+    # 2. 撤回的 pending 单聊消息不再补发
+    r = send_msg(d1, D2, "待撤回", "dr1-" + base)
+    r = json.loads(d2.recv())
+    rmid = r["data"]["messageId"]
+    r = send(d1, "msg.recall", {"messageId": rmid})
+    check("dlv recall pending ok", r["data"]["code"] == 0)
+    json.loads(d2.recv())  # recall_notify
+    d2.close()
+    d2d = WS(); assert login(d2d, D2, "pw1234")["data"]["code"] == 0
+    got = None
+    try:
+        d2d.s.settimeout(1.5); got = json.loads(d2d.recv())
+    except Exception:
+        got = None
+    d2d.s.settimeout(5)
+    found = got is not None and got.get("type") == "msg.offline" \
+        and any(m["messageId"] == rmid for m in got["data"]["msgs"])
+    check("dlv recalled pending not re-delivered", not found)
+    d2 = d2d
+
+    # 3. 群在线未 ACK → 重登补发
+    r = send(d1, "group.create", {"name": "投递群"})
+    check("dlv group create ok", r["data"]["code"] == 0)
+    dgid = r["data"]["data"]["groupId"]
+    r = send(d1, "group.invite", {"groupId": dgid, "account": D2})
+    check("dlv group invite ok", r["data"]["code"] == 0)
+    json.loads(d1.recv()); json.loads(d2.recv())
+    time.sleep(1.1)
+    r = send_msg(d1, dgid, "群在线未确认", "dg1-" + base, chat_type="group")
+    check("dlv group send ok", r["data"]["code"] == 0)
+    g1 = json.loads(d2.recv())
+    check("dlv group online recv", g1["type"] == "msg.recv" and g1["data"]["groupId"] == dgid)
+    d2.close()
+    d2e = WS(); assert login(d2e, D2, "pw1234")["data"]["code"] == 0
+    off = json.loads(d2e.recv())
+    check("dlv group unacked re-delivered", off["type"] == "msg.offline"
+          and any(m.get("messageId") == g1["data"]["messageId"] for m in off["data"]["msgs"]))
+    # 4. 群 ACK 后不补 + 幂等
+    r = send(d2e, "group.offline_ack", {"groupId": dgid, "ts": g1["data"]["ts"],
+                                        "messageId": g1["data"]["messageId"]})
+    check("dlv group ack ok", r["data"]["code"] == 0)
+    r = send(d2e, "group.offline_ack", {"groupId": dgid, "ts": g1["data"]["ts"],
+                                        "messageId": g1["data"]["messageId"]})
+    check("dlv group ack idempotent", r["data"]["code"] == 0)
+    d2e.close()
+    d2f = WS(); assert login(d2f, D2, "pw1234")["data"]["code"] == 0
+    got = None
+    try:
+        d2f.s.settimeout(1.5); got = json.loads(d2f.recv())
+    except Exception:
+        got = None
+    d2f.s.settimeout(5)
+    miss = got is None or got.get("type") != "msg.offline" \
+        or all(m.get("messageId") != g1["data"]["messageId"] for m in got["data"]["msgs"])
+    check("dlv group acked not re-delivered", miss)
+    d2 = d2f
+    # 5. 群 ACK 越权/非法
+    r = send(d3, "group.offline_ack", {"groupId": dgid, "ts": g1["data"]["ts"],
+                                       "messageId": g1["data"]["messageId"]})
+    check("dlv group ack non-member 403", r["data"]["code"] == 403)
+    r = send(d2, "group.offline_ack", {"groupId": dgid, "ts": 1, "messageId": "no-such"})
+    check("dlv group ack notfound 404", r["data"]["code"] == 404)
+    r = send(d2, "group.offline_ack", {"groupId": dgid})
+    check("dlv group ack bad params 400", r["data"]["code"] == 400)
+    # 6. 同秒多条：ACK 第 2 条（连续前缀末端）后重登只补第 3 条（(ts,id) 严格序）
+    same = []
+    for i in range(3):
+        r = send_msg(d1, dgid, "同秒%d" % i, "dgs-%d-%s" % (i, base), chat_type="group")
+        check("dlv same-sec send %d" % i, r["data"]["code"] == 0)
+        same.append(json.loads(d2.recv())["data"])
+    r = send(d2, "group.offline_ack",
+             {"groupId": dgid, "ts": same[1]["ts"], "messageId": same[1]["messageId"]})
+    check("dlv same-sec ack 2nd ok", r["data"]["code"] == 0)
+    d2.close()
+    d2g = WS(); assert login(d2g, D2, "pw1234")["data"]["code"] == 0
+    off = json.loads(d2g.recv())
+    mids = [m.get("messageId") for m in off.get("data", {}).get("msgs", [])] \
+        if off.get("type") == "msg.offline" else []
+    check("dlv same-sec only last backfilled",
+          same[2]["messageId"] in mids and same[0]["messageId"] not in mids
+          and same[1]["messageId"] not in mids)
+    d2 = d2g
+    # 7. 自身消息被游标跨过：D1 发 own-X 后离线，D2 发 peer-Y；D1 重登仅补 peer-Y
+    r = send_msg(d1, dgid, "own-X", "dox-" + base, chat_type="group")
+    check("dlv own X send ok", r["data"]["code"] == 0)
+    gx = json.loads(d2.recv())
+    check("dlv D2 recv own X", gx["type"] == "msg.recv")
+    d1.close()
+    time.sleep(1.1)
+    r = send_msg(d2, dgid, "peer-Y", "doy-" + base, chat_type="group")
+    check("dlv D2 send Y ok", r["data"]["code"] == 0)
+    d1b = WS(); assert login(d1b, D1, "pw1234")["data"]["code"] == 0
+    off = json.loads(d1b.recv())
+    omsgs = off.get("data", {}).get("msgs", []) if off.get("type") == "msg.offline" else []
+    mids8 = [m.get("messageId") for m in omsgs]
+    gy = [m for m in omsgs if m.get("clientMsgId") == "doy-" + base]
+    check("dlv own message skipped in backfill", gx["data"]["messageId"] not in mids8)
+    check("dlv peer message backfilled", len(gy) == 1)
+    r = send(d1b, "group.offline_ack", {"groupId": dgid, "ts": gy[0]["ts"],
+                                        "messageId": gy[0]["messageId"]})
+    check("dlv ack crosses own message", r["data"]["code"] == 0)
+    d1b.close()
+    d2.close(); d3.close()
+
     a.close(); b.close()
 
     # 清理本次注册的测试账号及其关联消息（精确账号列表，不误删真实用户）
     import subprocess
     used = [A, B, C, SINK, SPAM, SINK2, SPAM2, D, E, F, G, H, base + "50", G1, G2,
-            M1, M2, M3, M4, PIMG, QIMG, CIMG, RA, RB, RC, V1, V2, V3] \
+            M1, M2, M3, M4, PIMG, QIMG, CIMG, RA, RB, RC, V1, V2, V3, D1, D2, D3] \
         + cap_accounts + [OVER, X, Y, Z, BL, BL2, BL3, BL4]
     inlist = ",".join("'%s'" % x for x in used)
     # 群表清理必须在 users 删除之前（按 account 查 user_id，无级联外键）

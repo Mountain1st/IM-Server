@@ -422,40 +422,54 @@ std::vector<int64_t> GroupRepository::listUserGroups(int64_t userId) {
   return out;
 }
 
-int64_t GroupRepository::getWatermark(int64_t groupId, int64_t userId) {
-  std::lock_guard<std::mutex> lock(mutex_);
-  if (!client_.ok()) return 0;
-  int errNo = 0;
-  MYSQL_STMT* stmt = client_.stmtExec(
-      "SELECT last_delivered_ts FROM group_members WHERE group_id = ? AND user_id = ? "
-      "LIMIT 1",
-      {std::to_string(groupId), std::to_string(userId)}, &errNo);
-  if (!stmt) return 0;
-  int64_t v = 0;
-  MYSQL_BIND res[1];
-  memset(res, 0, sizeof res);
-  res[0].buffer_type = MYSQL_TYPE_LONGLONG;
-  res[0].buffer = &v;
-  if (mysql_stmt_bind_result(stmt, res) || mysql_stmt_store_result(stmt) ||
-      mysql_stmt_fetch(stmt) != 0) {
-    v = 0;
-  }
-  mysql_stmt_close(stmt);
-  return v;
-}
-
-void GroupRepository::setWatermark(int64_t groupId, int64_t userId, int64_t ts) {
+void GroupRepository::getDeliveredCursor(int64_t groupId, int64_t userId, int64_t* ts,
+                                         int64_t* id) {
+  if (ts) *ts = 0;
+  if (id) *id = 0;
   std::lock_guard<std::mutex> lock(mutex_);
   if (!client_.ok()) return;
   int errNo = 0;
   MYSQL_STMT* stmt = client_.stmtExec(
-      "UPDATE group_members SET last_delivered_ts = ? WHERE group_id = ? AND user_id = ?",
-      {std::to_string(ts), std::to_string(groupId), std::to_string(userId)}, &errNo);
-  if (!stmt) {
-    LOG_E("[mysql] 更新群水位线失败 errno=" << errNo);
-    return;
+      "SELECT last_delivered_ts, last_delivered_id FROM group_members "
+      "WHERE group_id = ? AND user_id = ? LIMIT 1",
+      {std::to_string(groupId), std::to_string(userId)}, &errNo);
+  if (!stmt) return;
+  int64_t vts = 0, vid = 0;
+  MYSQL_BIND res[2];
+  memset(res, 0, sizeof res);
+  res[0].buffer_type = MYSQL_TYPE_LONGLONG;
+  res[0].buffer = &vts;
+  res[1].buffer_type = MYSQL_TYPE_LONGLONG;
+  res[1].buffer = &vid;
+  if (!mysql_stmt_bind_result(stmt, res) && !mysql_stmt_store_result(stmt) &&
+      mysql_stmt_fetch(stmt) == 0) {
+    if (ts) *ts = vts;
+    if (id) *id = vid;
   }
   mysql_stmt_close(stmt);
+}
+
+bool GroupRepository::advanceDeliveredCursor(int64_t groupId, int64_t userId, int64_t ts,
+                                             int64_t id) {
+  std::lock_guard<std::mutex> lock(mutex_);
+  if (!client_.ok()) return false;
+  // 严格只进：仅当 (newTs,newId) 字典序 > 旧游标才更新。
+  // SQL 内比较，单语句原子，免读改写 TOCTOU；重复/回退 ACK 命中 0 行=幂等成功。
+  int errNo = 0;
+  MYSQL_STMT* stmt = client_.stmtExec(
+      "UPDATE group_members SET last_delivered_ts = ?, last_delivered_id = ? "
+      "WHERE group_id = ? AND user_id = ? AND "
+      "((last_delivered_ts < ?) OR (last_delivered_ts = ? AND last_delivered_id < ?))",
+      {std::to_string(ts), std::to_string(id), std::to_string(groupId),
+       std::to_string(userId), std::to_string(ts), std::to_string(ts),
+       std::to_string(id)},
+      &errNo);
+  if (!stmt) {
+    LOG_E("[mysql] 推进群投递游标失败 errno=" << errNo);
+    return false;
+  }
+  mysql_stmt_close(stmt);
+  return true;
 }
 
 }  // namespace im
