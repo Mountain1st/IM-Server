@@ -69,6 +69,24 @@ services:
     networks:
       imnet:
 
+  # 一次性建桶：S3/MinIO 不会因 PUT 自动建桶，预签名 PUT 到不存在的桶
+  # 会返回 NoSuchBucket（403/404）导致媒体全链路失败。此服务在 minio 起来后
+  # 创建 bucket（已存在则忽略），幂等，跑完即退。
+  createbuckets:
+    image: minio/mc:latest
+    depends_on:
+      minio:
+        condition: service_started
+    environment:
+      TZ: Asia/Shanghai
+      MS3AK: ${IM_S3_ACCESS_KEY:-minioadmin}
+      MS3SK: ${IM_S3_SECRET_KEY:-minioadmin}
+      MS3BUCKET: ${IM_S3_BUCKET:-media}
+    entrypoint: ["/bin/sh", "-c",
+      "until mc alias set m http://minio:9000 \"$$MS3AK\" \"$$MS3SK\"; do sleep 1; done; mc mb -p \"m/$$MS3BUCKET\" || true"]
+    networks:
+      imnet:
+
   nginx:
     image: nginx:1.27-alpine
     # 访问日志时间按北京时间（与 imserver 日志/MySQL NOW() 一致）

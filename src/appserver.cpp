@@ -475,12 +475,27 @@ void AppServer::onEnvelope(const std::shared_ptr<Session>& session, const json& 
 // 本层只做参数解析、结果信封组装与权限回调注入。
 // ============================================================
 void AppServer::onMediaPresign(const std::shared_ptr<Session>& session, const json& data) {
-  const std::string fileName = data.value("fileName", "");
-  const std::string mimeType = data.value("mimeType", "");
-  const std::string kind = data.value("kind", "");
-  // size 兼容整数与浮点（JSON 数字统一按 int64 解读）
+  // 字段类型显式校验：非字符串/非数字一律回 media.presign_res 400，
+  // 而非让 json 取值抛异常被兜成 error 事件（客户端需统一按 *_res 解析）。
+  auto optStr = [&](const char* k, std::string* out) -> bool {
+    if (!data.contains(k)) return true;  // 缺省空串
+    if (!data[k].is_string()) return false;
+    *out = data[k].get<std::string>();
+    return true;
+  };
+  std::string fileName, mimeType, kind;
+  if (!optStr("fileName", &fileName) || !optStr("mimeType", &mimeType) ||
+      !optStr("kind", &kind)) {
+    session->reply(makeResult("media.presign_res", 400, "参数错误", json::object()));
+    return;
+  }
+  // size 兼容整数与浮点（JSON 数字统一按 int64 解读）；非数字回 400
   int64_t size = 0;
-  if (data.contains("size") && data["size"].is_number()) {
+  if (data.contains("size")) {
+    if (!data["size"].is_number()) {
+      session->reply(makeResult("media.presign_res", 400, "参数错误", json::object()));
+      return;
+    }
     size = data["size"].get<int64_t>();
   }
   const PresignResult r =
@@ -496,14 +511,32 @@ void AppServer::onMediaPresign(const std::shared_ptr<Session>& session, const js
 }
 
 void AppServer::onMediaCommit(const std::shared_ptr<Session>& session, const json& data) {
+  if (data.contains("fileId") && !data["fileId"].is_string()) {
+    session->reply(makeResult("media.commit_res", 400, "参数错误", json::object()));
+    return;
+  }
   const std::string fileId = data.value("fileId", "");
   int64_t size = 0;
-  if (data.contains("size") && data["size"].is_number()) {
+  if (data.contains("size")) {
+    if (!data["size"].is_number()) {
+      session->reply(makeResult("media.commit_res", 400, "参数错误", json::object()));
+      return;
+    }
     size = data["size"].get<int64_t>();
   }
-  const int width = data.value("width", 0);
-  const int height = data.value("height", 0);
-  const int duration = data.value("duration", 0);
+  // width/height/duration 非数字回 400（避免 json 取值抛异常成 error 事件）
+  auto optInt = [&](const char* k, int* out) -> bool {
+    if (!data.contains(k)) return true;
+    if (!data[k].is_number()) return false;
+    *out = data[k].get<int>();
+    return true;
+  };
+  int width = 0, height = 0, duration = 0;
+  if (!optInt("width", &width) || !optInt("height", &height) ||
+      !optInt("duration", &duration)) {
+    session->reply(makeResult("media.commit_res", 400, "参数错误", json::object()));
+    return;
+  }
   const CommitResult r =
       mediaService_->commit(session->userId(), fileId, size, width, height, duration);
   if (!r.ok) {
@@ -539,6 +572,13 @@ void AppServer::onMediaUrl(const std::shared_ptr<Session>& session, const json& 
   }
   if (fileIds.size() > config::kMediaUrlBatchMax) {
     session->reply(makeResult("media.url_res", 400, "参数错误", json::object()));
+    return;
+  }
+  // 重查询限流（与 chat.history/group.history 同一额度桶）：media.url 每次
+  // 最多 100 条且每条一次 DB 鉴权 + 一次签名，不设限可被登录用户无限刷。
+  if (!queryLimiter_->allow(session->userId(), kQueryLimitPerWindow, kQueryWindow)) {
+    session->reply(makeResult("media.url_res", 429, "查询过于频繁，请稍后再试",
+                              json::object()));
     return;
   }
   json urls = json::object();

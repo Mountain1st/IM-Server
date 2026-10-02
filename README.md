@@ -51,6 +51,12 @@ imserver 仅绑 `127.0.0.1:9191`（对外唯一入口 Nginx 8080）、
 （仅本地/CI）；**生产用 `https` 并注入强随机 AK/SK**。`IM_S3_ENDPOINT` 为空时媒体
 功能降级（`media.*` 回 503），消息收发不受影响。云服务器（2C2G）部署调优清单见 §10.4。
 
+**存量库升级（已有库首次接媒体功能）**：需执行迁移补 `media` 表与 `messages.media_id`：
+```bash
+MYSQL_PWD='<密码>' mysql -u IMS_jack -h <host> IMS_reactor_db < db/migrate_media.sql
+```
+迁移幂等（已迁移可重复执行）。全新库由 `db/schema.sql` 自动建好，无需额外操作。
+
 ## 测试
 
 ```bash

@@ -10,6 +10,7 @@
 // ============================================================
 #include "media_service.hpp"
 
+#include "log.hpp"
 #include "server_config.hpp"
 
 #include <cstdio>
@@ -217,8 +218,12 @@ CommitResult MediaService::commit(int64_t userId, const std::string& fileId,
     return r;
   }
   // 以 HEAD 实际大小为准复核上限，防止「声明小 size 拿签名 → 传超大对象」绕过
-  if (info.size == 0 ||
-      info.size > static_cast<uint64_t>(config::kMediaSizeMaxBytes)) {
+  if (info.size == 0) {
+    r.code = 400;
+    r.msg = "空文件";
+    return r;
+  }
+  if (info.size > static_cast<uint64_t>(config::kMediaSizeMaxBytes)) {
     r.code = 413;
     r.msg = "文件过大";
     return r;
@@ -298,12 +303,16 @@ int64_t MediaService::gcOnce() {
     if (!store_ || !store_->enabled()) {
       continue;
     }
-    // 先删对象（对象可能从未上传，deleteObject 幂等）
-    if (!m.objectKey.empty() && !store_->deleteObject(m.objectKey)) {
-      // 删除失败：保持 PENDING，待下轮重试，避免留下永久孤儿对象
-      continue;
+    // CAS 抢占：仅当仍为 PENDING(0) 时原子置 GC(3)，防止与 commit 竞态——
+    // 若客户端已抢先 commit（status→COMMITTED），本调用返回 false，不删对象。
+    if (!repo_->markDeleted(m.fileId)) {
+      continue;  // 已被 commit 或被其他轮处理，跳过
     }
-    repo_->markDeleted(m.fileId);
+    // 抢到删除权后再删对象（对象可能从未上传，deleteObject 幂等）。
+    // 删除失败仅记日志：状态已一致（不再复扫），对象成孤儿但不影响正确性。
+    if (!m.objectKey.empty() && !store_->deleteObject(m.objectKey)) {
+      LOG_W("[media] GC 删除对象失败（状态已置 GC）: " << m.objectKey);
+    }
     ++removed;
   }
   return removed;

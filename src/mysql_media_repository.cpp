@@ -189,7 +189,9 @@ bool MySqlMediaRepository::commit(const std::string& fileId, int64_t size, int w
 bool MySqlMediaRepository::markDeleted(const std::string& fileId) {
   std::lock_guard<std::mutex> lock(mutex_);
   if (!client_.ok()) return false;
-  const std::string sql = "UPDATE media SET status=3 WHERE file_id=?";
+  // 仅允许 PENDING(0) → GC(3)：防止 GC 与 commit 竞态误将已 COMMITTED(2)
+  // 的记录置为已删除（对象已被 GC 删除会造成不可逆数据丢失）。
+  const std::string sql = "UPDATE media SET status=3 WHERE file_id=? AND status=0";
   int errNo = 0;
   MYSQL_STMT* stmt = client_.stmtExec(sql, {fileId}, &errNo);
   if (!stmt) {

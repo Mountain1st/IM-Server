@@ -37,7 +37,7 @@ CREATE TABLE IF NOT EXISTS messages (
   ts            BIGINT       NOT NULL,           -- unix 时间戳（秒）
   client_msg_id VARCHAR(64)  NOT NULL DEFAULT '',
   chat_type     VARCHAR(16)  NOT NULL DEFAULT 'single',
-  msg_type      VARCHAR(16)  NOT NULL DEFAULT 'text', -- 消息类型：text=文本，image=图片路径
+  msg_type      VARCHAR(16)  NOT NULL DEFAULT 'text', -- 消息类型：text=文本，image=图片（content 存 fileId）
   media_id      BIGINT UNSIGNED NULL,            -- 关联 media.id（图片消息，NULL=无媒体）
   group_id      BIGINT UNSIGNED NOT NULL DEFAULT 0,
   status        TINYINT      NOT NULL DEFAULT 0,

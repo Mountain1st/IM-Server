@@ -8,6 +8,13 @@ jobs:
     env:
       # 一次性 CI 容器的密码（run 结束即焚，无生产价值；源码/模板已脱敏）
       IM_MYSQL_PASSWORD: "520010"
+      # 媒体对象存储（MinIO）测试配置：媒体用例据此启用，未设则整段 SKIP
+      IM_S3_ENDPOINT: "127.0.0.1:9000"
+      IM_S3_REGION: "us-east-1"
+      IM_S3_BUCKET: "media"
+      IM_S3_ACCESS_KEY: "minioadmin"
+      IM_S3_SECRET_KEY: "minioadmin"
+      IM_S3_PATH_STYLE: "true"
     services:
       mysql:
         image: mysql:8.4
@@ -32,6 +39,18 @@ jobs:
           --health-interval=10s
           --health-timeout=5s
           --health-retries=10
+      minio:
+        image: minio/minio
+        env:
+          MINIO_ROOT_USER: minioadmin
+          MINIO_ROOT_PASSWORD: minioadmin
+        ports:
+          - 9000:9000
+        options: >-
+          --health-cmd="curl -f http://localhost:9000/minio/health/live || exit 1"
+          --health-interval=10s
+          --health-timeout=5s
+          --health-retries=10
 
     steps:
       - uses: actions/checkout@v4
@@ -50,9 +69,22 @@ jobs:
             sleep 2
           done
           MYSQL_PWD=520010 mysql -h 127.0.0.1 -u IMS_jack IMS_reactor_db < db/schema.sql
+          # media 表与 messages.media_id 迁移（幂等；schema.sql 已含，此处兼容旧库路径）
+          MYSQL_PWD=520010 mysql -h 127.0.0.1 -u IMS_jack IMS_reactor_db < db/migrate_media.sql || true
           # 建业务回归所需表外环境（真实数据表结构以 schema.sql 为准）
           MYSQL_PWD=520010 mysql -h 127.0.0.1 -u IMS_jack IMS_reactor_db \
             -e "SELECT COUNT(*) FROM users"
+
+      - name: 建对象存储 bucket
+        run: |
+          # MinIO 不会因 PUT 自动建桶；媒体用例需 bucket 存在
+          for i in $(seq 1 30); do
+            curl -fsS http://127.0.0.1:9000/minio/health/live >/dev/null 2>&1 && break
+            sleep 2
+          done
+          docker run --rm --network host \
+            -e MC_HOST_m=http://minioadmin:minioadmin@127.0.0.1:9000 \
+            minio/mc mb -p m/media || true
 
       - name: 构建
         run: |

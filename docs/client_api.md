@@ -1,4 +1,4 @@
-# IM 客户端接入标准（client_api，协议 v2.2）
+# IM 客户端接入标准（client_api，协议 v3.0）
 
 > 面向 **Qt 客户端（QWebSocket）** 与 **Web 客户端（浏览器 WebSocket）** 的开发接入文档。
 > 客户端实现只依赖本文件即可；协议正文（字段细则、时序、变更历史）见 [protocol.md](./protocol.md)。
@@ -116,6 +116,14 @@
 - **群发送（v1.9）**：请求示例 `{ "type": "msg.send", "seq": 16, "data": { "to": 1, "content": "大家好", "clientMsgId": "8f14e45f-0002", "chatType": "group" } }`；内容规则与单聊一致（空消息 `400 参数错误`，超 64KB `413`）；群成员在线收 `msg.recv`（含 `groupId`/`groupName`，发送者不回显），离线登录后经 `msg.offline` 补发（同样不含自己发的消息）；群消息**不做已读**；限流/幂等与单聊同一套规则
 - `msg.ack` 只表示服务端已接收，不代表对方已读
 - 发送限流：携带 `clientMsgId` 每用户 10 秒最多 30 条；空 `clientMsgId` 10 秒最多 5 条；超限 `msg.ack` 回 `429 消息发送过于频繁`，客户端应提示发送过频
+
+**图片消息（v3.0，`msgType: "image"`）**：图片不再内联 base64，改走对象存储直传——客户端先 `media.presign` 拿预签名上传 URL → 直传对象存储 → `media.commit` → `msg.send` 只携带 `mediaId`（见 §5.29~§5.31）。发送时：
+```json
+{ "type": "msg.send", "seq": 21, "data": { "to": "13900139000", "content": "", "clientMsgId": "8f14e45f-0003", "chatType": "single", "msgType": "image", "mediaId": "<fileId>" } }
+```
+- `msgType` 仅 `"text"`（默认，可缺省）/`"image"`，其他值回 `400 参数错误`；`msg.ack` 不带 `msgType`。
+- `msgType=image` 时 `content` 可空，`mediaId` 必填（`media.commit` 返回的 `fileId`）；服务端校验该媒体属当前用户且已提交，否则回 `404 媒体不存在`/`403 无权限`/`400 媒体未提交`。
+- 接收方 `msg.recv`/`msg.offline`/历史含 `msgType:"image"` 与 `mediaId`（**URL 不下发**，客户端按需调 `media.url` 换取短期 GET URL 再下载）。
 
 ### 5.5 免密重连 `auth.token`
 
@@ -434,6 +442,44 @@
 ```
 - 仅群主可操作；`content` ≤ 1024 字节，空=清空；成功时群内在线成员只收到 `group.announced`（`{groupId}`，不带正文），客户端收到后用 `group.list` 拉取该群 `announcement`/`announceTs` 得正文
 - 错误码：`400 参数错误` / `404 群不存在` / `404 群已解散` / `403 仅群主可操作` / `413 消息内容超长`（`content` 超 1024 字节，注意与群消息 64KB 的 `413 消息内容超长（超过64KB）` 文案不同）
+
+### 5.29 申请上传授权 `media.presign`（v3.0）
+
+请求（声明文件信息；服务端返回预签名上传 URL）：
+```json
+{ "type": "media.presign", "seq": 30, "data": { "fileName": "photo.png", "mimeType": "image/png", "size": 20480, "kind": "image" } }
+```
+响应：
+```json
+{ "type": "media.presign_res", "data": { "code": 0, "msg": "ok", "data": { "fileId": "3ad1cfdd...9a1", "uploadUrl": "http://.../media/...", "expiresIn": 900 } } }
+```
+- 需已登录（未登录回 `error 401`）。`mimeType` 白名单（V1 仅 `image/png|jpeg|gif|webp`）、`size` ∈ (0, 20MB]，超出回 `413`/`400`。
+- 拿到 `uploadUrl` 后，客户端用 **HTTP PUT** 将该 URL 原样上传文件字节（URL 有效期 `expiresIn` 秒，约 15 分钟）；上传请求头无需额外签名（预签名只绑定 host）。
+- 限流：每用户 30 次/分钟，超限 `429`。
+
+### 5.30 提交媒体 `media.commit`（v3.0）
+
+上传成功后登记媒体元数据（服务端会 HEAD 校验对象存在且大小一致）：
+```json
+{ "type": "media.commit", "seq": 31, "data": { "fileId": "3ad1cfdd...9a1", "size": 20480, "width": 1, "height": 1, "duration": 0 } }
+```
+响应：`{ "type": "media.commit_res", "data": { "code": 0, "msg": "ok", "data": {} } }`
+- `size` 必须与实际上传字节数一致（以服务端 HEAD 为准），否则 `400 文件大小不匹配`；对象不存在 `400 对象不存在`；空文件 `400 空文件`；重复提交幂等回 `code=0`。
+- 提交成功后 `fileId` 才能在 `msg.send(mediaId=...)` 中引用。
+
+### 5.31 获取下载授权 `media.url`（v3.0）
+
+换取短期 GET URL（**URL 不下发在消息里，客户端按需换取**）：
+```json
+{ "type": "media.url", "seq": 32, "data": { "fileId": "3ad1cfdd...9a1" } }
+```
+响应（成功）：
+```json
+{ "type": "media.url_res", "data": { "code": 0, "msg": "ok", "data": { "urls": { "3ad1cfdd...9a1": { "url": "http://...", "expiresIn": 3600 } } } } }
+```
+- 仅**消息相关方**可换取（单聊收发双方、群聊现成员）；无关方 `urls[fileId].code = 403`。**顶层 `code` 恒为 0**，单条结果以 `urls[fileId]` 内的 `code`/`url` 表达。
+- 支持批量：`data.fileIds` 传字符串数组（上限 100）。受重查询限流（与 history 同桶，超限顶层 `429`）。
+- 客户端应缓存 URL 至其 `expiresIn`（约 60 分钟），避免历史加载反复换取。
 
 ## 6. 服务端 → 客户端事件
 
