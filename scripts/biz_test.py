@@ -1928,12 +1928,119 @@ def main():
     # 撤回群清理（群表按 owner 删除走统一清理段，此处仅关连接）
     r1.close(); r1x.close(); rb.close(); r3.close()
 
+    # ================= 会话列表（conversation.list）=================
+    # 独立账号；秒级 ts 用 sleep(1) 控制排序确定性。
+    # 群 unread/lastReadTs 为 v3.2 占位（恒 0）——投递水位线≠已读游标，
+    # 群已读能力未实现，断言语义而非真实值。
+    V1, V2, V3 = base + "90", base + "91", base + "92"
+    v1 = WS(); v2 = WS(); v3 = WS()
+    for w, acct in ((v1, V1), (v2, V2), (v3, V3)):
+        assert register(w, acct, "pw1234")["data"]["code"] == 0
+        assert login(w, acct, "pw1234")["data"]["code"] == 0
+    # 联系人 v1↔v2、v1↔v3（各 4 帧消耗：res/push/added/res）
+    v1.send(env("contact.request", {"account": V2})); json.loads(v1.recv())
+    v2.send(env("contact.accept", {"account": V1})); json.loads(v2.recv())
+    json.loads(v1.recv()); json.loads(v2.recv())
+    v1.send(env("contact.request", {"account": V3})); json.loads(v1.recv())
+    v3.send(env("contact.accept", {"account": V1})); json.loads(v3.recv())
+    json.loads(v1.recv()); json.loads(v3.recv())
+    # 自己对话框（to=自己账号）：进列表必须被排除（resolveTarget 无 0=自己路径）
+    r = send_msg(v1, V1, "自言自语", "cv-self-" + base)
+    check("conv self send ok", r["data"]["code"] == 0)
+    time.sleep(1.1)
+    # t1: V2→v1 两条 → v1 视角 unread(V2)=2
+    for i in range(2):
+        r = send_msg(v2, V1, "v2-%d" % i, "cv2-%d-%s" % (i, base))
+        check("conv v2 send %d" % i, r["data"]["code"] == 0)
+        check("conv v1 recv %d" % i, json.loads(v1.recv())["type"] == "msg.recv")
+    time.sleep(1.1)
+    # t2: V3→v1 一条 → unread(V3)=1
+    r = send_msg(v3, V1, "v3-0", "cv3-%s" % base)
+    check("conv v3 send ok", r["data"]["code"] == 0)
+    check("conv v1 recv v3", json.loads(v1.recv())["type"] == "msg.recv")
+    time.sleep(1.1)
+    # t3: v1→V2 一条 → v1 视角 V2 lastTs 更新但 unread 不变（自发不计未读）
+    r = send_msg(v1, V2, "v1-reply", "cv1r-%s" % base)
+    check("conv v1 reply ok", r["data"]["code"] == 0)
+    check("conv v2 recv reply", json.loads(v2.recv())["type"] == "msg.recv")
+    time.sleep(1.1)
+    # t4/t5: 建群拉 V2，V2 群发一条（群会话最新）
+    r = send(v1, "group.create", {"name": "会话群"})
+    check("conv group create ok", r["data"]["code"] == 0)
+    cgid = r["data"]["data"]["groupId"]
+    r = send(v1, "group.invite", {"groupId": cgid, "account": V2})
+    check("conv group invite ok", r["data"]["code"] == 0)
+    json.loads(v1.recv())          # member_changed 推送
+    json.loads(v2.recv())          # V2: group.added
+    time.sleep(1.1)
+    r = send_msg(v2, cgid, "群消息", "cg-%s" % base, chat_type="group")
+    check("conv group send ok", r["data"]["code"] == 0)
+    gmsg = json.loads(v1.recv())
+    check("conv group recv", gmsg["type"] == "msg.recv" and gmsg["data"]["groupId"] == cgid)
+    time.sleep(1.1)
+    # t6: V2 撤回群消息 → 群条目 lastMsgRecalled=true（撤回行仍在末条位）
+    r = send(v2, "msg.recall", {"messageId": gmsg["data"]["messageId"]})
+    check("conv group recall ok", r["data"]["code"] == 0)
+    check("conv group recall notify", json.loads(v1.recv())["type"] == "msg.recall_notify")
+    time.sleep(1.1)
+    # 列表断言（v1 视角）：群(t5) > V2(t3) > V3(t2)；自己对话框排除
+    r = send(v1, "conversation.list", {"limit": 10})
+    check("conv list res ok", r["type"] == "conversation.list_res"
+          and r["data"]["code"] == 0)
+    convs = r["data"]["data"]["conversations"]
+    check("conv list self excluded", all(c.get("account") != V1 for c in convs)
+          and len(convs) == 3)
+    order = [c["lastMsgTs"] for c in convs]
+    check("conv list sorted desc", order == sorted(order, reverse=True))
+    check("conv list newest is group", convs[0]["chatType"] == "group"
+          and convs[0]["groupId"] == cgid and convs[0]["groupName"] == "会话群")
+    check("conv group unread placeholder 0", convs[0]["unreadCount"] == 0
+          and convs[0]["lastReadTs"] == 0)
+    check("conv group lastMsgRecalled", convs[0]["lastMsgRecalled"] is True
+          and convs[0]["lastMsgType"] == "text")
+    by_acct = {c["account"]: c for c in convs if c["chatType"] == "single"}
+    check("conv v2 unread", by_acct[V2]["unreadCount"] == 2)
+    check("conv v2 lastTs is my reply", by_acct[V2]["lastMsgTs"] > by_acct[V3]["lastMsgTs"])
+    check("conv v3 unread", by_acct[V3]["unreadCount"] == 1)
+    check("conv no leak", set(by_acct) <= {V2, V3})
+    # 已读联动：msg.read → unread 归零 + lastReadTs 真实值
+    send(v1, "msg.read", {"from": V2})
+    r = send(v1, "conversation.list", {"limit": 10})
+    convs = r["data"]["data"]["conversations"]
+    by_acct = {c["account"]: c for c in convs if c["chatType"] == "single"}
+    check("conv read zeroes unread", by_acct[V2]["unreadCount"] == 0
+          and by_acct[V2]["lastReadTs"] > 0)
+    # limit=2：只留最新两条（群 + V2），V3 被截
+    r = send(v1, "conversation.list", {"limit": 2})
+    convs2 = r["data"]["data"]["conversations"]
+    check("conv limit 2", len(convs2) == 2 and convs2[0]["chatType"] == "group"
+          and convs2[1].get("account") == V2)
+    # 退群 → 群条目消失（群主不能退群：先转让给 V2 再退）
+    r = send(v1, "group.transfer", {"groupId": cgid, "account": V2})
+    check("conv transfer ok", r["data"]["code"] == 0)
+    json.loads(v1.recv())  # owner_changed
+    json.loads(v2.recv())  # owner_changed
+    r = send(v1, "group.leave", {"groupId": cgid})
+    check("conv group leave ok", r["data"]["code"] == 0)
+    json.loads(v2.recv())  # V2: member_changed(leave)
+    r = send(v1, "conversation.list", {"limit": 10})
+    convs = r["data"]["data"]["conversations"]
+    check("conv left group excluded",
+          all(c["chatType"] != "group" for c in convs) and len(convs) == 2)
+    # 对端视角（V2）：unread(v1)=1（v1-reply）；V2 已是群主，列表含群但单聊仅 V1
+    r = send(v2, "conversation.list", {"limit": 10})
+    v2convs = r["data"]["data"]["conversations"]
+    v2by = {c["account"]: c for c in v2convs if c["chatType"] == "single"}
+    check("conv peer view", len(v2by) == 1 and v2by[V1]["unreadCount"] == 1)
+    v1.close(); v2.close(); v3.close()
+
+
     a.close(); b.close()
 
     # 清理本次注册的测试账号及其关联消息（精确账号列表，不误删真实用户）
     import subprocess
     used = [A, B, C, SINK, SPAM, SINK2, SPAM2, D, E, F, G, H, base + "50", G1, G2,
-            M1, M2, M3, M4, PIMG, QIMG, CIMG, RA, RB, RC] \
+            M1, M2, M3, M4, PIMG, QIMG, CIMG, RA, RB, RC, V1, V2, V3] \
         + cap_accounts + [OVER, X, Y, Z, BL, BL2, BL3, BL4]
     inlist = ",".join("'%s'" % x for x in used)
     # 群表清理必须在 users 删除之前（按 account 查 user_id，无级联外键）
