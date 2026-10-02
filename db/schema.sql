@@ -47,6 +47,7 @@ CREATE TABLE IF NOT EXISTS messages (
   recalled_ts   BIGINT       NOT NULL DEFAULT 0, -- 撤回时间（msg.recall；0=未撤回）
   KEY idx_to_status (to_user, status),
   KEY idx_pair_ts  (from_user, to_user, ts),
+  KEY idx_recv_peer (to_user, from_user, ts),  -- 会话列表「我收」方向聚合（v3.2）
   -- 全局唯一（数据库级强制）：防自愈重试双插（连接断时 INSERT 可能已
   -- 执行，重试会撞唯一键被拒——宁可拒也不允许重复消息进离线/历史）
   UNIQUE KEY idx_message_id (message_id),

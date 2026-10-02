@@ -2,6 +2,7 @@
 
 #include <cstdint>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace im {
@@ -44,6 +45,21 @@ struct RecallInfo {
   std::string chatType;  // "single" / "group"
   int64_t groupId = 0;   // 群聊 >0；单聊 0
   int64_t toUser = 0;    // 单聊对端（自己对话框 = 发送者自己）
+};
+
+// 会话列表条目（v3.2，单聊；群聊条目由 AppServer 层组装）
+struct ConversationEntry {
+  int64_t peerId = 0;     // 对端 userId
+  int64_t lastMsgTs = 0;  // 收发双方向最大 ts
+  int64_t unread = 0;     // 收方向未读数（status IN (0,1)）
+  int64_t lastReadTs = 0; // 收方向已读游标（MAX(read_ts)）
+};
+
+// 会话末条消息信息（撤回语义经 recalled 透出，正文不回传）
+struct LastMessageInfo {
+  std::string messageId;
+  std::string msgType;
+  bool recalled = false;  // status == kMsgRecalled
 };
 
 // 消息存储接口：消息的持久化（在线/离线/历史）统一委托给本接口。
@@ -99,6 +115,23 @@ public:
                                                         int64_t sinceTs,
                                                         int64_t untilTs,
                                                         int limit, bool asc) = 0;
+
+  // 会话列表（v3.2）：单聊条目，派生自 messages 事实源（收发双方向合并）。
+  // unread=收方向 SUM(status IN (0,1))；lastReadTs=收方向 MAX(read_ts)；
+  // 不含自己对话框（from/to=me 均排除）。群聊条目由 AppServer 层组装：
+  // last_delivered_ts 是投递水位线而非已读游标，群未读 v3.2 恒 0（协议占位）。
+  virtual std::vector<ConversationEntry> fetchSingleConversations(int64_t userId) = 0;
+
+  // 会话末条消息（有界点查）：按 (ts,id) 严格序取最后一行（同秒边界安全）。
+  // recalled=status==kMsgRecalled。无消息返回 false。
+  virtual bool fetchLastMessageSingle(int64_t userA, int64_t userB,
+                                      LastMessageInfo* out) = 0;
+  virtual bool fetchLastMessageGroup(int64_t groupId, LastMessageInfo* out) = 0;
+
+  // 各群末条消息 ts（一次 GROUP BY 聚合，供会话列表排序截断后再点查）。
+  // 返回 (groupId, lastTs)；无消息的群不出现。
+  virtual std::vector<std::pair<int64_t, int64_t>> fetchGroupLastTs(
+      const std::vector<int64_t>& groupIds) = 0;
 };
 
 } // namespace im

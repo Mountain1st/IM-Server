@@ -254,6 +254,7 @@ void AppServer::buildRoutes() {
     {"chat.history", &AppServer::onHistory},
     {"msg.read", &AppServer::onRead},
     {"msg.recall", &AppServer::onRecall},
+    {"conversation.list", &AppServer::onConversationList},
     {"user.search", &AppServer::onSearch},
     {"contact.request", &AppServer::onContactRequest},
     {"contact.accept", &AppServer::onContactAccept},

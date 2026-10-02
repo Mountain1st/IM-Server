@@ -16,8 +16,10 @@
 #include "log.hpp"
 #include "server_config.hpp"
 
+#include <algorithm>
 #include <cstdlib>
 #include <cstring>
+#include <map>
 #include <ctime>
 #include <iostream>
 #include <vector>
@@ -391,6 +393,152 @@ std::vector<StoredMessage> MySqlMessageRepository::fetchGroupMessages(
     out.push_back(rowToMessage(row, lens));
   }
   mysql_free_result(res);
+  return out;
+}
+
+std::vector<ConversationEntry> MySqlMessageRepository::fetchSingleConversations(
+    int64_t userId) {
+  // 单聊会话聚合（v3.2 派生式）：收方向出 unread/lastReadTs/lastTs，
+  // 发方向仅补 lastTs；两方向在 C++ 合并。不含自己对话框（群未读语义
+  // 见规格——last_delivered_ts 是投递水位线，v3.2 群未读由上层恒 0）。
+  std::lock_guard<std::mutex> lock(mutex_);
+  std::vector<ConversationEntry> out;
+  if (!client_.ok() || userId <= 0) return out;
+  std::map<int64_t, ConversationEntry> merged;
+  const std::string me = std::to_string(userId);
+  // 收方向（idx_recv_peer）：未读 = SUM(status IN (0,1))，已读游标 = MAX(read_ts)
+  const std::string recvSql =
+      "SELECT from_user, MAX(ts), SUM(status IN (" +
+      std::to_string(kMsgOfflinePending) + ", " + std::to_string(kMsgDelivered) +
+      ")), MAX(read_ts) FROM messages WHERE to_user = " + me +
+      " AND group_id = 0 AND from_user != " + me + " GROUP BY from_user";
+  if (!client_.query(recvSql.c_str())) {
+    LOG_E("[mysql] 会话聚合(收)失败: " << client_.errStr());
+    return out;
+  }
+  if (MYSQL_RES* res = mysql_store_result(client_.handle())) {
+    MYSQL_ROW row;
+    while ((row = mysql_fetch_row(res))) {
+      ConversationEntry e;
+      e.peerId = std::atoll(row[0]);
+      e.lastMsgTs = std::atoll(row[1]);
+      e.unread = row[2] ? std::atoll(row[2]) : 0;
+      e.lastReadTs = row[3] ? std::atoll(row[3]) : 0;
+      merged.emplace(e.peerId, e);
+    }
+    mysql_free_result(res);
+  }
+  // 发方向（idx_pair_ts 前缀）：仅补 lastTs（自己发的消息不产生自己的未读）
+  const std::string sentSql =
+      "SELECT to_user, MAX(ts) FROM messages WHERE from_user = " + me +
+      " AND group_id = 0 AND to_user != " + me + " GROUP BY to_user";
+  if (!client_.query(sentSql.c_str())) {
+    LOG_E("[mysql] 会话聚合(发)失败: " << client_.errStr());
+    return out;
+  }
+  if (MYSQL_RES* res = mysql_store_result(client_.handle())) {
+    MYSQL_ROW row;
+    while ((row = mysql_fetch_row(res))) {
+      const int64_t peer = std::atoll(row[0]);
+      const int64_t ts = std::atoll(row[1]);
+      auto it = merged.find(peer);
+      if (it != merged.end()) {
+        it->second.lastMsgTs = std::max(it->second.lastMsgTs, ts);
+      } else {
+        ConversationEntry e;
+        e.peerId = peer;
+        e.lastMsgTs = ts;
+        merged.emplace(peer, e);
+      }
+    }
+    mysql_free_result(res);
+  }
+  out.reserve(merged.size());
+  for (auto& [_, e] : merged) out.push_back(e);
+  return out;
+}
+
+bool MySqlMessageRepository::fetchLastMessageSingle(int64_t userA, int64_t userB,
+                                                    LastMessageInfo* out) {
+  // 单聊末条（有界点查）：(ts,id) 严格序，同秒消息取 id 最大（插入序最新）
+  std::lock_guard<std::mutex> lock(mutex_);
+  if (!client_.ok() || userA <= 0 || userB <= 0 || userA == userB || !out) {
+    return false;
+  }
+  const std::string sql =
+      "SELECT message_id, msg_type, status FROM messages WHERE group_id = 0 AND "
+      "((from_user = " + std::to_string(userA) + " AND to_user = " + std::to_string(userB) +
+      ") OR (from_user = " + std::to_string(userB) + " AND to_user = " + std::to_string(userA) +
+      ")) ORDER BY ts DESC, id DESC LIMIT 1";
+  if (!client_.query(sql.c_str())) {
+    LOG_E("[mysql] 会话末条(单聊)失败: " << client_.errStr());
+    return false;
+  }
+  MYSQL_RES* res = mysql_store_result(client_.handle());
+  if (!res) return false;
+  MYSQL_ROW row = mysql_fetch_row(res);
+  const bool ok = row != nullptr;
+  if (ok) {
+    out->messageId = row[0] ? row[0] : "";
+    out->msgType = row[1] ? row[1] : "text";
+    out->recalled = row[2] && std::atoi(row[2]) == kMsgRecalled;
+  }
+  mysql_free_result(res);
+  return ok;
+}
+
+bool MySqlMessageRepository::fetchLastMessageGroup(int64_t groupId,
+                                                   LastMessageInfo* out) {
+  // 群末条（有界点查）：(ts,id) 严格序
+  std::lock_guard<std::mutex> lock(mutex_);
+  if (!client_.ok() || groupId <= 0 || !out) return false;
+  const std::string sql =
+      "SELECT message_id, msg_type, status FROM messages WHERE group_id = " +
+      std::to_string(groupId) + " ORDER BY ts DESC, id DESC LIMIT 1";
+  if (!client_.query(sql.c_str())) {
+    LOG_E("[mysql] 会话末条(群)失败: " << client_.errStr());
+    return false;
+  }
+  MYSQL_RES* res = mysql_store_result(client_.handle());
+  if (!res) return false;
+  MYSQL_ROW row = mysql_fetch_row(res);
+  const bool ok = row != nullptr;
+  if (ok) {
+    out->messageId = row[0] ? row[0] : "";
+    out->msgType = row[1] ? row[1] : "text";
+    out->recalled = row[2] && std::atoi(row[2]) == kMsgRecalled;
+  }
+  mysql_free_result(res);
+  return ok;
+}
+
+std::vector<std::pair<int64_t, int64_t>> MySqlMessageRepository::fetchGroupLastTs(
+    const std::vector<int64_t>& groupIds) {
+  // 各群末条 ts 一次聚合（idx_group_ts）；IN 列表为服务端群 ID（纯数字）拼接
+  std::lock_guard<std::mutex> lock(mutex_);
+  std::vector<std::pair<int64_t, int64_t>> out;
+  if (!client_.ok() || groupIds.empty()) return out;
+  std::string in;
+  for (const int64_t gid : groupIds) {
+    if (gid <= 0) continue;
+    if (!in.empty()) in += ",";
+    in += std::to_string(gid);
+  }
+  if (in.empty()) return out;
+  const std::string sql =
+      "SELECT group_id, MAX(ts) FROM messages WHERE group_id IN (" + in +
+      ") GROUP BY group_id";
+  if (!client_.query(sql.c_str())) {
+    LOG_E("[mysql] 会话聚合(群)失败: " << client_.errStr());
+    return out;
+  }
+  if (MYSQL_RES* res = mysql_store_result(client_.handle())) {
+    MYSQL_ROW row;
+    while ((row = mysql_fetch_row(res))) {
+      out.emplace_back(std::atoll(row[0]), std::atoll(row[1]));
+    }
+    mysql_free_result(res);
+  }
   return out;
 }
 
