@@ -42,28 +42,40 @@ std::string AppServer::nextMessageId() {
          std::to_string(seq);
 }
 
+json AppServer::messageToJson(const StoredMessage& m, const std::string& groupName) {
+  // 撤回终态：正文/媒体在唯一出口剥离（四出口共用本函数，防单点遗漏）
+  const bool recalled = (m.status == kMsgRecalled);
+  std::string fromNick;
+  userStore_->nickname(m.fromUser, &fromNick);
+  std::string fromAccount;
+  if (!userStore_->accountOf(m.fromUser, &fromAccount)) fromAccount.clear();
+  json j = {
+    {"from", fromAccount},
+    {"fromNick", fromNick},
+    {"content", recalled ? std::string() : m.content},
+    {"ts", m.ts},
+    {"clientMsgId", m.clientMsgId},
+    {"messageId", m.messageId},
+    {"chatType", m.chatType},
+    {"msgType", m.msgType},
+    // 媒体消息透传 fileId（存于 content）；撤回后剥离
+    {"mediaId", (!recalled && m.msgType == "image") ? m.content : std::string()},
+  };
+  if (recalled) j["recalled"] = true;
+  if (m.groupId != 0) {
+    j["groupId"] = m.groupId;
+    if (!groupName.empty()) j["groupName"] = groupName;
+  }
+  return j;
+}
+
 void AppServer::pushOfflineMessages(int64_t userId,
                                     const std::shared_ptr<Session>& session) {
   // 从消息存储读取该用户的离线消息（status=offline_pending），按 ts 升序
   auto stored = msgRepo_->fetchOffline(userId);
   json arr = json::array();
   for (const auto& m : stored) {
-    std::string fromNick;
-    userStore_->nickname(m.fromUser, &fromNick);
-    std::string fromAccount;
-    if (!userStore_->accountOf(m.fromUser, &fromAccount)) fromAccount.clear();
-    arr.push_back(json{
-      {"from", fromAccount},
-      {"fromNick", fromNick},
-      {"content", m.content},
-      {"ts", m.ts},
-      {"clientMsgId", m.clientMsgId},
-      {"messageId", m.messageId},
-      {"chatType", m.chatType},
-      {"msgType", m.msgType},
-      // 媒体消息透传 fileId（存于 content），非媒体为空串
-      {"mediaId", m.msgType == "image" ? m.content : std::string()},
-    });
+    arr.push_back(messageToJson(m));
   }
   // 群离线补发：各群按水位线查行（ts > watermark 且在成员在群期间内），与单聊行按 ts 合并
   int64_t maxTs = 0;
@@ -76,22 +88,9 @@ void AppServer::pushOfflineMessages(int64_t userId,
     std::string gname;
     groupRepo_->getGroup(gid, &gname, nullptr);
     for (const auto& m : grows) {
-      if (m.fromUser == userId) continue;  // 跳过发送者自己的消息（与在线路径一致）
-      std::string fromNick, fromAccount;
-      userStore_->nickname(m.fromUser, &fromNick);
-      if (!userStore_->accountOf(m.fromUser, &fromAccount)) fromAccount.clear();
-      arr.push_back(json{{"from", fromAccount},
-                         {"fromNick", fromNick},
-                         {"groupId", gid},
-                         {"groupName", gname},
-                         {"content", m.content},
-                         {"ts", m.ts},
-                         {"clientMsgId", m.clientMsgId},
-                         {"messageId", m.messageId},
-                         {"chatType", "group"},
-                         {"msgType", m.msgType},
-                         // 媒体消息透传 fileId（存于 content）
-                         {"mediaId", m.msgType == "image" ? m.content : std::string()}});
+      if (m.fromUser == userId) continue;      // 跳过发送者自己的消息（与在线路径一致）
+      if (m.status == kMsgRecalled) continue;  // 已撤回不补发（未见过的人不收占位符）
+      arr.push_back(messageToJson(m, gname));
       maxTs = std::max(maxTs, m.ts);
       groupRepo_->setWatermark(gid, userId, m.ts);
     }
@@ -471,22 +470,7 @@ void AppServer::onHistory(const std::shared_ptr<Session>& session, const json& d
   auto stored = msgRepo_->fetchHistory(session->userId(), to, limit);
   json arr = json::array();
   for (const auto& m : stored) {
-    std::string fromNick;
-    userStore_->nickname(m.fromUser, &fromNick);
-    std::string fromAccount;
-    if (!userStore_->accountOf(m.fromUser, &fromAccount)) fromAccount.clear();
-    arr.push_back(json{
-      {"from", fromAccount},
-      {"fromNick", fromNick},
-      {"content", m.content},
-      {"ts", m.ts},
-      {"clientMsgId", m.clientMsgId},
-      {"messageId", m.messageId},
-      {"chatType", m.chatType},
-      {"msgType", m.msgType},
-      // 媒体消息透传 fileId（存于 content），非媒体为空串
-      {"mediaId", m.msgType == "image" ? m.content : std::string()},
-    });
+    arr.push_back(messageToJson(m));
   }
   session->reply(makeResult("chat.history_res", 0, "ok", json{{"msgs", arr}}));
 }
