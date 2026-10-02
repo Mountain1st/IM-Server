@@ -234,6 +234,7 @@ bool MySqlMessageRepository::hasMediaAccess(int64_t userId, const std::string& f
   MYSQL_STMT* stmt = client_.stmtExec(
       "SELECT EXISTS(SELECT 1 FROM messages WHERE media_id="
       "(SELECT id FROM media WHERE file_id=?) "
+      "AND status != " + std::to_string(kMsgRecalled) + " "
       "AND ((group_id=0 AND (from_user=? OR to_user=?)) "
       "OR (group_id>0 AND EXISTS(SELECT 1 FROM group_members gm WHERE "
       "gm.group_id=messages.group_id AND gm.user_id=? AND gm.left_ts=0))))",
@@ -264,12 +265,104 @@ void MySqlMessageRepository::markRead(int64_t toUser, int64_t fromUser, int64_t 
   int errNo = 0;
   MYSQL_STMT* stmt = client_.stmtExec(
       "UPDATE messages SET status = ?, read_ts = ? "
-      "WHERE to_user = ? AND from_user = ? AND status != ? AND ts <= ? AND group_id = 0",
+      "WHERE to_user = ? AND from_user = ? AND status IN (?, ?) AND ts <= ? AND group_id = 0",
       {std::to_string(kMsgRead), std::to_string(readTs), std::to_string(toUser),
-       std::to_string(fromUser), std::to_string(kMsgRead), std::to_string(readTs)},
+       std::to_string(fromUser), std::to_string(kMsgOfflinePending),
+       std::to_string(kMsgDelivered), std::to_string(readTs)},
       &errNo);
   if (stmt) mysql_stmt_close(stmt);
   else LOG_E("[mysql] 标记已读失败 errno=" << errNo);
+}
+
+RecallResult MySqlMessageRepository::recallMessage(
+    const std::string& messageId, int64_t senderId, int64_t nowSec,
+    int64_t windowSec, RecallInfo* info) {
+  std::lock_guard<std::mutex> lock(mutex_);
+  if (!client_.ok() || messageId.empty() || senderId <= 0 || windowSec <= 0) {
+    return RecallResult::kError;
+  }
+  // 单条 UPDATE 原子校验：存在性 + 权限 + 时间窗 + 状态迁移（免 TOCTOU）
+  int errNo = 0;
+  MYSQL_STMT* stmt = client_.stmtExec(
+      "UPDATE messages SET status = ?, recalled_ts = ? "
+      "WHERE message_id = ? AND from_user = ? AND status IN (?, ?, ?) AND ts >= ?",
+      {std::to_string(kMsgRecalled), std::to_string(nowSec), messageId,
+       std::to_string(senderId), std::to_string(kMsgOfflinePending),
+       std::to_string(kMsgDelivered), std::to_string(kMsgRead),
+       std::to_string(nowSec - windowSec)},
+      &errNo);
+  if (!stmt) {
+    LOG_E("[mysql] 撤回消息失败 errno=" << errNo);
+    return RecallResult::kError;
+  }
+  const my_ulonglong affected = mysql_stmt_affected_rows(stmt);
+  mysql_stmt_close(stmt);
+  if (affected != 1) {
+    // 失败分类：回查该行（仅失败路径；chatType/groupId/to_user 均不可变，
+    // 与 UPDATE 之间无 TOCTOU 风险）
+    errNo = 0;
+    MYSQL_STMT* sel = client_.stmtExec(
+        "SELECT from_user, status, ts FROM messages WHERE message_id = ?",
+        {messageId}, &errNo);
+    if (!sel) {
+      LOG_E("[mysql] 撤回分类查询失败 errno=" << errNo);
+      return RecallResult::kError;
+    }
+    MYSQL_BIND res[3];
+    int64_t fromUser = 0, ts = 0;
+    int status = 0;
+    memset(res, 0, sizeof res);
+    res[0].buffer_type = MYSQL_TYPE_LONGLONG;
+    res[0].buffer = &fromUser;
+    res[1].buffer_type = MYSQL_TYPE_LONG;
+    res[1].buffer = &status;
+    res[2].buffer_type = MYSQL_TYPE_LONGLONG;
+    res[2].buffer = &ts;
+    const bool hasRow =
+        !mysql_stmt_bind_result(sel, res) && !mysql_stmt_store_result(sel) &&
+        mysql_stmt_fetch(sel) == 0;
+    mysql_stmt_close(sel);
+    if (!hasRow) return RecallResult::kNotFound;
+    if (fromUser != senderId) return RecallResult::kForbidden;
+    if (status == kMsgRecalled) return RecallResult::kAlready;
+    if (ts < nowSec - windowSec) return RecallResult::kExpired;
+    return RecallResult::kError;  // 与 UPDATE 条件相符却未命中：并发删除等异常
+  }
+  // 成功：回查行信息供 notify 扇出（chat_type/group_id/to_user 不可变）
+  if (info) {
+    errNo = 0;
+    MYSQL_STMT* sel = client_.stmtExec(
+        "SELECT chat_type, group_id, to_user FROM messages WHERE message_id = ?",
+        {messageId}, &errNo);
+    if (!sel) {
+      LOG_E("[mysql] 撤回信息回查失败 errno=" << errNo);
+      info->chatType = "single";  // 回查失败降级：notify 缺失可由占位符兜底
+      return RecallResult::kOk;
+    }
+    MYSQL_BIND res[3];
+    char chatBuf[16] = {0};
+    unsigned long chatLen = 0;
+    int64_t groupId = 0, toUser = 0;
+    memset(res, 0, sizeof res);
+    res[0].buffer_type = MYSQL_TYPE_STRING;
+    res[0].buffer = chatBuf;
+    res[0].buffer_length = sizeof chatBuf;
+    res[0].length = &chatLen;
+    res[1].buffer_type = MYSQL_TYPE_LONGLONG;
+    res[1].buffer = &groupId;
+    res[2].buffer_type = MYSQL_TYPE_LONGLONG;
+    res[2].buffer = &toUser;
+    if (!mysql_stmt_bind_result(sel, res) && !mysql_stmt_store_result(sel) &&
+        mysql_stmt_fetch(sel) == 0) {
+      info->chatType.assign(chatBuf, chatLen);
+      info->groupId = groupId;
+      info->toUser = toUser;
+    } else {
+      info->chatType = "single";  // 降级同上
+    }
+    mysql_stmt_close(sel);
+  }
+  return RecallResult::kOk;
 }
 
 std::vector<StoredMessage> MySqlMessageRepository::fetchGroupMessages(

@@ -26,6 +26,24 @@ enum MessageStatus {
   kMsgOfflinePending = 0,
   kMsgDelivered = 1,
   kMsgRead = 2,
+  kMsgRecalled = 3,  // 撤回终态（msg.recall）：出站序列化剥离正文，仅发送者可撤
+};
+
+// 撤回结果分类（recallMessage：affected=0 时回查判定）
+enum class RecallResult {
+  kOk,        // 撤回成功（状态已迁移）
+  kAlready,   // 该消息已被撤回（幂等成功）
+  kNotFound,  // 消息不存在
+  kForbidden, // 非发送者
+  kExpired,   // 超过可撤回时间窗
+  kError,     // 参数非法/DB 错误
+};
+
+// 撤回成功后供 notify 扇出的行信息（回查所得，chat_type/group_id/to_user 不可变）
+struct RecallInfo {
+  std::string chatType;  // "single" / "group"
+  int64_t groupId = 0;   // 群聊 >0；单聊 0
+  int64_t toUser = 0;    // 单聊对端（自己对话框 = 发送者自己）
 };
 
 // 消息存储接口：消息的持久化（在线/离线/历史）统一委托给本接口。
@@ -61,6 +79,13 @@ public:
                                                   int limit) = 0;
   // 把接收方 toUser 与 fromUser 之间、readTs 之前未读的消息标记为已读。
   virtual void markRead(int64_t toUser, int64_t fromUser, int64_t readTs) = 0;
+  // 撤回消息：单条 UPDATE 原子校验（存在 message_id + 发送者 from_user +
+  // 时间窗 ts >= now-windowSec + 状态迁移 IN(0,1,2)→3 终态），免 TOCTOU。
+  // affected=0 回查分类失败原因；kOk 时经 info 回传出站所需行信息
+  // （notify 扇出用，含已撤回与已分类两种回查）。info 可为 nullptr。
+  virtual RecallResult recallMessage(const std::string& messageId,
+                                     int64_t senderId, int64_t nowSec,
+                                     int64_t windowSec, RecallInfo* info) = 0;
   // 两用户之间是否存在单聊消息记录（任一方向）。read_notify 推送门槛用：
   // 无往来目标不推送，防 userId→account 枚举（2026-09-27 审计低危）。
   virtual bool hasConversation(int64_t userA, int64_t userB) = 0;
