@@ -22,6 +22,7 @@
 | 历史呈现 | 占位符 | 对话流不跳号；`chat.history`/群历史返回 `recalled:true`，content/mediaId 服务端剥离 |
 | 原文留存 | DB 留原文 + 接口剥离 | UPDATE 最小、可审计；配套关闭媒体可达性防图片泄露 |
 | 状态表示 | **方案 A**：`status=3 RECALLED` 终态 | 单条 UPDATE 原子校验（存在+权限+时间窗+状态迁移，免 TOCTOU）；既有查询路径无一需要新增防泄露谓词（仅失败分类补一次 SELECT）；否决 B（独立标志列：5 处查询路径每处需记得加谓词，漏一处即泄露）与 C（事件表+JOIN：过度设计） |
+| 迁移口径 | **无需修改既有 status 字段类型；仅新增 `recalled_ts` 审计时间列** | status 为 TINYINT 原位扩值（0/1/2→3），表结构零改动；`recalled_ts BIGINT NOT NULL DEFAULT 0` 为唯一新增列（审计/排障，`db/migrate_recall.sql`）——不是"零 schema 迁移"，是实现中收窄过的最小迁移 |
 | 命名 | `recalled`（不用 revoked） | recall=消息撤回，revoked 易读作权限/令牌撤销 |
 | 迁移 | 加一列 `recalled_ts` | 审计/排障价值，代价一列 |
 
