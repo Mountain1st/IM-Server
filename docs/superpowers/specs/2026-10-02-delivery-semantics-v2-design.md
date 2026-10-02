@@ -128,7 +128,7 @@ ORDER BY ts ASC, id ASC
 
 | 位置 | 改动 |
 |---|---|
-| `db/migrate_delivery_cursor.sql` + `schema.sql` | `group_members` 增 `last_delivered_id` |
+| `db/migrate_delivery_cursor.sql` + `schema.sql` | `group_members` 增 `last_delivered_id`（默认 0；存量行 `last_delivered_ts` 保留原值——旧在线投递可能已把 ts 推到 `now` 超前进位，属演进前既有行为，不追补历史，新逻辑仅从部署后按 ACK 严格推进） |
 | `app_message.cpp:388` | 删 `targetOnline?1:0`，单聊恒 status=0（自己对话框除外仍 1） |
 | `app_message.cpp:90-99` | 补发走 (ts,id) 游标，**移除循环内 `setWatermark`** |
 | `app_group.cpp:617` | **删除**在线投递 `setWatermark`（在线不推进游标） |
