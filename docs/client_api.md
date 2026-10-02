@@ -1,4 +1,4 @@
-# IM 客户端接入标准（client_api，协议 v3.1）
+# IM 客户端接入标准（client_api，协议 v3.2）
 
 > 面向 **Qt 客户端（QWebSocket）** 与 **Web 客户端（浏览器 WebSocket）** 的开发接入文档。
 > 客户端实现只依赖本文件即可；协议正文（字段细则、时序、变更历史）见 [protocol.md](./protocol.md)。
@@ -494,6 +494,26 @@
 - `messageId`：要撤回的消息 ID（来自 `msg.recv`/`msg.offline`/历史里的 `messageId` 字段；`msg.ack` **不携带** messageId，发送方需从回显 `msg.recv` 里取）
 - 仅**发送者本人**可撤回；`403` 无权撤回（非发送者）、`404` 消息不存在、`410` 超过可撤回时间（120 秒）、`429` 操作过于频繁（与发送同额度桶）
 - **重复撤回同一消息幂等回 0**（且不重复扇出通知），客户端重试安全
+
+### 5.33 会话列表 `conversation.list`（v3.2）
+
+登录后拉取「我有哪些会话、各多少未读」：
+```json
+{ "type": "conversation.list", "seq": 34, "data": { "limit": 50 } }
+```
+响应（成功）：
+```json
+{ "type": "conversation.list_res", "data": { "code": 0, "msg": "ok", "data": { "conversations": [
+  { "chatType": "single", "account": "13900139000", "nick": "小波", "lastMessageId": "...", "lastMsgTs": 1720000000, "lastMsgType": "text", "lastMsgRecalled": false, "unreadCount": 3, "lastReadTs": 1720000000 },
+  { "chatType": "group", "groupId": 1, "groupName": "项目群", "lastMessageId": "...", "lastMsgTs": 1720000000, "lastMsgType": "text", "lastMsgRecalled": true, "unreadCount": 0, "lastReadTs": 0 }
+] } } }
+```
+- 按 `lastMsgTs` 倒序；`limit` 缺省 50、上限 100；`429` 查询限流（与 history 同桶）
+- 单聊 `unreadCount` 为**真实未读数**（服务端 status 派生）：`msg.read` 后自动归零、对方撤回后自动减少，客户端**无需本地维护计数**
+- **群聊 `unreadCount`/`lastReadTs` 恒 0（v3.2 占位）**：群已读能力尚未实现，客户端不得据此渲染群未读角标（后续 `group.read` 上线后启用真实值）
+- `lastMsgRecalled`=末条消息已撤回：客户端**优先判它**再判 `lastMsgType`，渲染「XXX 撤回了一条消息」
+- 自己对话框不返回；已退群/已解散群不出现在群段
+- 末条信息无 `content` 预览（服务端不下发，客户端按 `lastMsgType` 渲染占位如「[图片]」）
 
 ## 6. 服务端 → 客户端事件
 
