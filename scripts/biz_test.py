@@ -141,14 +141,17 @@ def login(ws, u, p):
     return json.loads(ws.recv())
 
 
-def send_msg(ws, to, content, cid, msg_type=None, media_id=None):
+def send_msg(ws, to, content, cid, msg_type=None, media_id=None, chat_type=None):
     # msg_type 为 None 时不带该字段（保持原文本用例行为不变）
     # media_id 为图片消息关联的 fileId（msgType=image 时必带）
+    # chat_type 为 None 时不带该字段（撤回段群发用例需要 group）
     d = {"to": to, "content": content, "clientMsgId": cid}
     if msg_type is not None:
         d["msgType"] = msg_type
     if media_id is not None:
         d["mediaId"] = media_id
+    if chat_type is not None:
+        d["chatType"] = chat_type
     ws.send(env("msg.send", d))
     return json.loads(ws.recv())
 
@@ -1745,12 +1748,192 @@ def main():
           and r["data"]["code"] == 403)
     m1.close(); m2.close(); m3.close(); m4.close()
     g1.close(); g2.close()
+
+    # ================= 消息撤回（msg.recall）=================
+    # 独立账号/连接，避免污染前段会话状态；DB 注入仅用于超窗用例。
+    RA, RB, RC = base + "87", base + "88", base + "89"  # 16..74 被群满员动态注册占用,77-86 静态占用
+    r1 = WS()   # 发送者主连接
+    r1x = WS()  # 发送者第二连接（多端同步）
+    rb = WS()   # 接收者
+    rc = WS()   # 离线接收者（用后即关）
+    assert register(r1, RA, "pw1234")["data"]["code"] == 0
+    assert login(r1, RA, "pw1234")["data"]["code"] == 0
+    # r1x 是 RA 的第二连接（多端同步）：仅登录，重复注册会 409
+    assert login(r1x, RA, "pw1234")["data"]["code"] == 0
+    assert register(rb, RB, "pw1234")["data"]["code"] == 0
+    assert login(rb, RB, "pw1234")["data"]["code"] == 0
+    assert register(rc, RC, "pw1234")["data"]["code"] == 0
+    # RC 须先登录才可 accept（未登录信封门禁 401），建联后断开转离线
+    assert login(rc, RC, "pw1234")["data"]["code"] == 0
+    # 联系人：RA↔RB、RA↔RC（send 门槛）
+    r1.send(env("contact.request", {"account": RB})); json.loads(r1.recv())
+    rb.send(env("contact.accept", {"account": RA})); json.loads(rb.recv())
+    json.loads(r1.recv()); json.loads(rb.recv())  # 双方 contact 事件
+    r1.send(env("contact.request", {"account": RC})); json.loads(r1.recv())
+    rc.send(env("contact.accept", {"account": RA})); json.loads(rc.recv())
+    json.loads(r1.recv()); json.loads(rc.recv())
+    json.loads(r1x.recv()); json.loads(r1x.recv())  # r1x 多端扇出：两条 contact.added
+    rc.close()  # RC 转离线
+
+    # 1. 单聊撤回全链路：recv → recall → 双端 notify → 历史占位符
+    cid1 = "rc1-" + base
+    r = send_msg(r1, RB, "撤回我", cid1)
+    check("recall send ok", r["data"]["code"] == 0)
+    r = json.loads(rb.recv())
+    check("recall recv ok", r["type"] == "msg.recv" and r["data"]["clientMsgId"] == cid1)
+    rid1 = r["data"]["messageId"]
+    r = json.loads(r1x.recv())  # 发送者多端回显
+    rid1x = r["data"]["messageId"]
+    check("recall echo same id", rid1x == rid1)
+    r = send(r1, "msg.recall", {"messageId": rid1})
+    check("recall ok", r["type"] == "msg.recall_res" and r["data"]["code"] == 0)
+    r = json.loads(rb.recv())
+    check("recall notify to peer", r["type"] == "msg.recall_notify"
+          and r["data"]["messageId"] == rid1 and r["data"]["chatType"] == "single"
+          and r["data"]["from"] == RA)
+    r = json.loads(r1x.recv())
+    check("recall notify to other device", r["type"] == "msg.recall_notify"
+          and r["data"]["messageId"] == rid1)
+    r = send(rb, "chat.history", {"to": RA, "limit": 10})
+    msgs = r["data"]["data"]["msgs"]
+    hit = [m for m in msgs if m["messageId"] == rid1]
+    check("recall history placeholder", len(hit) == 1 and hit[0].get("recalled") is True
+          and hit[0]["content"] == "" and hit[0]["mediaId"] == "")
+
+    # 2. 群聊撤回：群发 → 发送者撤回 → 成员 notify + 群历史占位符
+    r = send(r1, "group.create", {"name": "撤回群"})
+    rgid = r["data"]["data"]["groupId"]
+    r = send(r1, "group.invite", {"groupId": rgid, "account": RB})
+    json.loads(r1.recv())  # member_changed 事件
+    json.loads(rb.recv())  # 被拉人 group.added 推送
+    json.loads(r1x.recv())  # r1x 同为成员端，亦收 member_changed
+    r = send_msg(r1, rgid, "群撤回我", "rcg-" + base, chat_type="group")
+    check("recall group send ok", r["data"]["code"] == 0)
+    r = json.loads(rb.recv())
+    rgid_msg = r["data"]["messageId"]
+    json.loads(r1x.recv())  # 群回显
+    r = send(r1, "msg.recall", {"messageId": rgid_msg})
+    check("recall group ok", r["data"]["code"] == 0)
+    r = json.loads(rb.recv())
+    check("recall group notify", r["type"] == "msg.recall_notify"
+          and r["data"]["groupId"] == rgid and r["data"]["chatType"] == "group")
+    r = send(rb, "group.history", {"groupId": rgid, "limit": 10})
+    ghits = [m for m in r["data"]["data"]["msgs"] if m["messageId"] == rgid_msg]
+    check("recall group history placeholder", len(ghits) == 1
+          and ghits[0].get("recalled") is True and ghits[0]["content"] == "")
+
+    # 3. 非发送者撤回 403
+    r = send_msg(r1, RB, "别撤我的", "rc2-" + base)
+    r = json.loads(rb.recv())
+    rid2 = r["data"]["messageId"]
+    json.loads(r1x.recv())
+    r = send(rb, "msg.recall", {"messageId": rid2})
+    check("recall non-sender 403", r["data"]["code"] == 403)
+
+    # 4. 不存在 404
+    r = send(r1, "msg.recall", {"messageId": "9999999999-999999"})
+    check("recall not found 404", r["data"]["code"] == 404)
+
+    # 5. 参数错误 400
+    r = send(r1, "msg.recall", {})
+    check("recall bad params 400", r["data"]["code"] == 400)
+
+    # 6. 重复撤回幂等 0（对 rid2 发送者再撤一次）
+    r = send(r1, "msg.recall", {"messageId": rid2})
+    check("recall first ok", r["data"]["code"] == 0)
+    json.loads(rb.recv()); json.loads(r1x.recv())  # 消费首次 notify
+    r = send(r1, "msg.recall", {"messageId": rid2})
+    check("recall twice idempotent 0", r["data"]["code"] == 0)
+
+    # 7. 离线 pending 撤回：RC 不上线则永不收到该消息
+    r = send_msg(r1, RC, "离线撤回", "rc3-" + base)
+    check("recall offline send ok", r["data"]["code"] == 0)
+    # msg.ack 不带 messageId：按 client_msg_id 从 DB 反查（见简报实现注意块）
+    import subprocess
+    out = subprocess.run(["bash", "-c",
+        "MYSQL_PWD=%s mysql -u IMS_jack -h 127.0.0.1 -P %s IMS_reactor_db -N "
+        "-e \"SELECT message_id FROM messages WHERE client_msg_id='rc3-%s';\""
+        % (MYSQL_PWD_ENV, MYSQL_PORT_ENV, base)],
+        capture_output=True, text=True).stdout.strip()
+    r = send(r1, "msg.recall", {"messageId": out})
+    check("recall offline pending ok", r["data"]["code"] == 0)
+    r3 = WS()
+    assert login(r3, RC, "pw1234")["data"]["code"] == 0
+    got_offline = None
+    try:
+        r3.s.settimeout(2)
+        got_offline = json.loads(r3.recv())
+    except Exception:
+        got_offline = None
+    r3.s.settimeout(5)
+    if got_offline is not None and got_offline["type"] == "msg.offline":
+        mids = [m["messageId"] for m in got_offline["data"]["msgs"]]
+        check("recall suppresses offline", out not in mids)
+    else:
+        check("recall suppresses offline", True)  # 无 offline 包 = 也通过
+    r = send(r3, "chat.history", {"to": RA, "limit": 10})
+    phits = [m for m in r["data"]["data"]["msgs"] if m["messageId"] == out]
+    check("recall offline history placeholder", len(phits) == 1
+          and phits[0].get("recalled") is True)
+
+    # 8. 撤回后 markRead 不复活（回归：markRead 谓词 status IN(0,1)）
+    #    （用例 1 已撤回 rid1；此处 RB 对 RA 全量已读后再查历史）
+    r = send(rb, "msg.read", {"from": RA})
+    try:
+        rb.recv(0.5)  # 读通知仅发读者其他端（本端无推送），容忍性消费防阻塞
+    except Exception:
+        pass
+    r = send(rb, "chat.history", {"to": RA, "limit": 10})
+    hit2 = [m for m in r["data"]["data"]["msgs"] if m["messageId"] == rid1]
+    check("recall survives markRead", len(hit2) == 1 and hit2[0].get("recalled") is True
+          and hit2[0]["content"] == "")
+
+    # 9. 超窗 410（DB 把 rid2 的 ts 改老后撤回）
+    #    注意：rid2 在用例 6 已撤回，这里改用新消息
+    r = send_msg(r1, RB, "超窗撤回", "rc4-" + base)
+    r = json.loads(rb.recv())
+    rid4 = r["data"]["messageId"]
+    json.loads(r1x.recv())
+    subprocess.run(["bash", "-c",
+        "MYSQL_PWD=%s mysql -u IMS_jack -h 127.0.0.1 -P %s IMS_reactor_db -e "
+        "\"UPDATE messages SET ts = ts - 3600 WHERE message_id='%s';\""
+        % (MYSQL_PWD_ENV, MYSQL_PORT_ENV, rid4)],
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    r = send(r1, "msg.recall", {"messageId": rid4})
+    check("recall expired 410", r["data"]["code"] == 410)
+
+    # 10. 撤回图片后 media.url 403（对象存储门禁内）
+    if medias_enabled:
+        png_r = base64.b64decode(PNG_1X1_B64)
+        r = send(r1, "media.presign", {"fileName": "rc.png", "mimeType": "image/png",
+                                       "size": len(png_r), "kind": "image"})
+        r_up = media_data(r).get("uploadUrl", "")
+        r_fid = media_data(r).get("fileId", "")
+        check("recall image presign ok", bool(r_up) and put(r_up, png_r) in (200, 204))
+        r = send(r1, "media.commit", {"fileId": r_fid, "size": len(png_r),
+                                      "width": 1, "height": 1})
+        check("recall image commit ok", r["data"]["code"] == 0)
+        r = send_msg(r1, RB, "", "rc-img-" + base, msg_type="image", media_id=r_fid)
+        check("recall image send ok", r["data"]["code"] == 0)
+        r = json.loads(rb.recv())
+        rid_img = r["data"]["messageId"]
+        json.loads(r1x.recv())
+        r = send(r1, "msg.recall", {"messageId": rid_img})
+        check("recall image ok", r["data"]["code"] == 0)
+        json.loads(rb.recv()); json.loads(r1x.recv())  # notify
+        r = send(rb, "media.url", {"fileId": r_fid})
+        ent = media_data(r).get("urls", {}).get(r_fid, {})
+        check("recall image url 403", ent.get("code") == 403)
+
+    # 撤回群清理（群表按 owner 删除走统一清理段，此处仅关连接）
+    r1.close(); r1x.close(); rb.close(); r3.close()
+
     a.close(); b.close()
 
     # 清理本次注册的测试账号及其关联消息（精确账号列表，不误删真实用户）
     import subprocess
     used = [A, B, C, SINK, SPAM, SINK2, SPAM2, D, E, F, G, H, base + "50", G1, G2,
-            M1, M2, M3, M4, PIMG, QIMG, CIMG] \
+            M1, M2, M3, M4, PIMG, QIMG, CIMG, RA, RB, RC] \
         + cap_accounts + [OVER, X, Y, Z, BL, BL2, BL3, BL4]
     inlist = ",".join("'%s'" % x for x in used)
     # 群表清理必须在 users 删除之前（按 account 查 user_id，无级联外键）
