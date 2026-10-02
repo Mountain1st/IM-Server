@@ -81,6 +81,9 @@ inline constexpr size_t kMaxClientMsgIdBytes = 64;
 inline constexpr size_t kMaxOfflineAckIds = 1000;
 // 消息撤回时间窗：发送者可在消息落库后 120 秒内撤回（msg.recall）
 inline constexpr int64_t kRecallWindowSec = 120;
+// 会话列表（conversation.list）：缺省返回条数与上限（有界 N+1 末条点查的界）
+inline constexpr size_t kConversationLimitDefault = 50;
+inline constexpr size_t kConversationLimitMax = 100;
 
 // ---- 存储（内存态，防膨胀） ----
 // 每用户离线消息上限

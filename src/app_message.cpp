@@ -22,6 +22,8 @@
 //   有会话往来门槛防 userId 枚举）
 // - onRecall：消息撤回（发送者+120s 窗内；存储层单条 UPDATE 原子校验；
 //   recall_notify 扇出对端/群成员/多端；重复撤回幂等）
+// - onConversationList：会话列表（v3.2 派生式；单聊未读出自 status；
+//   群 unread/lastReadTs 恒 0——投递水位线≠已读游标，群已读 v3.x 独立启用）
 // - pushOfflineMessages：登录/重连后离线消息补发（非破坏性）
 // - nextMessageId：全局消息 ID（时间戳前缀 + 进程内自增，防重启碰撞）
 // 线程：工作线程池（AppServer::onEnvelope 分发）
@@ -580,6 +582,84 @@ void AppServer::onRecall(const std::shared_ptr<Session>& session, const json& da
     if (t.get() == session.get()) continue;
     t->reply(makeEnvelopeText("msg.recall_notify", nd));
   }
+}
+
+void AppServer::onConversationList(const std::shared_ptr<Session>& session, const json& data) {
+  // 会话列表（v3.2，派生式）：单聊未读/已读游标出自 messages.status 事实源；
+  // 群条目 unreadCount/lastReadTs 恒 0——last_delivered_ts 是投递水位线
+  // （在线投递即推进），不是已读游标，语义不可混用；群已读为独立能力
+  // （group_members.last_read_ts + group.read）v3.x 再启用（协议字段细则占位）。
+  // 流程：单聊聚合 + 群末条 ts 聚合 → 合并按 lastMsgTs 倒序截 limit →
+  // 幸存者逐个末条点查（有界 N+1，(ts,id) 严格序防同秒边界）→ 装配展示字段。
+  if (!queryLimiter_->allow(session->userId(), kQueryLimitPerWindow, kQueryWindow)) {
+    session->reply(makeResult("conversation.list_res", 429, "查询过于频繁，请稍后再试",
+                              json::object()));
+    return;
+  }
+  size_t limit = data.value("limit", static_cast<int64_t>(config::kConversationLimitDefault));
+  if (limit == 0) limit = config::kConversationLimitDefault;
+  if (limit > config::kConversationLimitMax) limit = config::kConversationLimitMax;
+  const int64_t me = session->userId();
+
+  struct Cand {
+    bool isGroup;
+    int64_t id;         // single=对端 userId；group=groupId
+    int64_t lastTs;
+    int64_t unread;
+    int64_t lastReadTs;
+  };
+  std::vector<Cand> cands;
+  // 单聊：repo 已合并收发双方向、排除自己对话框（from/to=me）
+  for (const auto& e : msgRepo_->fetchSingleConversations(me)) {
+    cands.push_back({false, e.peerId, e.lastMsgTs, e.unread, e.lastReadTs});
+  }
+  // 群：现群 × 末条 ts 一次聚合（无消息的群不出现；已解散群过滤）
+  const auto gids = groupRepo_->listUserGroups(me);
+  std::vector<int64_t> alive;
+  for (const int64_t gid : gids) {
+    bool dissolved = false;
+    if (!groupRepo_->getGroup(gid, nullptr, nullptr, nullptr, nullptr, &dissolved)) continue;
+    if (!dissolved) alive.push_back(gid);
+  }
+  for (const auto& [gid, lastTs] : msgRepo_->fetchGroupLastTs(alive)) {
+    cands.push_back({true, gid, lastTs, 0, 0});
+  }
+  std::sort(cands.begin(), cands.end(),
+            [](const Cand& a, const Cand& b) { return a.lastTs > b.lastTs; });
+  if (cands.size() > limit) cands.resize(limit);
+
+  json arr = json::array();
+  for (const auto& c : cands) {
+    LastMessageInfo lm;
+    const bool has = c.isGroup ? msgRepo_->fetchLastMessageGroup(c.id, &lm)
+                               : msgRepo_->fetchLastMessageSingle(me, c.id, &lm);
+    if (!has) continue;  // 末条缺失（理论不可达）：防御跳过
+    json item = {
+      {"chatType", c.isGroup ? "group" : "single"},
+      {"lastMessageId", lm.messageId},
+      {"lastMsgTs", c.lastTs},
+      {"lastMsgType", lm.msgType},
+      {"lastMsgRecalled", lm.recalled},
+      {"unreadCount", c.unread},
+      {"lastReadTs", c.lastReadTs},
+    };
+    if (c.isGroup) {
+      item["groupId"] = c.id;
+      std::string gname;
+      groupRepo_->getGroup(c.id, &gname, nullptr);
+      item["groupName"] = gname;
+    } else {
+      std::string acct;
+      if (!userStore_->accountOf(c.id, &acct)) acct.clear();
+      std::string nick;
+      userStore_->nickname(c.id, &nick);
+      item["account"] = acct;
+      item["nick"] = nick;
+    }
+    arr.push_back(item);
+  }
+  session->reply(makeResult("conversation.list_res", 0, "ok",
+                            json{{"conversations", arr}}));
 }
 
 void AppServer::onCreateConv(const std::shared_ptr<Session>& session, const json& data) {
