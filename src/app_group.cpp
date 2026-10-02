@@ -516,7 +516,8 @@ void AppServer::onGroupHistory(const std::shared_ptr<Session>& session, const js
   }
   int limit = data.value("limit", 50);
   // joined-1：sinceTs 语义为严格大于，传 joined-1 使同秒消息可见（与离线路径一致）
-  auto stored = msgRepo_->fetchGroupMessages(groupId, joined - 1, 0, left, limit, false);
+  // joined-1：sinceTs 语义为严格大于（sinceId<0 无 id 约束），传 joined-1 使同秒消息可见
+  auto stored = msgRepo_->fetchGroupMessages(groupId, joined - 1, -1, left, limit, false);
   std::string gname;
   groupRepo_->getGroup(groupId, &gname, nullptr);
   json arr = json::array();

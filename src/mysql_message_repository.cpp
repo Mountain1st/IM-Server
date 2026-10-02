@@ -375,12 +375,21 @@ std::vector<StoredMessage> MySqlMessageRepository::fetchGroupMessages(
   if (!client_.ok() || groupId <= 0) return out;
   if (limit <= 0) limit = 50;
   if (limit > 200) limit = 200;
-  // 游标为 (ts,id) 严格序，与排序 (ts,id) 完全同构（防“查询排序≠ACK游标排序”边界 bug）
+  // 游标语义：
+  //   sinceId >= 0：(ts,id) 严格游标——ts > sinceTs 或 (ts==sinceTs 且 id>sinceId)
+  //   sinceId < 0 ：无 id 约束，仅 ts > sinceTs（历史/入群下界：严格大于，使同秒可见）
+  // 排序与游标同构 (ts,id)，防“查询排序≠ACK游标排序”边界 bug
+  std::string cursorCond;
+  if (sinceId < 0) {
+    cursorCond = "ts > " + std::to_string(sinceTs);
+  } else {
+    cursorCond = "(ts > " + std::to_string(sinceTs) + " OR (ts = " +
+                 std::to_string(sinceTs) + " AND id > " + std::to_string(sinceId) + "))";
+  }
   std::string sql =
       "SELECT message_id, from_user, to_user, content, ts, client_msg_id, chat_type, status, "
       "group_id, msg_type, media_id FROM messages WHERE group_id = " +
-      std::to_string(groupId) + " AND (ts > " + std::to_string(sinceTs) +
-      " OR (ts = " + std::to_string(sinceTs) + " AND id > " + std::to_string(sinceId) + "))";
+      std::to_string(groupId) + " AND " + cursorCond;
   if (untilTs > 0) sql += " AND ts <= " + std::to_string(untilTs);
   sql += asc ? " ORDER BY ts ASC, id ASC LIMIT " : " ORDER BY ts DESC, id DESC LIMIT ";
   sql += std::to_string(limit);
