@@ -6,22 +6,49 @@
 覆盖: 注册/重复注册/登录/错误密码/登录限流/消息收发/404/400/401/登出/离线补发/消息发送限流。
 """
 import base64
+import hashlib
+import hmac
 import json
 import os
 import socket
 import struct
 import sys
 import time
+import urllib.parse
+import urllib.request
 
 HOST = sys.argv[1] if len(sys.argv) > 1 else "127.0.0.1"
 PORT = int(sys.argv[2]) if len(sys.argv) > 2 else 9191
 
 results = []
+skipped = []
 
 
 def check(name, cond):
     results.append((name, cond))
     print(("PASS " if cond else "FAIL ") + name)
+
+
+def skip(name, reason=""):
+    # 记录并显式打印跳过项（环境不满足的用例段），最终统计可体现
+    skipped.append((name, reason))
+    print("SKIP " + name + ((" (%s)" % reason) if reason else ""))
+
+
+def media_ok(resp):
+    # media.*_res 顶层 code==0 判定（防御式：非 dict/字段缺失返回 False，不抛 KeyError）
+    if not isinstance(resp, dict):
+        return False
+    data = resp.get("data")
+    return isinstance(data, dict) and data.get("code") == 0
+
+
+def media_data(resp):
+    # 取 media.*_res 的 data.data（code!=0 或字段缺失返回 {}，避免 KeyError）
+    if not media_ok(resp):
+        return {}
+    d = resp.get("data", {}).get("data")
+    return d if isinstance(d, dict) else {}
 
 
 class WS:
@@ -42,24 +69,6 @@ class WS:
     def send(self, payload):
         data = payload.encode()
         self._send_frame(0x1, data)
-
-    def send_slow(self, payload, chunk_size=32768, delay=0.02):
-        # 大帧分片慢发：服务端单次读事件上限 1MB（防洪泛断开），
-        # 一次性 burst 发 1.5MB+ 信封会被直接断开；分片慢发使整帧到达业务层
-        data = payload.encode()
-        n = len(data)
-        if n < 126:
-            hdr = bytes([0x81, 0x80 | n])
-        elif n <= 0xFFFF:
-            hdr = bytes([0x81, 0xFE]) + struct.pack("!H", n)
-        else:
-            hdr = bytes([0x81, 0xFF]) + struct.pack("!Q", n)
-        mask = os.urandom(4)
-        self.s.sendall(hdr + mask)
-        masked = bytes(b ^ mask[i % 4] for i, b in enumerate(data))
-        for off in range(0, len(masked), chunk_size):
-            self.s.sendall(masked[off:off + chunk_size])
-            time.sleep(delay)
 
     def _send_frame(self, opcode, data, masked=True):
         n = len(data)
@@ -132,41 +141,43 @@ def login(ws, u, p):
     return json.loads(ws.recv())
 
 
-def send_msg(ws, to, content, cid, msg_type=None):
+def send_msg(ws, to, content, cid, msg_type=None, media_id=None):
     # msg_type 为 None 时不带该字段（保持原文本用例行为不变）
+    # media_id 为图片消息关联的 fileId（msgType=image 时必带）
     d = {"to": to, "content": content, "clientMsgId": cid}
     if msg_type is not None:
         d["msgType"] = msg_type
+    if media_id is not None:
+        d["mediaId"] = media_id
     ws.send(env("msg.send", d))
     return json.loads(ws.recv())
 
 
-# 任务 4 用：1x1 透明 PNG 的 base64（解码后 1x1，MediaStore 可接受）
+def send(ws, typ, data):
+    # 通用指令发送：返回解析后的响应信封（非 JSON 则返回 None）
+    ws.send(env(typ, data))
+    raw = ws.recv()
+    return json.loads(raw) if raw else None
+
+
+# 对象存储直传/下载辅助：测试机 MinIO 静态二进制监听 127.0.0.1:9000，
+# 预签名 URL 沿用服务端 IM_S3_ENDPOINT，故直接对 URL 发 PUT/GET 做真实字节校验。
+def put(url, body):
+    # urllib PUT 上传对象存储（预签名 PUT URL，方法必须 PUT）
+    req = urllib.request.Request(url, data=body, method="PUT")
+    with urllib.request.urlopen(req, timeout=10) as resp:
+        return resp.status
+
+
+def get(url):
+    # urllib GET 下载对象存储（预签名 GET URL），返回响应字节
+    with urllib.request.urlopen(url, timeout=10) as resp:
+        return resp.read()
+
+
+# 任务 4 用：1x1 透明 PNG 的 base64（解码后 1x1，图片用例直传对象存储）
 PNG_1X1_B64 = ("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGA"
                "hKmMIQAAAABJRU5ErkJggg==")
-
-
-def make_png_b64(w, h, seed=1):
-    # 生成 w×h 随机 RGB PNG（随机像素不可压缩，尺寸可控），用于验证大信封
-    # burst 发送：base64 后需 > 连接层单次读事件上限，回归 kMaxReadPerEvent
-    # 必须 ≥ 最大合法消息 kMaxMessageBytes，否则图片信封会被当洪泛断开
-    import random
-    import struct
-    import zlib
-    rnd = random.Random(seed)
-    raw = bytearray()
-    for _ in range(h):
-        raw.append(0)  # 每行 filter type 0
-        raw += rnd.randbytes(w * 3)
-
-    def chunk(typ, data):
-        c = struct.pack(">I", len(data)) + typ + data
-        return c + struct.pack(">I", zlib.crc32(typ + data) & 0xFFFFFFFF)
-
-    ihdr = struct.pack(">IIBBBBB", w, h, 8, 2, 0, 0, 0)  # 8bit RGB
-    png = (b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", ihdr)
-           + chunk(b"IDAT", zlib.compress(bytes(raw), 6)) + chunk(b"IEND", b""))
-    return base64.b64encode(png).decode()
 
 
 def main():
@@ -424,82 +435,120 @@ def main():
     r = json.loads(a.recv())
     check("chatType invalid 400", r["type"] == "msg.ack" and r["data"]["code"] == 400)
 
-    # ---- 任务 4：单聊图片消息（msgType=image，独立账号隔离限流额度）----
-    # 图片用独立后缀 75/76：避开群满员用例的 cap 段（16~30/38~49/51~59/62~74）
-    # 与 NOBODY(77)/OVER(78)/M段(80~83)
+    # ---- 任务 10：单聊图片消息改走对象存储直传 ----
+    # 流：presign → 真机 PUT 到 MinIO → commit → msg.send(mediaId=fileId)
+    #     → 接收方 msg.recv 带 mediaId → 查看方 media.url → GET 校验字节一致。
+    # 账号后缀 75/76：避开群满员用例的 cap 段与 NOBODY(77)/OVER(78)/M段(80~83)
+    # 环境门禁：服务端未配置对象存储（IM_S3_* 缺失 → store 未启用 → presign
+    # 返回 503）时，显式跳过整段媒体用例（不静默、不 KeyError 中断后续用例）。
+    medias_enabled = bool(os.environ.get("IM_S3_ENDPOINT"))
     PIMG = base + "75"
     QIMG = base + "76"
-    pim = WS()
-    r = register(pim, PIMG, "pw1234")
-    check("image register ok", r["type"] == "auth.register_res" and r["data"]["code"] == 0)
-    r = login(pim, PIMG, "pw1234")
-    check("image login ok", r["type"] == "auth.login_res" and r["data"]["code"] == 0)
-    qim = WS()
-    r = register(qim, QIMG, "pw1234")
-    check("image peer register ok", r["type"] == "auth.register_res" and r["data"]["code"] == 0)
-    r = login(qim, QIMG, "pw1234")
-    check("image peer login ok", r["type"] == "auth.login_res" and r["data"]["code"] == 0)
-    # 成功：1x1 PNG 应 ack 0，接收方 content 为 /uploads/*.png
-    r = send_msg(pim, QIMG, PNG_1X1_B64, "img-ok-1", msg_type="image")
-    check("image send ack ok", r["type"] == "msg.ack" and r["data"]["code"] == 0)
-    check("image ack has no msg_type", r["type"] == "msg.ack"
-          and "msgType" not in r["data"] and "msg_type" not in r["data"])
-    r = json.loads(qim.recv())
-    check("image recv url", r["type"] == "msg.recv"
-          and r["data"]["content"].startswith("/uploads/")
-          and r["data"]["content"].endswith(".png"))
-    check("image recv msgType", r["type"] == "msg.recv"
-          and r["data"].get("msgType") == "image")
-    # 非法 msgType 白名单外 → 400
-    pim.send(env("msg.send", {"to": QIMG, "content": "x", "clientMsgId": "img-bad-0",
-                              "msgType": "video"}))
-    r = json.loads(pim.recv())
-    check("image bad msgType 400", r["type"] == "msg.ack" and r["data"]["code"] == 400)
-    # 1.51MB 信封 → 413（分片慢发，避开连接层单次 1MB 读上限）
-    pim.send_slow(env("msg.send", {"to": QIMG, "content": "A" * 1584000,
-                                   "clientMsgId": "img-big-1", "msgType": "image"}))
-    r = json.loads(pim.recv())
-    check("image oversize 413", r["type"] == "msg.ack" and r["data"]["code"] == 413)
-    # 非法 base64 → 400
-    r = send_msg(pim, QIMG, "not-valid-base64!!!", "img-bad-1", msg_type="image")
-    check("image bad base64 400", r["type"] == "msg.ack" and r["data"]["code"] == 400)
-    # 有效 base64 但非图片内容 → 400（解码校验拒绝，不落盘）
-    r = send_msg(pim, QIMG, base64.b64encode(b"hello world").decode(),
-                 "img-bad-2", msg_type="image")
-    check("image bad content 400", r["type"] == "msg.ack" and r["data"]["code"] == 400)
-    # 超频：10 张/分钟（img-ok-1 成功与 img-bad-2 解码失败各占 1 个额度，
-    # 解码失败同样先过限流桶；再发 8 张占满，第 11 次 → 429）
-    for i in range(8):
-        r = send_msg(pim, QIMG, PNG_1X1_B64, "img-flood-%d" % i, msg_type="image")
-        assert r["data"]["code"] == 0, r
-        json.loads(qim.recv())  # 消费投递，防队列污染
-    r = send_msg(pim, QIMG, PNG_1X1_B64, "img-flood-9", msg_type="image")
-    check("image rate limit 429", r["type"] == "msg.ack" and r["data"]["code"] == 429)
-    # 历史透传：URL 行带 msgType=image
-    pim.send(env("chat.history", {"to": QIMG}))
-    r = json.loads(pim.recv())
-    himgs = [m for m in r["data"]["data"]["msgs"] if m["content"].startswith("/uploads/")]
-    check("image history has msgType", len(himgs) >= 1
-          and all(m.get("msgType") == "image" for m in himgs))
-    pim.close()
-    qim.close()
+    # 越权用例账号在媒体段外定义：无论媒体段是否跳过，清理列表都需引用它
+    CIMG = base + "86"
+    if medias_enabled:
+      pim = WS()
+      r = register(pim, PIMG, "pw1234")
+      check("image register ok", r["type"] == "auth.register_res" and r["data"]["code"] == 0)
+      r = login(pim, PIMG, "pw1234")
+      check("image login ok", r["type"] == "auth.login_res" and r["data"]["code"] == 0)
+      qim = WS()
+      r = register(qim, QIMG, "pw1234")
+      check("image peer register ok", r["type"] == "auth.register_res" and r["data"]["code"] == 0)
+      r = login(qim, QIMG, "pw1234")
+      check("image peer login ok", r["type"] == "auth.login_res" and r["data"]["code"] == 0)
 
-    # burst 大图端到端回归：真实客户端一次性 sendall（不分片慢发）发送 base64
-    # 约 1.45MB 的合法图片。kMaxReadPerEvent 必须 ≥ kMaxMessageBytes，否则连接层
-    # 单次读事件会把合法大信封当洪泛断开（send_slow 分片会掩盖该缺陷）。
-    BIMG = base + "84"
-    BIMGP = base + "85"
-    bimg = WS(); register(bimg, BIMG, "pw1234"); login(bimg, BIMG, "pw1234")
-    bimgp = WS(); register(bimgp, BIMGP, "pw1234"); login(bimgp, BIMGP, "pw1234")
-    big_png = make_png_b64(700, 550, seed=42)
-    assert 1400 * 1024 < len(big_png) < 1536 * 1024, len(big_png)
-    r = send_msg(bimg, BIMGP, big_png, "img-burst-1", msg_type="image")
-    check("image burst send ack ok", r["type"] == "msg.ack" and r["data"]["code"] == 0)
-    r = json.loads(bimgp.recv())
-    check("image burst recv url", r["type"] == "msg.recv"
-          and r["data"]["content"].startswith("/uploads/")
-          and r["data"].get("msgType") == "image")
-    bimg.close(); bimgp.close()
+      png = base64.b64decode(PNG_1X1_B64)
+
+      # 负例：未登录 presign 拒绝（onEnvelope 登录门禁，error 401）
+      anon = WS()
+      r = send(anon, "media.presign", {"fileName": "p.png", "mimeType": "image/png",
+                                       "size": len(png), "kind": "image"})
+      check("media presign not login 401",
+            r["type"] == "error" and r["data"]["code"] == 401)
+      anon.close()
+
+      # 正例：presign → 真机 PUT → commit
+      r = send(pim, "media.presign", {"fileName": "p.png", "mimeType": "image/png",
+                                      "size": len(png), "kind": "image"})
+      check("media presign ok", media_ok(r))
+      upload_url = media_data(r).get("uploadUrl", "")
+      fid = media_data(r).get("fileId", "")
+      check("media presign fileId 32hex",
+            len(fid) == 32 and all(c in "0123456789abcdef" for c in fid))
+      check("media PUT upload ok", bool(upload_url) and put(upload_url, png) in (200, 204))
+      # 负例：commit 未上传对象失败（presign 后不 PUT，HEAD 不存在 → 400）
+      r = send(pim, "media.presign", {"fileName": "missing.png", "mimeType": "image/png",
+                                      "size": len(png), "kind": "image"})
+      fid_missing = media_data(r).get("fileId", "")
+      r = send(pim, "media.commit", {"fileId": fid_missing, "size": len(png),
+                                     "width": 1, "height": 1})
+      check("media commit missing object rejected",
+            r["type"] == "media.commit_res" and r["data"]["code"] == 400)
+      # 负例：伪造 fileId commit 失败（查无记录 → 404）
+      r = send(pim, "media.commit", {"fileId": "f" * 32, "size": len(png),
+                                     "width": 1, "height": 1})
+      check("media commit forged fileId 404",
+            r["type"] == "media.commit_res" and r["data"]["code"] == 404)
+      # 负例：他人 fileId commit 拒绝（非 uploader → 403）
+      r = send(qim, "media.commit", {"fileId": fid, "size": len(png), "width": 1, "height": 1})
+      check("media commit other uploader 403",
+            r["type"] == "media.commit_res" and r["data"]["code"] == 403)
+      # 正例：commit 成功 + 重复 commit 幂等
+      r = send(pim, "media.commit", {"fileId": fid, "size": len(png), "width": 1, "height": 1})
+      check("media commit ok", r["type"] == "media.commit_res" and r["data"]["code"] == 0)
+      r = send(pim, "media.commit", {"fileId": fid, "size": len(png), "width": 1, "height": 1})
+      check("media commit idempotent",
+            r["type"] == "media.commit_res" and r["data"]["code"] == 0)
+
+      # 正例：发图片消息 → 接收方收 msg.recv 带 mediaId(fileId)
+      r = send_msg(pim, QIMG, "", "img-ok-1", msg_type="image", media_id=fid)
+      check("image send ack ok", r["type"] == "msg.ack" and r["data"]["code"] == 0)
+      check("image ack has no msg_type", r["type"] == "msg.ack"
+            and "msgType" not in r["data"] and "msg_type" not in r["data"])
+      r = json.loads(qim.recv())
+      check("image recv mediaId", r["type"] == "msg.recv"
+            and r["data"].get("mediaId") == fid and r["data"].get("msgType") == "image")
+      # 查看方 media.url → GET URL → 下载字节一致
+      r = send(qim, "media.url", {"fileId": fid})
+      check("media url receiver ok", media_ok(r))
+      ent = media_data(r).get("urls", {}).get(fid, {})
+      check("media url receiver returns url",
+            "url" in ent and ent["url"].startswith("http"))
+      check("media GET bytes match",
+            "url" in ent and get(ent["url"]) == png)
+      # 发送方（uploader/from）同样可达
+      r = send(pim, "media.url", {"fileId": fid})
+      sent_ent = media_data(r).get("urls", {}).get(fid, {})
+      check("media url sender ok", sent_ent.get("url", "").startswith("http"))
+      # 负例：media.url 越权（非消息相关方 → 403）
+      cim = WS(); register(cim, CIMG, "pw1234"); login(cim, CIMG, "pw1234")
+      r = send(cim, "media.url", {"fileId": fid})
+      check("media url stranger 403", media_data(r).get("urls", {}).get(fid, {}).get("code") == 403)
+      cim.close()
+      # 负例：伪造 fileId 的 msg.send 拒绝（404）
+      r = send_msg(pim, QIMG, "", "img-forged-1", msg_type="image", media_id="f" * 32)
+      check("image send forged mediaId 404", r["type"] == "msg.ack" and r["data"]["code"] == 404)
+      # 负例：他人 fileId 的 msg.send 拒绝（非 uploader → 403）
+      r = send_msg(qim, PIMG, "", "img-other-1", msg_type="image", media_id=fid)
+      check("image send other uploader 403", r["type"] == "msg.ack" and r["data"]["code"] == 403)
+      # 负例：非法 msgType 白名单外 → 400
+      pim.send(env("msg.send", {"to": QIMG, "content": "x", "clientMsgId": "img-bad-0",
+                                "msgType": "video"}))
+      r = json.loads(pim.recv())
+      check("image bad msgType 400", r["type"] == "msg.ack" and r["data"]["code"] == 400)
+      # 历史透传：mediaId 行带 msgType=image
+      pim.send(env("chat.history", {"to": QIMG}))
+      r = json.loads(pim.recv())
+      himgs = [m for m in r["data"]["data"]["msgs"] if m.get("msgType") == "image"]
+      check("image history has mediaId", len(himgs) >= 1
+            and all(m.get("mediaId") == fid for m in himgs))
+      # 注：过期 PUT URL 上传失败为可选负例——预签名 TTL 固定 900s，测试不便等待；
+      # 单测/集成已在任务 5 覆盖签名过期语义，此处标注未执行。
+      pim.close()
+      qim.close()
+    else:
+      skip("media single-chat suite", "IM_S3_ENDPOINT not set (object store disabled)")
 
     # clientMsgId 幂等去重：同 id 重发只投递一次
     a.send(env("msg.send", {"to": bob, "content": "dup", "clientMsgId": "dup1"}))
@@ -1259,23 +1308,44 @@ def main():
         echo = None
     a.s.settimeout(5)
     check("group no echo to sender", echo is None)
-    # 任务 5：群聊图片消息（msgType=image 全员收 URL，历史带 msgType）
-    a.send(env("msg.send", {"to": gid, "content": PNG_1X1_B64, "clientMsgId": "g-img-1",
-                            "chatType": "group", "msgType": "image"}))
-    r = json.loads(a.recv())
-    check("group image send ack ok", r["type"] == "msg.ack" and r["data"]["code"] == 0)
-    r = json.loads(b.recv())
-    check("group image recv url", r["type"] == "msg.recv"
-          and r["data"]["content"].startswith("/uploads/")
-          and r["data"]["content"].endswith(".png"))
-    check("group image recv msgType", r["type"] == "msg.recv"
-          and r["data"].get("msgType") == "image")
-    b.send(env("group.history", {"groupId": gid}))
-    r = json.loads(b.recv())
-    gimgs = [m for m in r["data"]["data"]["msgs"] if m["content"].startswith("/uploads/")]
-    check("group image history has msgType", r["type"] == "group.history_res"
-          and r["data"]["code"] == 0 and len(gimgs) >= 1
-          and all(m.get("msgType") == "image" for m in gimgs))
+    # 任务 10：群聊图片消息改走对象存储直传（全员收 mediaId，历史带 mediaId）
+    # 环境门禁与单聊一致：未配置对象存储时显式跳过，不中断后续用例。
+    if medias_enabled:
+      png_g = base64.b64decode(PNG_1X1_B64)
+      r = send(a, "media.presign", {"fileName": "g.png", "mimeType": "image/png",
+                                    "size": len(png_g), "kind": "image"})
+      check("group image presign ok",
+            r["type"] == "media.presign_res" and media_ok(r))
+      g_up = media_data(r).get("uploadUrl", "")
+      g_fid = media_data(r).get("fileId", "")
+      check("group image PUT ok", bool(g_up) and put(g_up, png_g) in (200, 204))
+      r = send(a, "media.commit", {"fileId": g_fid, "size": len(png_g), "width": 1, "height": 1})
+      check("group image commit ok",
+            r["type"] == "media.commit_res" and r["data"]["code"] == 0)
+      a.send(env("msg.send", {"to": gid, "content": "", "clientMsgId": "g-img-1",
+                              "chatType": "group", "msgType": "image", "mediaId": g_fid}))
+      r = json.loads(a.recv())
+      check("group image send ack ok", r["type"] == "msg.ack" and r["data"]["code"] == 0)
+      r = json.loads(b.recv())
+      check("group image recv mediaId", r["type"] == "msg.recv"
+            and r["data"].get("mediaId") == g_fid and r["data"].get("msgType") == "image")
+      # 群成员 B 取 GET URL → 字节一致
+      r = send(b, "media.url", {"fileId": g_fid})
+      gent = media_data(r).get("urls", {}).get(g_fid, {})
+      check("group image member url ok",
+            "url" in gent and get(gent["url"]) == png_g)
+      # 负例：群聊图片非成员取 url 拒绝（g1 从未加入 → 403）
+      r = send(g1, "media.url", {"fileId": g_fid})
+      check("group image non-member url 403",
+            media_data(r).get("urls", {}).get(g_fid, {}).get("code") == 403)
+      b.send(env("group.history", {"groupId": gid}))
+      r = json.loads(b.recv())
+      gimgs = [m for m in r["data"]["data"]["msgs"] if m.get("msgType") == "image"]
+      check("group image history has mediaId", r["type"] == "group.history_res"
+            and r["data"]["code"] == 0 and len(gimgs) >= 1
+            and all(m.get("mediaId") == g_fid for m in gimgs))
+    else:
+      skip("media group suite", "IM_S3_ENDPOINT not set (object store disabled)")
     # 非成员 g1 发送 403
     g1.send(env("msg.send", {"to": gid, "content": "x", "clientMsgId": "g2",
                              "chatType": "group"}))
@@ -1680,7 +1750,7 @@ def main():
     # 清理本次注册的测试账号及其关联消息（精确账号列表，不误删真实用户）
     import subprocess
     used = [A, B, C, SINK, SPAM, SINK2, SPAM2, D, E, F, G, H, base + "50", G1, G2,
-            M1, M2, M3, M4, PIMG, QIMG, BIMG, BIMGP] \
+            M1, M2, M3, M4, PIMG, QIMG, CIMG] \
         + cap_accounts + [OVER, X, Y, Z, BL, BL2, BL3, BL4]
     inlist = ",".join("'%s'" % x for x in used)
     # 群表清理必须在 users 删除之前（按 account 查 user_id，无级联外键）
@@ -1690,6 +1760,13 @@ def main():
         "DELETE FROM group_members WHERE user_id IN (SELECT id FROM users WHERE account IN (%s)); "
         "DELETE FROM \`groups\` WHERE owner_id IN (SELECT id FROM users WHERE account IN (%s));\" 2>/dev/null"
         % (MYSQL_PWD_ENV, MYSQL_PORT_ENV, inlist, inlist)],
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    # 媒体表清理：按本次测试账号 uploader_id 精确删除（先于 users 删除，账号仍在）
+    subprocess.run(["bash", "-c",
+        "MYSQL_PWD=%s mysql -u IMS_jack -h 127.0.0.1 -P %s -e \""
+        "USE IMS_reactor_db; "
+        "DELETE FROM media WHERE uploader_id IN (SELECT id FROM users WHERE account IN (%s));\" 2>/dev/null"
+        % (MYSQL_PWD_ENV, MYSQL_PORT_ENV, inlist)],
         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     subprocess.run(["bash", "-c",
         "MYSQL_PWD=%s mysql -u IMS_jack -h 127.0.0.1 -P %s -e \""
@@ -1703,7 +1780,10 @@ def main():
         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
     fails = [n for n, c in results if not c]
-    print(f"\n{len(results)} tests, {len(fails)} failures")
+    suffix = ""
+    if skipped:
+        suffix = f", {len(skipped)} skipped (" + "; ".join(r for _, r in skipped) + ")"
+    print(f"\n{len(results)} tests, {len(fails)} failures{suffix}")
     return 1 if fails else 0
 
 

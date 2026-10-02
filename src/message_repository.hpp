@@ -17,7 +17,8 @@ struct StoredMessage {
   std::string chatType;
   int status;             // 0=offline_pending 1=delivered 2=read
   int64_t groupId = 0;    // 0=单聊；>0=群聊（群消息单行：from=发送者, to=0）
-  std::string msgType = "text";  // 消息类型：text=文本，image=图片（content 为 /uploads/ 路径）
+  std::string msgType = "text";  // 消息类型：text=文本，image=图片（content 为 fileId）
+  int64_t mediaId = 0;    // 0=无媒体；>0 关联 media.id
 };
 
 // 消息状态（与 messages 表 status 列一致）
@@ -43,7 +44,8 @@ public:
                            int64_t ts, const std::string& clientMsgId,
                            const std::string& chatType, int status,
                            int64_t groupId = 0,
-                           const std::string& msgType = "text") = 0;
+                           const std::string& msgType = "text",
+                           int64_t mediaId = 0) = 0;
   // 取某接收方的离线消息（status=offline_pending），按 ts 升序。不移除。
   virtual std::vector<StoredMessage> fetchOffline(int64_t toUser) = 0;
   // 删除超过 TTL 仍未领取的单聊离线消息（ts < nowSec - 7 天）。返回删除条数。
@@ -62,6 +64,10 @@ public:
   // 两用户之间是否存在单聊消息记录（任一方向）。read_notify 推送门槛用：
   // 无往来目标不推送，防 userId→account 枚举（2026-09-27 审计低危）。
   virtual bool hasConversation(int64_t userA, int64_t userB) = 0;
+  // 媒体访问可达性（media.url 鉴权）：userId 是否为引用 fileId 的消息的可达方。
+  // 单聊 from/to=userId；群聊 userId 为群现成员（left_ts=0）。
+  // V1 不校验群消息可见时间窗口（保守放行，精确窗口属 V2）；查询失败 fail-closed。
+  virtual bool hasMediaAccess(int64_t userId, const std::string& fileId) = 0;
   // 拉取某群在时间窗内的消息：ts > sinceTs（水位线），untilTs==0 表示无上界；
   // asc=true 按 ts 升序（补发），false 按 ts 倒序（历史）；limit 条。
   virtual std::vector<StoredMessage> fetchGroupMessages(int64_t groupId,

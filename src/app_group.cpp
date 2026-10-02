@@ -533,7 +533,9 @@ void AppServer::onGroupHistory(const std::shared_ptr<Session>& session, const js
                        {"clientMsgId", m.clientMsgId},
                        {"messageId", m.messageId},
                        {"chatType", "group"},
-                       {"msgType", m.msgType}});
+                       {"msgType", m.msgType},
+                       // 媒体消息透传 fileId（存于 content）
+                       {"mediaId", m.msgType == "image" ? m.content : std::string()}});
   }
   session->reply(makeResult("group.history_res", 0, "ok", json{{"msgs", arr}}));
 }
@@ -545,7 +547,7 @@ void AppServer::onGroupSend(const std::shared_ptr<Session>& session, const json&
   // 逐成员投递：在线端直接推 msg.recv；离线成员按各水位线
   // （watermark）记 pending，重连补发；发送者其他在线端回显（v2.2）
                             const std::string& content, const std::string& clientMsgId,
-                            const std::string& msgType) {
+                            const std::string& msgType, int64_t mediaId) {
   auto ack = [&](int code, const std::string& msg) {
     session->reply(makeEnvelopeText("msg.ack",
         json{{"code", code}, {"msg", msg}, {"clientMsgId", clientMsgId}}));
@@ -568,11 +570,12 @@ void AppServer::onGroupSend(const std::shared_ptr<Session>& session, const json&
     ack(404, "群已解散");
     return;
   }
+  // 文本须非空；图片上游已校验 mediaId（content=fileId，非空）
   if (content.empty()) {
     ack(400, "参数错误");
     return;
   }
-  // 文本沿用 64KB 上限；图片上游已解码换 URL（短串），不再适用文本上限
+  // 文本沿用 64KB 上限；图片 content 为 fileId（短串），不适用文本上限
   if (msgType == "text" && content.size() > kMaxContentBytes) {
     ack(413, "消息内容超长（超过64KB）");
     return;
@@ -594,7 +597,7 @@ void AppServer::onGroupSend(const std::shared_ptr<Session>& session, const json&
   const int64_t now = static_cast<int64_t>(std::time(nullptr));
   const std::string messageId = nextMessageId();
   if (!msgRepo_->saveMessage(messageId, session->userId(), 0, content, now, clientMsgId,
-                             "group", kMsgDelivered, groupId, msgType)) {
+                             "group", kMsgDelivered, groupId, msgType, mediaId)) {
     ack(500, "服务器内部错误");
     return;
   }
@@ -613,7 +616,9 @@ void AppServer::onGroupSend(const std::shared_ptr<Session>& session, const json&
                    {"clientMsgId", clientMsgId},
                    {"messageId", messageId},
                    {"chatType", "group"},
-                   {"msgType", msgType}};
+                   {"msgType", msgType},
+                   // 媒体消息透传 fileId（存于 content），非媒体为空串
+                   {"mediaId", msgType == "image" ? content : std::string()}};
   for (const int64_t uid : groupRepo_->listMemberIds(groupId)) {
     bool pushed = false;
     for (auto& t : onlineMgr_.sessions(uid)) {

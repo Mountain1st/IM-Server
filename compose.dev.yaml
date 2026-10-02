@@ -31,6 +31,36 @@ services:
     volumes:
       - mysql-data:/var/lib/mysql
 
+  minio:
+    image: minio/minio:latest
+    container_name: ims-minio
+    restart: unless-stopped
+    # 本地原生 imserver 直连 127.0.0.1:9000 做对象存储集成测试
+    command: ["server", "/data", "--console-address", ":9001"]
+    environment:
+      TZ: Asia/Shanghai
+      MINIO_ROOT_USER: ${IM_S3_ACCESS_KEY:-minioadmin}
+      MINIO_ROOT_PASSWORD: ${IM_S3_SECRET_KEY:-minioadmin}
+    ports:
+      - "127.0.0.1:9000:9000"
+    volumes:
+      - minio-data:/data
+
+  # 一次性建桶（本地原生 imserver 直连 127.0.0.1:9000 用）：minio 起来后
+  # 创建 bucket media（已存在忽略），幂等跑完即退。
+  createbuckets:
+    image: minio/mc:latest
+    depends_on:
+      - minio
+    environment:
+      TZ: Asia/Shanghai
+      MS3AK: ${IM_S3_ACCESS_KEY:-minioadmin}
+      MS3SK: ${IM_S3_SECRET_KEY:-minioadmin}
+      MS3BUCKET: ${IM_S3_BUCKET:-media}
+    entrypoint: ["/bin/sh", "-c",
+      "until mc alias set m http://minio:9000 \"$$MS3AK\" \"$$MS3SK\"; do sleep 1; done; mc mb -p \"m/$$MS3BUCKET\" || true"]
+
 volumes:
   redis-data:
   mysql-data:
+  minio-data:

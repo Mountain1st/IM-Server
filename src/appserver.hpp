@@ -3,9 +3,12 @@
 #include "block_repository.hpp"
 #include "contact_repository.hpp"
 #include "group_repository.hpp"
+#include "media_repository.hpp"
+#include "media_service.hpp"
 #include "message.hpp"
 #include "message_repository.hpp"
 #include "msg_dedup.hpp"
+#include "object_store.hpp"
 #include "online_manager.hpp"
 #include "presence_store.hpp"
 #include "rate_limiter_store.hpp"
@@ -121,10 +124,14 @@ private:
   void onBlockList(const std::shared_ptr<Session>& session, const json& data);
   void onGroupSend(const std::shared_ptr<Session>& session, const json& data,
                    const std::string& content, const std::string& clientMsgId,
-                   const std::string& msgType);
-  // 图片发送预检（解码落盘前）：目标解析 + 发送限流 + 权限只读检查。
+                   const std::string& msgType, int64_t mediaId = 0);
+  // 媒体域（media.presign/commit/url，V1 对象存储直传）
+  void onMediaPresign(const std::shared_ptr<Session>& session, const json& data);
+  void onMediaCommit(const std::shared_ptr<Session>& session, const json& data);
+  void onMediaUrl(const std::shared_ptr<Session>& session, const json& data);
+  // 图片发送目标校验：目标解析 + 发送限流 + 权限只读检查。
   // 返回 0 通过；非 0 为应回的 ack code（ackMsg 回填文案）。
-  // 避免无效目标/无权限/超频时已落盘产生孤儿文件、白耗图片配额。
+  // 注意：base64 图片管线已移除，本函数保留供 mediaId 图片消息复用目标/权限校验。
   int precheckImageTarget(const std::shared_ptr<Session>& session, const json& data,
                           const std::string& chatType, int64_t* toOut,
                           std::string* ackMsg);
@@ -141,6 +148,12 @@ private:
   std::vector<std::string> trustedProxies_; // 可信代理 IP；空=忽略 X-Forwarded-For
   std::unique_ptr<UserStore> userStore_;    // MySQL 用户存储（连接失败时构造抛错）
   std::unique_ptr<MessageRepository> msgRepo_; // MySQL 消息存储（离线/历史/已读）
+  // 媒体元数据存储（media 表）：msgType=image 时按 fileId 校验归属/COMMITTED
+  // 并取 media.id 落库。
+  std::shared_ptr<MediaRepository> mediaRepo_;
+  // 对象存储（S3/MinIO 预签名 + HEAD/DELETE）。环境变量 IM_S3_* 缺失时
+  // 不 enabled，媒体功能降级（presign/commit/url 回 503）但服务仍起。
+  std::shared_ptr<ObjectStore> objectStore_;
   std::unique_ptr<ContactRepository> contactRepo_; // 联系人/请求/设置存储
   std::unique_ptr<GroupRepository> groupRepo_;  // 群/成员/水位线存储
   std::unique_ptr<BlockRepository> blockRepo_;  // 拉黑存储（v2.4，第四个纳入自愈的缓存）
@@ -150,15 +163,12 @@ private:
   std::unique_ptr<RateLimiterStore> msgLimiter_; // msg.send 限流（内存/Redis 双后端）
   std::unique_ptr<RateLimiterStore> queryLimiter_; // 重查询限流（history/members；Redis 键前缀 qrate: 独立额度桶）
   std::unique_ptr<RateLimiterStore> registerLimiter_; // 注册限流（按 IP；Redis 键前缀 reg: 独立额度桶）
-  // 图片限流（msgType=image 按用户 10 张/分钟；Redis 键前缀 imgrate: 独立额度桶，
-  // 与 msgLimiter_ 的 rate: 桶隔离，互不消耗配额）
-  std::unique_ptr<RateLimiterStore> imgLimiter_;
-  // 图片落盘目录（环境变量 IM_UPLOADS_DIR 可覆盖，缺省 ./uploads）
-  std::string uploadsDir_ = "./uploads";
-  // 图片解码并发闸（同时最多 kMaxConcurrentImageDecode 路；mutex+条件变量实现）
-  std::mutex imgDecodeMutex_;
-  std::condition_variable imgDecodeCv_;
-  int imgDecodeAvail_ = config::kMaxConcurrentImageDecode;
+  // 媒体限流（media.presign 按用户 30 次/分钟；Redis 键前缀 mrate: 独立额度桶）。
+  // 用 shared_ptr 是因为 MediaService 持有其共享所有权。
+  std::shared_ptr<RateLimiterStore> mediaLimiter_;
+  // 媒体业务编排（presign/commit/url/gc）。依赖 objectStore_/mediaRepo_/mediaLimiter_，
+  // 构造尾部装配；canAccess 回调在 url 调用时注入。
+  std::unique_ptr<MediaService> mediaService_;
   // 注册限流额度（环境变量 IM_REGISTER_LIMIT_PER_WINDOW 可覆盖，测试豁免）
   size_t registerLimit_ = config::kRegisterLimitPerWindow;
   // 全局消息序列（生成 messageId）。起点随机化（构造播种）：id 格式为

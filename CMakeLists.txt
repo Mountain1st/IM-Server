@@ -30,6 +30,50 @@ if(NOT MYSQL_INCLUDE_DIR OR NOT MYSQLCLIENT_LIB)
     message(FATAL_ERROR "MySQL dev files not found. Install libmysqlclient-dev: sudo apt install libmysqlclient-dev")
 endif()
 
+# libcurl（对象存储 HEAD/DELETE）：
+# 优先系统 find_package(CURL)；无系统 dev 包时回退读环境变量 IM_CURL_ROOT
+# （期望前缀下含 usr/include/x86_64-linux-gnu 与 usr/lib/x86_64-linux-gnu），
+# 统一封装为导入目标 CURL::libcurl。两种方式均失败 → FATAL_ERROR。
+find_package(CURL QUIET)
+if(CURL_FOUND)
+    message(STATUS "libcurl found via find_package(CURL): ${CURL_LIBRARIES}")
+else()
+    # 兼容 -DIM_CURL_ROOT=... 与环境变量 IM_CURL_ROOT
+    if(NOT IM_CURL_ROOT AND DEFINED ENV{IM_CURL_ROOT})
+        set(IM_CURL_ROOT "$ENV{IM_CURL_ROOT}")
+    endif()
+    if(NOT IM_CURL_ROOT)
+        message(FATAL_ERROR
+            "libcurl not found. 安装 libcurl4-openssl-dev，"
+            "或设置环境变量 IM_CURL_ROOT 指向 libcurl 安装前缀"
+            "（如 /path/to/curlroot，其下含 usr/include/x86_64-linux-gnu 与 usr/lib/x86_64-linux-gnu）")
+    endif()
+    find_path(IM_CURL_INCLUDE_DIR NAMES curl/curl.h
+        PATHS
+            "${IM_CURL_ROOT}/usr/include/x86_64-linux-gnu"
+            "${IM_CURL_ROOT}/usr/include"
+            "${IM_CURL_ROOT}/include/x86_64-linux-gnu"
+            "${IM_CURL_ROOT}/include"
+        NO_DEFAULT_PATH)
+    find_library(IM_CURL_LIBRARY NAMES curl libcurl
+        PATHS
+            "${IM_CURL_ROOT}/usr/lib/x86_64-linux-gnu"
+            "${IM_CURL_ROOT}/usr/lib"
+            "${IM_CURL_ROOT}/lib/x86_64-linux-gnu"
+            "${IM_CURL_ROOT}/lib"
+        NO_DEFAULT_PATH)
+    if(NOT IM_CURL_INCLUDE_DIR OR NOT IM_CURL_LIBRARY)
+        message(FATAL_ERROR
+            "libcurl not found under IM_CURL_ROOT=${IM_CURL_ROOT}. "
+            "请确认该前缀下存在 include/.../curl/curl.h 与 lib/.../libcurl.so")
+    endif()
+    message(STATUS "libcurl found via IM_CURL_ROOT: ${IM_CURL_LIBRARY}")
+    add_library(CURL::libcurl UNKNOWN IMPORTED)
+    set_target_properties(CURL::libcurl PROPERTIES
+        IMPORTED_LOCATION "${IM_CURL_LIBRARY}"
+        INTERFACE_INCLUDE_DIRECTORIES "${IM_CURL_INCLUDE_DIR}")
+endif()
+
 # Redis（token 等存储）：需 libhiredis-dev；缺失时仅编译内存后端
 find_path(HIREDIS_INCLUDE_DIR NAMES hiredis/hiredis.h)
 find_library(HIREDIS_LIB NAMES hiredis)
@@ -59,6 +103,7 @@ add_executable(imserver
     src/mysql_client.cpp
     src/mysql_user_repository.cpp
     src/mysql_message_repository.cpp
+    src/mysql_media_repository.cpp
     src/contact_repository.cpp
     src/block_repository.cpp
     src/online_manager.cpp
@@ -74,9 +119,12 @@ add_executable(imserver
     src/app_block.cpp
     src/app_group.cpp
     src/app_settings.cpp
+    src/sigv4.cpp
+    src/minio_object_store.cpp
+    src/media_service.cpp
 )
 target_include_directories(imserver PRIVATE src third_party ${MYSQL_INCLUDE_DIR})
-target_link_libraries(imserver PRIVATE Threads::Threads ${MYSQLCLIENT_LIB})
+target_link_libraries(imserver PRIVATE Threads::Threads ${MYSQLCLIENT_LIB} CURL::libcurl)
 if(HAVE_HIREDIS)
     target_sources(imserver PRIVATE src/redis_client.cpp src/redis_token_store.cpp src/redis_rate_limiter.cpp src/redis_msg_dedup.cpp src/redis_presence_store.cpp)
     target_include_directories(imserver PRIVATE ${HIREDIS_INCLUDE_DIR})
@@ -103,6 +151,7 @@ enable_testing()
 # 测试目标共用的纯逻辑源码（不依赖网络层/MySQL）
 set(UNIT_TEST_SOURCES
     src/util.cpp
+    src/sigv4.cpp
     src/media_store.cpp
     src/websocket.cpp
     src/msg_dedup.cpp
@@ -114,7 +163,7 @@ set(UNIT_TEST_SOURCES
 set(UNIT_TEST_INCLUDES src third_party)
 
 function(im_add_unit_test target test_file)
-    add_executable(${target} ${test_file} ${UNIT_TEST_SOURCES})
+    add_executable(${target} ${test_file} ${ARGN} ${UNIT_TEST_SOURCES})
     target_include_directories(${target} PRIVATE ${UNIT_TEST_INCLUDES})
     target_link_libraries(${target} PRIVATE Threads::Threads)
     add_test(NAME ${target} COMMAND ${target})
@@ -130,3 +179,8 @@ im_add_unit_test(login_guard_test tests/login_guard_test.cpp)
 im_add_unit_test(tcpserver_test tests/tcpserver_test.cpp)
 im_add_unit_test(threadpool_test tests/threadpool_test.cpp)
 im_add_unit_test(media_store_test tests/test_media_store.cpp)
+im_add_unit_test(crypto_test tests/crypto_test.cpp)
+im_add_unit_test(sigv4_test tests/sigv4_test.cpp)
+im_add_unit_test(minio_object_store_test tests/minio_object_store_test.cpp src/minio_object_store.cpp)
+# 仅 MinIO 存储测试直接依赖 libcurl（其余单测不链，避免无 curl 环境整体不可构建）
+target_link_libraries(minio_object_store_test PRIVATE CURL::libcurl)

@@ -3,12 +3,12 @@
 // 职责：
 // - 构造/组装：网络层 TcpServer + 工作线程池 + 四仓库（用户/消息/
 //   联系人/群）+ 可选 Redis 五件（token/限流/幂等/在线状态/查询限流）
-// - 指令路由：buildRoutes 哈希表注册 29 条指令，onEnvelope 统一分发
-//   （未登录仅放行 auth.register/login/token，其余 401）
+// - 指令路由：buildRoutes 哈希表注册 35 条指令（含 media.presign/commit/url），
+//   onEnvelope 统一分发（未登录仅放行 auth.register/login/token，其余 401）
 // - 生命周期：start（线程启动）/ stop（四步优雅停机：
 //   停接入 → Close(1001) 通知 → 工作队列排水 → 兜底关闭）
 // - purgeLoop：后台清理线程（离线 TTL 7 天 + 历史保留期 90 天 +
-//   联系人/群成员缓存计数比对自愈，默认 30 分钟一轮）
+//   联系人/群成员缓存计数比对自愈 + 媒体 GC，默认 30 分钟一轮）
 // 线程模型：本类自身方法多在工作线程池执行；session 回调注册在
 // IO 线程；在线表 OnlineManager 内部有锁（跨线程安全）
 // ============================================================
@@ -16,8 +16,9 @@
 
 #include "connection.hpp"
 #include "log.hpp"
-#include "media_store.hpp"
 #include "metrics.hpp"
+#include "minio_object_store.hpp"
+#include "mysql_media_repository.hpp"
 #include "mysql_message_repository.hpp"
 #include "mysql_user_repository.hpp"
 #include "redis_msg_dedup.hpp"
@@ -31,7 +32,6 @@
 #include <algorithm>
 #include <ctime>
 #include <cstdlib>
-#include <filesystem>
 #include <iostream>
 #include <stdexcept>
 
@@ -132,6 +132,29 @@ std::unique_ptr<MsgDedupStore> makeMsgDedup(const RedisStoreConfig& c) {
   return rs;
 }
 
+// 从环境变量建对象存储（MinIO/S3 兼容）。IM_S3_* 缺失则构造出未 enabled
+// 的实例，媒体功能降级（presign/commit/url 回 503）但不影响服务启动。
+// 本机集成测试用 http://127.0.0.1:9000，凭证经环境变量注入，不落仓库。
+std::shared_ptr<ObjectStore> makeObjectStore() {
+  MinioConfig c;
+  if (const char* v = std::getenv("IM_S3_ENDPOINT")) c.endpointHost = v;
+  if (const char* v = std::getenv("IM_S3_SCHEME")) c.scheme = v;
+  if (const char* v = std::getenv("IM_S3_REGION")) c.region = v;
+  if (const char* v = std::getenv("IM_S3_BUCKET")) c.bucket = v;
+  if (const char* v = std::getenv("IM_S3_ACCESS_KEY")) c.accessKey = v;
+  if (const char* v = std::getenv("IM_S3_SECRET_KEY")) c.secretKey = v;
+  if (const char* v = std::getenv("IM_S3_PATH_STYLE")) c.pathStyle = (std::string(v) != "0");
+  auto store = std::make_shared<MinioObjectStore>(std::move(c));
+  if (store->enabled()) {
+    LOG_I("[media] 对象存储: MinIO (endpoint=" << std::getenv("IM_S3_ENDPOINT")
+          << ", bucket=" << (std::getenv("IM_S3_BUCKET") ? std::getenv("IM_S3_BUCKET") : "")
+          << ")");
+  } else {
+    LOG_I("[media] 对象存储未配置（IM_S3_* 缺失），媒体功能降级");
+  }
+  return store;
+}
+
 AppServer::AppServer(uint16_t port, size_t ioThreads, size_t workThreads, size_t maxConnections,
                      std::vector<std::string> allowedOrigins, UserStoreConfig userConfig,
                      RedisStoreConfig redisConfig, size_t maxPerIpConnections,
@@ -149,6 +172,10 @@ AppServer::AppServer(uint16_t port, size_t ioThreads, size_t workThreads, size_t
       msgRepo_(std::make_unique<MySqlMessageRepository>(
           userConfig.mysqlHost, userConfig.mysqlPort, userConfig.mysqlUser,
           userConfig.mysqlPassword, userConfig.mysqlDb)),
+      mediaRepo_(std::make_shared<MySqlMediaRepository>(
+          userConfig.mysqlHost, userConfig.mysqlPort, userConfig.mysqlUser,
+          userConfig.mysqlPassword, userConfig.mysqlDb)),
+      objectStore_(makeObjectStore()),
       contactRepo_(std::make_unique<ContactRepository>(
           userConfig.mysqlHost, userConfig.mysqlPort, userConfig.mysqlUser,
           userConfig.mysqlPassword, userConfig.mysqlDb)),
@@ -164,7 +191,9 @@ AppServer::AppServer(uint16_t port, size_t ioThreads, size_t workThreads, size_t
       msgLimiter_(makeRateLimiter(redisConfig, "发送限流")),
       queryLimiter_(makeRateLimiter(redisConfig, "查询限流", "qrate:")),
       registerLimiter_(makeRateLimiter(redisConfig, "注册限流", "reg:")),
-      imgLimiter_(makeRateLimiter(redisConfig, "图片限流", "imgrate:")) {
+      mediaLimiter_(makeRateLimiter(redisConfig, "媒体限流", "mrate:")),
+      mediaService_(std::make_unique<MediaService>(mediaRepo_, objectStore_,
+                                                  mediaLimiter_)) {
   if (!msgRepo_->ok()) {
     throw std::runtime_error("消息存储连接失败");
   }
@@ -199,18 +228,6 @@ AppServer::AppServer(uint16_t port, size_t ioThreads, size_t workThreads, size_t
   if (const char* v = std::getenv("IM_MSG_RETENTION_DAYS")) {
     const int n = std::atoi(v);
     if (n >= 0) msgRetentionDays_ = n;
-  }
-  // 图片落盘目录：环境变量可覆盖（测试隔离用）；空值回退默认 ./uploads。
-  // 启动时自建目录：建失败记错但不退出（图片发送时再判 500，不影响文字链路）
-  if (const char* v = std::getenv("IM_UPLOADS_DIR")) {
-    if (v[0] != '\0') uploadsDir_ = v;
-  }
-  {
-    std::error_code ec;
-    std::filesystem::create_directories(uploadsDir_, ec);
-    if (ec) {
-      LOG_E("[media] 落盘目录自建失败：dir=" << uploadsDir_);
-    }
   }
   // 媒体 GC 最短间隔：环境变量可覆盖（测试用小值验证 GC 调度）
   if (const char* v = std::getenv("IM_MEDIA_GC_INTERVAL_SEC")) {
@@ -259,6 +276,9 @@ void AppServer::buildRoutes() {
     {"block.add", &AppServer::onBlockAdd},
     {"block.remove", &AppServer::onBlockRemove},
     {"block.list", &AppServer::onBlockList},
+    {"media.presign", &AppServer::onMediaPresign},
+    {"media.commit", &AppServer::onMediaCommit},
+    {"media.url", &AppServer::onMediaUrl},
   };
 }
 
@@ -293,12 +313,13 @@ void AppServer::purgeLoop() {
       }
       // 同轮做内存缓存低频比对（默认 30 分钟一轮；四条 COUNT 成本可忽略）
       syncCaches();
-      // 媒体 GC：距上次执行超过间隔才跑一轮（默认 24 小时；mtime 超 7 天的
-      // 落盘文件删除，过期即 404 占位语义）。lastMediaGc_ 初值 0 使启动后
-      // 首个 purge 轮即清一次陈旧文件（符合预期）；目录不存在时直接返回 0。
+      // 媒体 GC：距上次执行超过间隔才跑一轮（默认 24 小时；回收超期
+      // PENDING：删对象 + 标记 GC）。lastMediaGc_ 初值 0 使启动后首个
+      // purge 轮即清一次陈旧记录（符合预期）；未配置对象存储时自然为空转。
       if (now - lastMediaGc_ >= mediaGcIntervalSec_) {
         lastMediaGc_ = now;
-        MediaStore::gcExpired(uploadsDir_, config::kMediaRetentionSec);
+        const int64_t gced = mediaService_->gcOnce();
+        if (gced > 0) LOG_I("[media] 已回收 " << gced << " 条超期 PENDING 媒体");
       }
     } catch (const std::exception& e) {
       LOG_E("[purge] 清理轮异常被兜底捕获: " << e.what());
@@ -446,6 +467,130 @@ void AppServer::onEnvelope(const std::shared_ptr<Session>& session, const json& 
     LOG_E("[app] 封包字段类型异常: " << e.what());
     session->reply(makeError(400, "封包字段错误"));
   }
+}
+
+// ============================================================
+// 媒体域：media.presign / media.commit / media.url（V1 对象存储直传）
+// 均要求已登录（onEnvelope 未登录门禁自动覆盖）。业务编排委托 MediaService，
+// 本层只做参数解析、结果信封组装与权限回调注入。
+// ============================================================
+void AppServer::onMediaPresign(const std::shared_ptr<Session>& session, const json& data) {
+  // 字段类型显式校验：非字符串/非数字一律回 media.presign_res 400，
+  // 而非让 json 取值抛异常被兜成 error 事件（客户端需统一按 *_res 解析）。
+  auto optStr = [&](const char* k, std::string* out) -> bool {
+    if (!data.contains(k)) return true;  // 缺省空串
+    if (!data[k].is_string()) return false;
+    *out = data[k].get<std::string>();
+    return true;
+  };
+  std::string fileName, mimeType, kind;
+  if (!optStr("fileName", &fileName) || !optStr("mimeType", &mimeType) ||
+      !optStr("kind", &kind)) {
+    session->reply(makeResult("media.presign_res", 400, "参数错误", json::object()));
+    return;
+  }
+  // size 兼容整数与浮点（JSON 数字统一按 int64 解读）；非数字回 400
+  int64_t size = 0;
+  if (data.contains("size")) {
+    if (!data["size"].is_number()) {
+      session->reply(makeResult("media.presign_res", 400, "参数错误", json::object()));
+      return;
+    }
+    size = data["size"].get<int64_t>();
+  }
+  const PresignResult r =
+      mediaService_->presign(session->userId(), fileName, mimeType, size, kind);
+  if (!r.ok) {
+    session->reply(makeResult("media.presign_res", r.code, r.msg, json::object()));
+    return;
+  }
+  session->reply(makeResult("media.presign_res", 0, "ok",
+      json{{"fileId", r.fileId},
+           {"uploadUrl", r.uploadUrl},
+           {"expiresIn", r.expiresIn}}));
+}
+
+void AppServer::onMediaCommit(const std::shared_ptr<Session>& session, const json& data) {
+  if (data.contains("fileId") && !data["fileId"].is_string()) {
+    session->reply(makeResult("media.commit_res", 400, "参数错误", json::object()));
+    return;
+  }
+  const std::string fileId = data.value("fileId", "");
+  int64_t size = 0;
+  if (data.contains("size")) {
+    if (!data["size"].is_number()) {
+      session->reply(makeResult("media.commit_res", 400, "参数错误", json::object()));
+      return;
+    }
+    size = data["size"].get<int64_t>();
+  }
+  // width/height/duration 非数字回 400（避免 json 取值抛异常成 error 事件）
+  auto optInt = [&](const char* k, int* out) -> bool {
+    if (!data.contains(k)) return true;
+    if (!data[k].is_number()) return false;
+    *out = data[k].get<int>();
+    return true;
+  };
+  int width = 0, height = 0, duration = 0;
+  if (!optInt("width", &width) || !optInt("height", &height) ||
+      !optInt("duration", &duration)) {
+    session->reply(makeResult("media.commit_res", 400, "参数错误", json::object()));
+    return;
+  }
+  const CommitResult r =
+      mediaService_->commit(session->userId(), fileId, size, width, height, duration);
+  if (!r.ok) {
+    session->reply(makeResult("media.commit_res", r.code, r.msg, json::object()));
+    return;
+  }
+  session->reply(makeResult("media.commit_res", 0, "ok", json::object()));
+}
+
+void AppServer::onMediaUrl(const std::shared_ptr<Session>& session, const json& data) {
+  // 权限回调：查 msgRepo_ 是否存在含该 fileId 且当前用户可达的消息
+  // （单聊 from/to=me；群聊 me 是现成员）。V1 保守放行（存在引用即允许），
+  // 精确群消息可见窗口留 V2。查询失败 fail-closed。
+  const auto canAccess = [this](int64_t userId, const std::string& fid) -> bool {
+    return msgRepo_->hasMediaAccess(userId, fid);
+  };
+  // 批量形态：data.fileIds 为字符串数组；兼容单值 data.fileId（V1 客户端单张取）。
+  std::vector<std::string> fileIds;
+  if (data.contains("fileIds") && data["fileIds"].is_array()) {
+    for (const auto& v : data["fileIds"]) {
+      if (!v.is_string()) {
+        session->reply(makeResult("media.url_res", 400, "参数错误", json::object()));
+        return;
+      }
+      fileIds.push_back(v.get<std::string>());
+    }
+  } else if (data.contains("fileId") && data["fileId"].is_string()) {
+    fileIds.push_back(data["fileId"].get<std::string>());
+  }
+  if (fileIds.empty()) {
+    session->reply(makeResult("media.url_res", 400, "参数错误", json::object()));
+    return;
+  }
+  if (fileIds.size() > config::kMediaUrlBatchMax) {
+    session->reply(makeResult("media.url_res", 400, "参数错误", json::object()));
+    return;
+  }
+  // 重查询限流（与 chat.history/group.history 同一额度桶）：media.url 每次
+  // 最多 100 条且每条一次 DB 鉴权 + 一次签名，不设限可被登录用户无限刷。
+  if (!queryLimiter_->allow(session->userId(), kQueryLimitPerWindow, kQueryWindow)) {
+    session->reply(makeResult("media.url_res", 429, "查询过于频繁，请稍后再试",
+                              json::object()));
+    return;
+  }
+  json urls = json::object();
+  for (const auto& fid : fileIds) {
+    const UrlResult r = mediaService_->url(session->userId(), fid, canAccess);
+    if (r.ok) {
+      urls[fid] = json{{"url", r.url}, {"expiresIn", r.expiresIn}};
+    } else {
+      urls[fid] = json{{"code", r.code}, {"msg", r.msg}};
+    }
+  }
+  session->reply(makeResult("media.url_res", 0, "ok", json{{"urls", urls}}));
 }
 
 } // namespace im

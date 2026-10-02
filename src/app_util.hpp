@@ -23,11 +23,6 @@ constexpr size_t kMaxPasswordLen = config::kMaxPasswordLen;
 constexpr std::chrono::seconds kSendWindow(config::kSendWindow);
 constexpr size_t kMaxSendPerWindow = config::kMaxSendPerWindow;
 constexpr size_t kMaxSendNoIdPerWindow = config::kMaxSendNoIdPerWindow;
-// 图片消息限制（msgType=image）：信封上限、按用户图片限流窗口与额度、解码并发闸
-constexpr size_t kMaxImageB64Bytes = config::kMaxImageB64Bytes;
-constexpr std::chrono::seconds kImageWindow(config::kImageWindow);
-constexpr size_t kImagePerWindow = config::kImagePerWindow;
-constexpr int kMaxConcurrentImageDecode = config::kMaxConcurrentImageDecode;
 constexpr size_t kMaxClientMsgIdBytes = config::kMaxClientMsgIdBytes;
 constexpr size_t kMaxOfflineAckIds = config::kMaxOfflineAckIds;
 constexpr std::chrono::seconds kQueryWindow(config::kQueryWindow);

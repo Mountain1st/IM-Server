@@ -1,9 +1,10 @@
-# IM 协议文档（v2.4）
+# IM 协议文档（v3.0）
 
 > 本协议为服务端、Qt 客户端、Web 客户端三端共用的统一消息协议。
 > 传输层为 WebSocket 文本帧（UTF-8 编码的 JSON 字符串）。
 
-**版本变更（v0.1 → v2.4）**
+**版本变更（v0.1 → v3.0）**
+- v3.0 **媒体系统（对象存储直传）**：图片从「WS base64 内联 + 本地盘 `/uploads/`」升级为「对象存储（MinIO/S3）预签名直传」——客户端先 `media.presign` 拿 PUT 预签名 URL 直传对象存储，`media.commit` 由服务端 HEAD 校验后落 `media` 表，`msg.send(msgType=image, mediaId)` 只携带媒体引用（不再内联 base64，旧 1.5MB 信封上限移除）；查看时 `media.url` 鉴权后签发短期 GET URL。移除本地盘对象键与 nginx `/uploads/` 静态托管。单文件上限 20MB、PUT/GET 预签名分别 15/60 分钟、presign 每用户 30 次/分钟；`msg.recv`/`msg.offline`/历史透传 `mediaId`（fileId 字符串）。见 §4/§5 及 `docs/superpowers/specs/2026-10-01-media-system-design.md`
 - v2.4 **拉黑（黑名单）**：新增 `block.add/remove/list`。语义为**双向断联**：A 拉黑 B 期间，双方单聊双向 403 拒绝不落库（文案分方向：拉黑方「你已拉黑对方，请先解除」/被拉黑方「对方已拒收」），双向好友请求拒绝（被拉黑方文案与 `allowAdd` 关相同——**模糊防探测**）；**群聊不受影响**（群治理靠踢人）；**不追溯**——拉黑前已落库消息照常可见、未领取的 pending 离线消息照常补发。拉黑自动解除联系人关系并关闭双向好友请求；解除后恢复通信能力、**不恢复联系人关系**（需重新走好友请求）。拉黑优先级高于临时对话开关与联系人状态。无 S2C 推送（被拉黑方全程无感；操作方多端靠 `block.list` 同步，与 settings 同策略）。拉黑缓存纳入 syncCaches 自愈（第四个）
 - v2.3 **停机优雅化 + 架构四项收敛**：**客户端可见**——服务端停机（部署重启/SIGTERM）时在线连接先收到 WS Close(1001 Going Away) 再断开（此前为裸 TCP 断开），停机前工作队列排空（已入队消息任务处理完，落库不丢；排水超 5 秒放弃）；**服务端内部（客户端无感）**——指令路由由 29 层 if-else 改哈希表（O(1) 查表）；联系人/群成员内存缓存随清理线程低频比对库计数、漂移即全量重建（绕过服务端直改库最迟约 30 分钟自愈）；新连接从 `fd % N` 取模改为**最少连接优先**分配 IO 线程（消除负载倾斜）；**MySQL 断线自愈**（v2.3.1，2026-09-29 生产故障根治：闲置超 `wait_timeout` 被服务端踢掉（errno 4031/2006/2013）后自动重建连接重试一次，登录不再持续失败到重启）
 - v2.2 **多端一致性**：单聊/群聊的自发消息**回显到发送者其他在线端**（发起连接不回显，多设备会话视图一致）；新增推送 `msg.read_notify`（`{from, readTs}`，一端已读同步其他端，免 ACK、丢失靠补发/历史拉取自愈）
@@ -99,7 +100,7 @@
 | `auth.login` | `{ "account": "...", "password": "..." }` | 用登录账号登录，成功回 `auth.login_res`（携带 token） |
 | `auth.token` | `{ "token": "..." }` | 免密重连：用上次登录的 token 恢复登录态，成功回 `auth.token_res` |
 | `auth.logout` | `{}` | 主动登出，回 `auth.logout_res` |
-| `msg.send` | `{ "to": "<account>", "content": "...", "clientMsgId": "uuid", "chatType": "single", "msgType": "text" }` | 发送单聊消息（`to` 为目标登录账号，v1.7；兼容旧协议传数字 `userId`），回 `msg.ack`；消息持久化到 MySQL；`msgType` 为 `"text"`（默认）或 `"image"`（图片，见图片消息约束） |
+| `msg.send` | `{ "to": "<account>", "content": "...", "clientMsgId": "uuid", "chatType": "single", "msgType": "text", "mediaId": "<fileId>" }` | 发送单聊消息（`to` 为目标登录账号，v1.7；兼容旧协议传数字 `userId`），回 `msg.ack`；消息持久化到 MySQL；`msgType` 为 `"text"`（默认，`mediaId` 忽略）或 `"image"`（媒体消息，见媒体消息约束，此时 `mediaId` 为已 commit 的媒体 `fileId`） |
 | `chat.create` | `{ "account": "登录账号" }` | 新建对话：按 account 查找目标用户，存在回其 account 与昵称；不存在回 404 |
 | `msg.offline_ack` | `{ "messageIds": ["...", ...] }` | 客户端确认已收到 `msg.offline` 中的消息，服务端标记为已投递（确认后不再补发）；回 `msg.offline_ack_res` |
 | `chat.history` | `{ "to": "<account>", "limit": 50(可选) }` | 拉取与目标用户的单聊历史（`to` 为目标登录账号，v1.7；兼容旧协议传数字 `userId`），按 ts 倒序，最新在前，默认 50 条，上限 200；回 `chat.history_res` |
@@ -127,6 +128,9 @@
 | `group.dissolve` | `{ "groupId": 1 }` | 解散群（v2.0，仅群主），回 `group.dissolve_res`；成功推送解散前在线成员 `group.dissolved` |
 | `group.rename` | `{ "groupId": 1, "name": "新群名" }` | 改群名（v2.0，仅群主，`name` 非空且长度 ≤ 32），回 `group.rename_res`；成功推送在线成员 `group.renamed` |
 | `group.announce` | `{ "groupId": 1, "content": "公告正文" }` | 群公告（v2.0，仅群主，`content` ≤ 1024 字节，空=清空），回 `group.announce_res`；成功推送在线成员 `group.announced`（正文走 `group.list` 拉取） |
+| `media.presign` | `{ "fileName": "a.png", "mimeType": "image/png", "size": 102400, "kind": "image" }` | 申请媒体上传（v3.0，须登录）：服务端校验 `kind`（V1 仅 `"image"`）/`mimeType` 白名单/`size`（≤20MB）/文件名后，生成 `fileId` 并落 `media` 表 PENDING 行，回 `media.presign_res`（携带 PUT 预签名 URL）；**每用户 30 次/分钟限流** |
+| `media.commit` | `{ "fileId": "<32位hex>", "size": 102400, "width": 800, "height": 600, "duration": 0 }` | 提交媒体（v3.0，须登录，仅上传者可提交）：服务端对对象存储 `HEAD` 校验对象存在且**实际大小与声明 `size` 一致**（以 HEAD 为准，防超传绕过），`width/height/duration` 为客户端上报元数据（服务端不生成缩略图）；成功 PENDING→COMMITTED，回 `media.commit_res`；重复提交幂等 |
+| `media.url` | `{ "fileId": "<32位hex>" }` 或 `{ "fileIds": ["...", ...] }` | 取媒体访问 URL（v3.0，须登录且**须为消息相关方**）：鉴权通过后签发短期 GET 预签名 URL，回 `media.url_res`（`urls` 为 `{fileId: {url, expiresIn}}` 映射）；单值 `fileId` 与批量 `fileIds`（≤100）均支持；越权回 403 |
 
 心跳不在业务指令层：保活由 WebSocket 协议层 Ping/Pong 承担（服务器每 30 秒发 Ping，60 秒无响应判僵尸断开），客户端无需发送心跳指令。
 
@@ -140,8 +144,10 @@
 - `msg.send` 的 `to` 支持 **`to == 自己 account`**（**自己对话框**，v1.8 已删除 `to:0` 特例）：发给自己的消息会**落库**，服务器**只回 `msg.ack`，不投递 `msg.recv`**（避免回显重复），之后 `chat.history` 可查（非空），`msg.read` 直接成功；发给别人的消息也不会回显给自己
 - `msg.send` 的 `to` 权限校验（v1.8）：`to` 为**自己账号** 或 **自己的联系人** 或 **目标开启临时对话（`allowTempChat=1`）** 时才能发送；否则回 `403 对方未开启临时对话，请先添加联系人` 且**不落库**
 - **三开关（v1.8）**：`allowTempChat`（是否允许非联系人给自己发临时对话）、`searchable`（是否可被 `user.search` 搜索到）、`allowAdd`（是否可被添加为联系人）；三者**默认全开**；`allowTempChat=0` 时非联系人发送被 403 拒绝；`searchable=0` 时搜索结果不返回该用户；`allowAdd=0` 时对方 `contact.request` 回 `403 对方未开启添加，请使用其他方式联系`
-- `msg.send` 的 `chatType` 可选，缺省 `"single"`；**`single` 时 `to` 为目标登录账号 `account`**（单聊权限与落库规则见上）；**`group` 时 `to` 为数字 `groupId`（整数必填）**：群不存在回 `404 群不存在`，非群成员回 `403 非群成员`，`to` 缺失/非整数回 `400 参数错误`；其他 `chatType` 值回 `400 封包格式错误`；**群发送同样校验内容**：空消息回 `400 参数错误`，超 64KB 回 `413 消息内容超长（超过64KB）`
-- **图片消息（`msgType: "image"`，单聊/群聊同规则）**：`msgType` 仅 `"text"`（默认，可缺省）/`"image"`，其他值回 `400 参数错误`；`msg.ack` 不带 `msgType`。`image` 时 `content` 为图片 base64（信封上限 **1.5MB**，超限回 `413 图片过大`；非法 base64/非 PNG-JPEG-GIF-WebP/维度任一边超 4096/SVG 均回 `400 参数错误`，日志只记大小与类型不打字节）；成功后 `content` 替换为服务端落盘 URL `/uploads/<hex>.<ext>`（HMAC-SHA256 内容寻址对象键，tmp+fsync+rename 原子落盘）再走原幂等/落库/投递路径，`msg.recv`/`msg.offline`/`chat.history_res`/`group.history_res` 透传 `msgType: "image"` 与该 URL。**双重限流**：通用发送限流（带 clientMsgId 30 条/10 秒、空 id 5 条/10 秒）与图片限流（**按用户** 10 张/分钟，超限回 `429 图片发送过于频繁`）同时生效；解码落盘受**并发闸 2** 保护（同时最多 2 路解码）。落盘文件保留 7 天（mtime），过期由后台 GC 删除（只删命名模式常规文件，跳过 symlink/`*.tmp`），过期后 URL 访问即 **404**；静态服务经 Nginx 只读 alias（仅服务 `^[0-9a-f]{64}.(png|jpg|jpeg|gif|webp)$` 命名模式，其余 404），`Cache-Control: public, max-age=86400`（**max-age 1 天**）。**密钥运维**：对象键 HMAC 密钥由 `IM_MEDIA_HMAC_KEY` 注入，为空用内置默认值（单机可用；**生产必须配随机值**——默认密钥全网相同，同内容同 URL 可跨站预测枚举，且 `/uploads/` 经 Nginx 无鉴权公开；轮换密钥后旧图 URL 即 404）。**客户端渲染铁律**：必须以 `msgType` 为准渲染（`image` 渲染 URL 图片，`text` 渲染原文），不得嗅探 `content` 前缀（`text` 可含任意 `/uploads/` 字样）。**服务端顺序保证**：图片先做目标/发送限流/权限预检（码与文本路径一致）再解码落盘，无效与越权请求不落盘；并发闸排队超 5 秒回 `429 图片解码繁忙`
+- `msg.send` 的 `chatType` 可选，缺省 `"single"`；**`single` 时 `to` 为目标登录账号 `account`**（单聊权限与落库规则见上）；**`group` 时 `to` 为数字 `groupId`（整数必填）**：群不存在回 `404 群不存在`，非群成员回 `403 非群成员`，`to` 缺失/非整数回 `400 参数错误`；其他 `chatType` 值回 `400 封包格式错误`；**群发送同样校验内容**：空消息回 `400 参数错误`，超 64KB 回 `413 消息内容超长（超过64KB）`（媒体消息 `content` 为 fileId 短串，不适用文本长度上限）
+- **媒体消息（`msgType: "image"`，v3.0，单聊/群聊同规则）**：`msgType` 仅 `"text"`（默认，可缺省）/`"image"`，其他值回 `400 参数错误`；`msg.ack` 不带 `msgType`。**不再有 base64 内联路径**——`image` 时 `msg.send` 的 `data.mediaId` 为**已 commit 的媒体 `fileId`（32 位 hex）**，服务端校验该媒体存在、属当前用户且状态为 COMMITTED（缺 `mediaId`/非串/空回 `400`，不存在回 `404 媒体不存在`，非本人回 `403 无权操作该媒体`，未提交回 `400 媒体未提交`），落库仅存 `media.id`（`messages.media_id`），`content` 存 `fileId` 供透传；`msg.recv`/`msg.offline`/`chat.history_res`/`group.history_res` 元素透传 `mediaId`（fileId 字符串，非媒体消息为空串）。**客户端渲染**：收到 `msgType=image` 后调用 `media.url`（携带该 `mediaId`）获取短期 GET URL 再加载图片，URL 过期后重新获取；客户端应以 `msgType` 为准渲染，不得嗅探 `content`。**服务端顺序**：媒体消息先校验媒体归属与状态、再做目标/发送限流/权限预检（码与文本路径一致），失败不落库。
+- **媒体访问权限（v3.0）**：`media.url` 仅向**消息相关方**签发 URL——服务端查 `messages.media_id` 是否存在当前用户可达的引用消息（单聊 `from`/`to` 为该用户，群聊该用户为群成员），命中才回 `url`，否则回 `403 无权访问该媒体`（**越权 403**）；查询失败按拒绝（fail-closed）。V1 为保守放行（存在任一可达引用即允许），群聊精确可见窗口（入群/退群时间）留待 V2。仅 COMMITTED 媒体可签发 URL，PENDING/GC 记录回 `404 媒体不存在`。
+- **媒体上限与清理（v3.0）**：单文件上限 **20MB**；PUT 预签名有效期 **15 分钟**、GET 预签名 **60 分钟**；`media.presign` 每用户 **30 次/分钟**（超限回 `429`）；未 commit 的 PENDING 记录 **24 小时**后由后台 GC 回收（删对象 + 标记）。`media` 表元数据含 `object_key/file_name/mime_type/file_size/width/height/duration/status`，`status` 取 `0=PENDING/1=UPLOADED/2=COMMITTED/3=GC`。**服务端不生成缩略图**（`width/height/duration` 由客户端 commit 时上报）。
 - **群聊约束（v1.9）**：`group.create` 的 `name` 非空且长度 ≤ 32，否则 `400 参数错误`；`group.invite` 仅群主可拉人（非群主 `403 仅群主可拉人`），被拉人须是邀请人的联系人（否则 `409 对方不是你的联系人`），已在群 `409 对方已在群中`，群满（50 人，含群主）`403 群已满`，群不存在 / 目标不存在各回 `404 群不存在` / `404 目标用户不存在`，`groupId` 缺失或非整数 `400 参数错误`；`group.leave` 群主不能退群（`403 群主不能退群`），非成员退群 `403 非群成员`，群不存在 `404 群不存在`；`group.members` / `group.history` 非（曾）成员 `403 非群成员`；群消息**不做已读**（无群已读回执，`msg.read` 仅限单聊视图）
 - **群管理（v2.0）**：`group.kick/transfer/dissolve/rename/announce` 仅群主可操作（非群主 `403 仅群主可操作`）；`groupId` 缺失/非整数 `400 参数错误`，群不存在 `404 群不存在`；已解散群操作（除 `group.history`）回 `404 群已解散`；`group.kick` 不能踢群主本人（`409 不能踢群主`）、目标不存在 `404 目标用户不存在`、非成员 `409 目标非群成员`；`group.transfer` 只能转给现群成员（`409 不能转让给自己` / `409 目标非群成员`），原群主变为普通成员；`group.rename` 的 `name` 非空且长度 ≤ 32（同建群，否则 `400 参数错误`）；`group.announce` 的 `content` ≤ 1024 字节（超限 `413 消息内容超长`），空=清空；被踢可被重新拉入，重入后仅看新窗口历史（与退群一致）
 - **群存储与补发（v1.9）**：群消息单行存储（`to_user=0, group_id=G`）；在线成员直接收 `msg.recv`（发送者不回显），离线成员按水位线在登录/重连时经 `msg.offline` 合并补发（补发同样不含发送者自己发的消息）；`chat.history` / `msg.read` 单聊视图均加群隔离（`group_id=0`），群消息不混入单聊
@@ -160,13 +166,13 @@
 | `auth.login_res` | `{ "code": 0, "msg": "ok", "data": { "userId": 1, "account": "...", "username": "昵称", "token": "..." } }` | 登录结果；成功时返回用户信息与 token（token 用于断线免密重连） |
 | `auth.token_res` | `{ "code": 0, "msg": "ok", "data": { "userId": 1, "username": "昵称", "token": "..." } }` | 免密重连结果；成功时返回用户信息与当前 token |
 | `auth.logout_res` | `{ "code": 0, "msg": "ok", "data": {} }` | 登出结果 |
-| `msg.recv` | `{ "from": "<account>", "fromNick": "发送方昵称", "content": "...", "ts": 1720000000, "clientMsgId": "...", "messageId": "全局消息ID", "chatType": "single" }` | 收到的新消息（单聊推送）；`from` 为发送方登录账号（v1.7）；`fromNick` 供直接展示；`messageId` 为服务器生成的全局唯一 ID（v1.4 起，客户端可忽略）；**群聊推送结构相同，另含 `groupId`（数字群标识）/`groupName` 且 `chatType` 为 `"group"`（v1.9）**；**v2.2 多端一致：发送者自己的其他在线端也会收到该消息（发起连接不回显），多设备会话视图一致**。注意边界：**仅覆盖在线端**——某端离线期间本账号其他端发的消息不会经 `msg.offline` 补发给该端（消息已落库），客户端重登后应拉 `chat.history` / `group.history` 对齐视图 |
+| `msg.recv` | `{ "from": "<account>", "fromNick": "发送方昵称", "content": "...", "ts": 1720000000, "clientMsgId": "...", "messageId": "全局消息ID", "chatType": "single", "mediaId": "<fileId或空串>" }` | 收到的新消息（单聊推送）；`from` 为发送方登录账号（v1.7）；`fromNick` 供直接展示；`messageId` 为服务器生成的全局唯一 ID（v1.4 起，客户端可忽略）；**媒体消息（v3.0）`mediaId` 为 fileId 字符串，非媒体为空串**（客户端据此调 `media.url` 取图）；**群聊推送结构相同，另含 `groupId`（数字群标识）/`groupName` 且 `chatType` 为 `"group"`（v1.9）**；**v2.2 多端一致：发送者自己的其他在线端也会收到该消息（发起连接不回显），多设备会话视图一致**。注意边界：**仅覆盖在线端**——某端离线期间本账号其他端发的消息不会经 `msg.offline` 补发给该端（消息已落库），客户端重登后应拉 `chat.history` / `group.history` 对齐视图 |
 | `msg.read_notify` | `{ "from": "<account>", "readTs": 1720000000 }` | 已读同步（v2.2）：该用户某一端调用 `msg.read` 后，其**其他在线端**收到此推送（`from` 为会话对方账号），客户端应将对应会话未读清零；免 ACK，且仅推在线端（离线端重登不补，靠 `chat.history` 拉取自愈） |
 | `msg.ack` | `{ "code": 0, "msg": "ok", "clientMsgId": "..." }` | 服务端已接收消息的回执，`clientMsgId` 对齐发送端 |
-| `msg.offline` | `{ "msgs": [ { "from": "<account>", "fromNick": "...", "content": "...", "ts": 1720000000, "clientMsgId": "...", "messageId": "...", "chatType": "single" }, ... ] }` | 登录后补发的离线消息列表；`msgs[]` 元素结构与 `msg.recv` 相同（`from` 为发送方登录账号；**群消息元素另含 `groupId`/`groupName` 且 `chatType` 为 `"group"`（v1.9，单聊与群按水位线合并补发）**）；**非破坏性补发**（v1.5：确认前保留，收到后应发 `msg.offline_ack`，确认后不再补发） |
+| `msg.offline` | `{ "msgs": [ { "from": "<account>", "fromNick": "...", "content": "...", "ts": 1720000000, "clientMsgId": "...", "messageId": "...", "chatType": "single", "mediaId": "<fileId或空串>" }, ... ] }` | 登录后补发的离线消息列表；`msgs[]` 元素结构与 `msg.recv` 相同（`from` 为发送方登录账号；**媒体消息 `mediaId` 为 fileId 字符串（v3.0）；群消息元素另含 `groupId`/`groupName` 且 `chatType` 为 `"group"`（v1.9，单聊与群按水位线合并补发）**）；**非破坏性补发**（v1.5：确认前保留，收到后应发 `msg.offline_ack`，确认后不再补发） |
 | `chat.create_res` | `{ "code": 0, "msg": "ok", "data": { "userId": 1, "account": "登录账号", "username": "昵称" } }` | 新建对话结果；成功返回目标用户 `userId`、**`account`** 与昵称；`404` 表示账号不存在 |
 | `msg.offline_ack_res` | `{ "code": 0, "msg": "ok", "data": {} }` | 离线消息确认结果 |
-| `chat.history_res` | `{ "code": 0, "msg": "ok", "data": { "msgs": [ { "from": "<account>", "fromNick": "...", "content": "...", "ts": 1720000000, "clientMsgId": "...", "messageId": "...", "chatType": "single" }, ... ] } }` | 单聊历史；`msgs[]` 元素结构与 `msg.recv` 相同（`from` 为发送方登录账号），**按 ts 倒序（最新在前）**；已加群隔离，群消息不在此返回（群历史用 `group.history_res`） |
+| `chat.history_res` | `{ "code": 0, "msg": "ok", "data": { "msgs": [ { "from": "<account>", "fromNick": "...", "content": "...", "ts": 1720000000, "clientMsgId": "...", "messageId": "...", "chatType": "single", "mediaId": "<fileId或空串>" }, ... ] } }` | 单聊历史；`msgs[]` 元素结构与 `msg.recv` 相同（`from` 为发送方登录账号；**媒体消息 `mediaId` 为 fileId 字符串（v3.0）**），**按 ts 倒序（最新在前）**；已加群隔离，群消息不在此返回（群历史用 `group.history_res`） |
 | `msg.read_res` | `{ "code": 0, "msg": "ok", "data": {} }` | 已读回执结果 |
 | `user.search_res` | `{ "code": 0, "msg": "ok", "data": { "users": [ { "account": "...", "username": "昵称", "isContact": true }, ... ] } }` | 搜索结果；`isContact` 表示目标是否已是我的联系人 |
 | `contact.request_res` | `{ "code": 0, "msg": "ok", "data": {} }` | 好友请求结果；`403` 对方未开启添加、`409` 对方已是联系人 / 已存在待处理请求、`400` 不能添加自己、`404` 目标用户不存在 |
@@ -190,7 +196,7 @@
 | `group.announce_res` | `{ "code": 0, "msg": "ok", "data": {} }` | 群公告结果；`400` 参数错误 / `404` 群不存在 / 群已解散 / `403` 仅群主可操作 / `413` 消息内容超长（`content` 超 1024 字节，空=清空） |
 | `group.list_res` | `{ "code": 0, "msg": "ok", "data": { "groups": [ { "groupId": 1, "name": "...", "memberCount": 2, "isOwner": true, "announcement": "...", "announceTs": 1720000000 }, ... ] } }` | 我的群列表；`isOwner` 表示我是否为群主；`announcement`/`announceTs` 为最新群公告正文与发布时间（v2.0，无公告时为空串/0）；已解散群不列出 |
 | `group.members_res` | `{ "code": 0, "msg": "ok", "data": { "members": [ { "account": "...", "username": "昵称", "joinedTs": 1720000000, "isOwner": true, "online": true }, ... ] } }` | 群成员列表；非群成员 `403 非群成员`；`online` 为成员当前是否在线（v2.1） |
-| `group.history_res` | `{ "code": 0, "msg": "ok", "data": { "msgs": [ { "from": "<account>", "fromNick": "...", "groupId": 1, "groupName": "...", "content": "...", "ts": 1720000000, "clientMsgId": "...", "messageId": "...", "chatType": "group" }, ... ] } }` | 群历史（仅加群后、退群前可见，按 ts 倒序）；非（曾）成员 `403 非群成员` |
+| `group.history_res` | `{ "code": 0, "msg": "ok", "data": { "msgs": [ { "from": "<account>", "fromNick": "...", "groupId": 1, "groupName": "...", "content": "...", "ts": 1720000000, "clientMsgId": "...", "messageId": "...", "chatType": "group", "mediaId": "<fileId或空串>" }, ... ] } }` | 群历史（仅加群后、退群前可见，按 ts 倒序）；非（曾）成员 `403 非群成员`；**媒体消息 `mediaId` 为 fileId 字符串（v3.0）** |
 | `group.added` | `{ "groupId": 1, "name": "...", "inviter": "<邀请人账号>" }` | 被拉入群的推送（在线直接推送；离线登录后用 `group.list` + `msg.offline` 自洽） |
 | `group.member_changed` | `{ "groupId": 1, "change": "join"/"leave"/"kick", "account": "<变动成员账号>" }` | 群成员变动推送（`join` 有人入群 / `leave` 有人退群 / `kick` 有人被踢，v2.0），推送给群内在线成员 |
 | `group.removed` | `{ "groupId": 1, "name": "..." }` | 被踢推送（v2.0，仅推送给被踢的在线者） |
@@ -198,11 +204,14 @@
 | `group.dissolved` | `{ "groupId": 1 }` | 解散群推送（v2.0），推送给解散前在线成员 |
 | `group.renamed` | `{ "groupId": 1, "name": "..." }` | 改群名推送（v2.0），推送给群内在线成员 |
 | `group.announced` | `{ "groupId": 1 }` | 群公告推送（v2.0，正文走 `group.list` 拉取，避免大包扇出），推送给群内在线成员 |
+| `media.presign_res` | `{ "code": 0, "msg": "ok", "data": { "fileId": "<32位hex>", "uploadUrl": "http://...&X-Amz-Signature=...", "expiresIn": 900 } }` | 申请上传结果（v3.0）：`fileId` 为媒体唯一标识（32 位 hex），`uploadUrl` 为 PUT 预签名直传 URL，`expiresIn` 为有效期秒（900）；`400` 参数错误（kind/mime/size/fileName 非法）、`413` 文件过大、`429` 请求过于频繁、`503` 对象存储不可用 |
+| `media.commit_res` | `{ "code": 0, "msg": "ok", "data": {} }` | 提交结果（v3.0）：成功 `code=0`；`400` 参数错误 / 媒体状态不可提交 / 对象不存在 / 文件大小不匹配、`403` 无权操作该媒体、`404` 媒体不存在、`413` 文件过大、`503` 对象存储不可用；已 COMMITTED 重复提交幂等回 `code=0` |
+| `media.url_res` | `{ "code": 0, "msg": "ok", "data": { "urls": { "<fileId>": { "url": "http://...&X-Amz-Signature=...", "expiresIn": 3600 }, ... } } }` | 取 URL 结果（v3.0）：`urls` 为 `fileId → {url, expiresIn}` 映射；单值项成功只含 `{url,expiresIn}`，失败项为 `{code,msg}`（如 `403 无权访问该媒体`/`404 媒体不存在`）；整包 `code` 为 `0`，逐项错误在 `urls` 值内。顶层 `400` 参数错误（缺 `fileId`/`fileIds`、非串/非数组、批量 >100） |
 | `error` | `{ "code": 400, "msg": "..." }` | 通用错误事件（简式结构） |
 
 字段细则：
 
-- `msg.recv.chatType` 为 `"single"`（单聊）或 `"group"`（群聊，v1.9）；`msg.offline.msgs[]` 元素结构与 `msg.recv` 相同，同样携带 `chatType`、`clientMsgId`、`fromNick` 与 `messageId`
+- `msg.recv.chatType` 为 `"single"`（单聊）或 `"group"`（群聊，v1.9）；`msg.offline.msgs[]` 元素结构与 `msg.recv` 相同，同样携带 `chatType`、`clientMsgId`、`fromNick`、`messageId` 与 `mediaId`（v3.0，媒体消息为 fileId 字符串，非媒体为空串）
 - **群载荷（v1.9）**：群消息的 `msg.recv` / `msg.offline.msgs[]` / `group.history_res.msgs[]` 元素含 `groupId`（数字群标识）、`groupName`，`chatType` 为 `"group"`，`from` 为发送方 `account`；客户端按 `chatType` 区分单聊与群聊会话
 - **离线补发与确认（v1.5）**：离线消息持久化到 MySQL；登录/重连时 `msg.offline` 推送 `status=pending` 的消息。客户端收到后应发送 `msg.offline_ack { messageIds }` 确认，服务端将已确认消息标记为 **delivered**，此后不再补发；**未确认的消息保留**（补发中断不丢失，重登仍会推送），供客户端重试。建议客户端用 `messageId` 去重，避免重复展示
 - **`fromNick` 为发送方昵称**：客户端直接用于气泡展示，无需再按 `from` 发起查询
@@ -311,7 +320,7 @@ Client A                    Server          Client B (account="bob")
 - `seq` 建议客户端按会话自增；服务端不依赖其顺序，仅用于客户端本地对齐
 - `clientMsgId` 由发送端生成（如 UUID），用于去重与 ACK 对齐；同一发送方窗口内重发相同 id 只投递一次
 - 客户端应忽略未知字段，以兼容协议后续扩展
-- **持久化现状**：用户（users 表）、消息/离线/历史/已读（messages 表）已持久化到 MySQL（重启不丢失）；token/发送限流/幂等去重均可存 Redis（`IM_REDIS_ENABLED=1` 启用，跨重启保留；未启用则内存）；在线状态（Presence）当前仍为内存
+- **持久化现状**：用户（users 表）、消息/离线/历史/已读（messages 表）、媒体元数据（media 表，v3.0）已持久化到 MySQL（重启不丢失）；token/发送限流/幂等去重均可存 Redis（`IM_REDIS_ENABLED=1` 启用，跨重启保留；未启用则内存）；在线状态（Presence）当前仍为内存
 
 ## 10. 服务端配置与部署
 
@@ -340,12 +349,19 @@ imserver [端口] [IO线程数] [工作线程数] [最大连接数] [允许Origi
 | `IM_LOG_ROTATE_BYTES` | `52428800` | 日志按大小轮转阈值（字节，50MB；`0` 不轮转） |
 | `IM_LOG_KEEP` | `5` | 轮转保留份数（`app.log.1` … `.5`） |
 | `IM_TRUSTED_PROXIES` | 空 | 可信反向代理 IP 列表（逗号分隔）；对端在列表内时握手日志显示 `X-Forwarded-For` 真实客户端 IP，未配置则忽略该头（防伪造）。见 `docs/nginx-deploy.md` |
+| `IM_S3_ENDPOINT` | 空 | 对象存储端点（host[:port]，不含 scheme，如 `minio:9000`）；**为空则媒体功能降级**（`media.*` 回 503 对象存储不可用，消息收发不受影响） |
+| `IM_S3_SCHEME` | `http` | 对象存储访问协议（`http`/`https`；生产用 `https`） |
+| `IM_S3_REGION` | `us-east-1` | 对象存储区域（SigV4 签名用） |
+| `IM_S3_BUCKET` | `media` | 对象存储桶名 |
+| `IM_S3_ACCESS_KEY` / `IM_S3_SECRET_KEY` | 空（须显式注入） | 对象存储 AK/SK，经环境变量/`.env` 注入；生产必须配强随机值 |
+| `IM_S3_PATH_STYLE` | `1` | path-style 访问（MinIO 需 `1`；`0` 为 virtual-hosted style） |
+| `IM_MEDIA_GC_INTERVAL_SEC` | `86400` | 媒体 PENDING 记录 GC 两次执行的最短间隔（秒；测试用小值验证） |
 
 MySQL 连接失败启动报错退出；`IM_REDIS_ENABLED=1` 且连接失败同样报错退出。
 
 ### 10.3 Docker 部署
 仓库含 `Dockerfile` 与 `docker-compose.yml`：`mysql:8.4` + `redis:8-alpine` +
-`imserver` + `nginx` 四服务编排（部署标准，按远程生产机固化）。
+`minio`（对象存储）+ `imserver` + `nginx` 五服务编排（部署标准，按远程生产机固化）。
 ```
 docker compose up -d --build
 ```
@@ -359,10 +375,9 @@ docker compose up -d --build
 - 容器内 imserver 通过服务名连接：`IM_MYSQL_HOST=mysql`、`IM_REDIS_HOST=redis`（端口 6379）
 - `mysql_data` / `redis_data` 命名卷持久化数据
 - `docker compose` 启用 Redis（`IM_REDIS_ENABLED=1`），token 免密重连跨容器重启不失效
+- **minio**（`minio/minio`）：开发/CI 标准对象存储，供 `IM_S3_ENDPOINT=minio:9000` 内网直连；AK/SK 经 `.env`（`IM_S3_ACCESS_KEY`/`IM_S3_SECRET_KEY`，缺省 `minioadmin` **仅本地/CI 可用**）；`minio_data` 命名卷持久化；生产可换阿里云 OSS 等 S3 兼容服务（V4 适配，签名接口通用）
 - **nginx**（`nginx/im.conf`，8080 反代 9191）：WebSocket 升级头、90s 读超时、
-  每真实 IP 50 连接限流、`X-Forwarded-For` 传递；`location /uploads/` 只读服务
-  落盘图片（alias 命名卷，`expires 1d` + `max-age=86400`，过期文件访问即 404）；
-  TLS/域名见 `docs/nginx-deploy.md`
+  每真实 IP 50 连接限流、`X-Forwarded-For` 传递；**v3.0 已下线 `/uploads/` 静态托管**（图片改对象存储直传，不再经服务端本地盘服务）；TLS/域名见 `docs/nginx-deploy.md`
 
 ### 10.4 云服务器部署（以阿里云 2 核 2G 为例）
 
@@ -393,7 +408,7 @@ docker compose up -d --build
 - **无 SQL 注入**：全仓 SQL 经 `mysqlStmtExec` 参数化（`?` 绑定），用户字符串无一拼接进 SQL
 - **密码存储**：PBKDF2-HMAC-SHA256（10 万次迭代）+ 每用户独立 128 位盐，非明文
 - **Token**：256 位随机生成，7 天过期，登出即失效，内存/Redis 只存 SHA-256 摘要
-- **无越权**：`msg.send/history/read/offline_ack`、`group.*`、联系人、设置接口均按 `session->userId()` 校验身份与成员关系，遍历 `userId`/`groupId` 不可读他人数据
+- **无越权**：`msg.send/history/read/offline_ack`、`group.*`、联系人、设置接口均按 `session->userId()` 校验身份与成员关系，遍历 `userId`/`groupId` 不可读他人数据；**媒体接口（v3.0）**：`media.commit` 仅上传者可提交、`media.url` 仅消息相关方可取（越权 403）
 - **登录不泄露存在性**：账号不存在与密码错误统一回 `403 账号或密码错误`
 - **传输层防护**：单消息 2MB 上限、握手 10 秒超时、僵尸连接 60 秒踢除、写缓冲 8MB 防慢消费
 

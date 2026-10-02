@@ -75,7 +75,8 @@ TEST(hmac_sha256_rfc4231) {
   std::string k1(20, (char)0x0b);
   CHECK_EQ(hmacSha256Raw(k1, "Hi There"),
       std::string("\xb0\x34\x4c\x61\xd8\xdb\x38\x53\x5c\xa8\xaf\xce\xaf\x0b\xf1\x2b"
-                  "\x88\x1d\xc2\x00\xc9\x83\x3d\xa7\x26\xe9\x37\x6c\x2e\x32\xcf\xf7"));
+                  "\x88\x1d\xc2\x00\xc9\x83\x3d\xa7\x26\xe9\x37\x6c\x2e\x32\xcf\xf7", 32));
+  // 注意：第 19 字节为 \x00，必须显式给长度 32，否则 std::string(const char*) 截断到 19
   // TC3: key=20B 0xaa, data=50B 0xdd
   std::string k3(20, (char)0xaa), d3(50, (char)0xdd);
   CHECK_EQ(hmacSha256Raw(k3, d3),
@@ -620,7 +621,7 @@ class MinioObjectStore : public ObjectStore {
 `.cpp` 要点：
 - `nowAmzDate()`：`time(nullptr)` + `gmtime_r` 格式化为 `%Y%m%dT%H%M%SZ`。
 - `presignPut/Get`：调 `sigV4Presign(cfg_, {"PUT"/"GET", key, amzDate.empty()?nowAmzDate():amzDate, ttlSec})`；空 URL 时 `enabled_=false` 语义返回空。
-- `headObject`（libcurl）：`presignGet(key, 300)` → `curl_easy_setopt(CURLOPT_URL/CURLOPT_NOBODY=1L/CURLOPT_CUSTOMREQUEST,"HEAD")` → 执行；HTTP 200 表示存在，`CURLINFO_CONTENT_LENGTH_DOWNLOAD_T` 取 size；404 返回 `{false,0}`。
+- `headObject`（libcurl）：**用 HEAD 方法签名** `presign`（方法参数化：`HEAD`，不可用 GET 签名——SigV4 覆盖 HTTP 方法，GET 签名配 HEAD 请求会被 MinIO 判 `SignatureDoesNotMatch` 403）→ `curl_easy_setopt(CURLOPT_URL/CURLOPT_NOBODY=1L/CURLOPT_CUSTOMREQUEST,"HEAD")` → 执行；HTTP 200 表示存在，`CURLINFO_CONTENT_LENGTH_DOWNLOAD_T` 取 size；404 返回 `{false,0}`。
 - `deleteObject`：`sigV4Presign(..., "DELETE", ...)` → `CURLOPT_CUSTOMREQUEST,"DELETE"` → HTTP 2xx 为成功。
 - **libcurl 惰性初始化**：构造里 `curl_global_init(CURL_GLOBAL_DEFAULT)`（进程一次；或用 `std::once_flag`）。
 
