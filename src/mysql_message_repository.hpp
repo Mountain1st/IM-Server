@@ -44,6 +44,13 @@ public:
                                                 int64_t sinceTs,
                                                 int64_t untilTs,
                                                 int limit, bool asc) override;
+  // 会话列表（v3.2）：单聊派生聚合 + 末条点查 + 群末条 ts 聚合
+  std::vector<ConversationEntry> fetchSingleConversations(int64_t userId) override;
+  bool fetchLastMessageSingle(int64_t userA, int64_t userB,
+                              LastMessageInfo* out) override;
+  bool fetchLastMessageGroup(int64_t groupId, LastMessageInfo* out) override;
+  std::vector<std::pair<int64_t, int64_t>> fetchGroupLastTs(
+      const std::vector<int64_t>& groupIds) override;
 
 private:
   MySqlClient client_;
