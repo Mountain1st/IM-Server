@@ -57,6 +57,13 @@ MYSQL_PWD='<密码>' mysql -u IMS_jack -h <host> IMS_reactor_db < db/migrate_med
 ```
 迁移幂等（已迁移可重复执行）。全新库由 `db/schema.sql` 自动建好，无需额外操作。
 
+**媒体集成测试的对象存储来源**：CI 与本地统一用 MinIO **静态二进制**（本仓库
+Release `vendor-binaries` 资产，版本锁定，API 端点认证下载 + sha256 校验）。
+`minio/minio` Docker 镜像匿名拉取被拒、`dl.min.io` 官方下载 410 下线、
+`dl.minio.org.cn` 对 GitHub runner 403（均 2026-10-02 实测），故 compose 的
+minio 服务仅作标准环境定义，CI 实际以静态二进制方式运行媒体全链路。
+本地快速起一个测试 MinIO：见 `scripts/` 与 Release 资产说明。
+
 ## 测试
 
 ```bash

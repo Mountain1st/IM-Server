@@ -375,7 +375,7 @@ docker compose up -d --build
 - 容器内 imserver 通过服务名连接：`IM_MYSQL_HOST=mysql`、`IM_REDIS_HOST=redis`（端口 6379）
 - `mysql_data` / `redis_data` 命名卷持久化数据
 - `docker compose` 启用 Redis（`IM_REDIS_ENABLED=1`），token 免密重连跨容器重启不失效
-- **minio**（`minio/minio`）：开发/CI 标准对象存储，供 `IM_S3_ENDPOINT=minio:9000` 内网直连；AK/SK 经 `.env`（`IM_S3_ACCESS_KEY`/`IM_S3_SECRET_KEY`，缺省 `minioadmin` **仅本地/CI 可用**）；`minio_data` 命名卷持久化；生产可换阿里云 OSS 等 S3 兼容服务（V4 适配，签名接口通用）
+- **minio**（`minio/minio`）：开发/CI 标准对象存储，供 `IM_S3_ENDPOINT=minio:9000` 内网直连；AK/SK 经 `.env`（`IM_S3_ACCESS_KEY`/`IM_S3_SECRET_KEY`，缺省 `minioadmin` **仅本地/CI 可用**）；`minio_data` 命名卷持久化；`createbuckets` 一次性服务用 `minio/mc` 建 `media` 桶（S3 不因 PUT 自动建桶）。**CI 的 MinIO 实际用静态二进制**（本仓库 Release 资产 `vendor-binaries`，API 端点 + `GITHUB_TOKEN` 认证下载 + sha256 校验）：`minio/minio` 镜像匿名拉取被拒、`dl.min.io` 浮动路径 410 下线、`dl.minio.org.cn` 对 GitHub runner 403（均 2026-10-02 实测）——compose 的 minio 服务保留作标准环境定义；生产可换阿里云 OSS 等 S3 兼容服务（V4 适配，签名接口通用）
 - **nginx**（`nginx/im.conf`，8080 反代 9191）：WebSocket 升级头、90s 读超时、
   每真实 IP 50 连接限流、`X-Forwarded-For` 传递；**v3.0 已下线 `/uploads/` 静态托管**（图片改对象存储直传，不再经服务端本地盘服务）；TLS/域名见 `docs/nginx-deploy.md`
 
