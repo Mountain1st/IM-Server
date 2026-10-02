@@ -14,9 +14,11 @@
 #include "app_util.hpp"
 #include "log.hpp"
 #include "metrics.hpp"
+#include "server_config.hpp"
 #include "session.hpp"
 
 #include <ctime>
+#include <unordered_set>
 
 namespace im {
 
@@ -528,34 +530,52 @@ void AppServer::onGroupHistory(const std::shared_ptr<Session>& session, const js
 }
 
 void AppServer::onGroupOfflineAck(const std::shared_ptr<Session>& session, const json& data) {
-  // 群投递确认（v3.3）：cumulative ACK——客户端声明“截至该 (ts,messageId) 的连续前缀已收到”。
-  // 服务端把该成员投递游标严格只进推进到该位置（重复/回退幂等）。账号级语义（任一设备确认即推进）。
-  // 客户端须只对连续前缀末端发送 ACK（协议义务）；服务端仅保证单调只进，不承担空洞检测。
+  // 群投递确认（v3.3，权威规格）：group.offline_ack{groupId, messageIds[]}。
+  // messageIds[] = 从当前投递游标起、客户端已处理的**连续可交付消息前缀**。
+  // 服务端严格只推进到连续前缀最远端——不得按最大 (ts,id) 无条件跃迁（否则空洞被跳过）。
+  // 账号级语义（任一设备确认即推进）；仅确认制(on)驱动游标，阶段A(off) 下只接收不改事实。
   const char* kRes = "group.offline_ack_res";
   if (!data.contains("groupId") || !data["groupId"].is_number_integer() ||
-      !data.contains("ts") || !data["ts"].is_number_integer() ||
-      !data.contains("messageId") || !data["messageId"].is_string()) {
+      !data.contains("messageIds") || !data["messageIds"].is_array()) {
     session->reply(makeResult(kRes, 400, "参数错误", json::object()));
     return;
   }
   const int64_t groupId = data["groupId"].get<int64_t>();
-  const std::string messageId = data["messageId"].get<std::string>();
-  if (groupId <= 0 || messageId.empty()) {
+  if (groupId <= 0 || data["messageIds"].size() > kMaxOfflineAckIds) {
     session->reply(makeResult(kRes, 400, "参数错误", json::object()));
     return;
+  }
+  std::unordered_set<std::string> acked;
+  for (const auto& v : data["messageIds"]) {
+    if (v.is_string() && !v.get<std::string>().empty()) acked.insert(v.get<std::string>());
   }
   if (!groupRepo_->isMember(groupId, session->userId())) {
     session->reply(makeResult(kRes, 403, "非群成员", json::object()));
     return;
   }
-  int64_t mts = 0, mid = 0, mgid = 0;
-  if (!msgRepo_->fetchMessageCursor(messageId, &mts, &mid, &mgid) || mgid != groupId) {
-    // 统一 404：消息不存在或不属于该群（不过度泄露细节）
-    session->reply(makeResult(kRes, 404, "消息不存在或不属于该群", json::object()));
+  // 阶段A(off)：仅接收，不改投递事实（旧语义水位线由推送/补发维护）
+  if (!config::deliveryAckRequired()) {
+    session->reply(makeResult(kRes, 0, "ok", json::object()));
     return;
   }
-  // 以反查所得 (mts,mid) 为候选游标（不信任客户端 ts），严格只进推进（幂等）
-  if (!groupRepo_->advanceDeliveredCursor(groupId, session->userId(), mts, mid)) {
+  // 连续前缀推进：从当前游标起按 (ts,id) 有序取群消息流，逐条推进；
+  // 自身/已撤回=不可交付，直接越过（不阻塞）；遇到未确认的可交付消息即停（空洞）。
+  int64_t cts = 0, cid = 0;
+  groupRepo_->getDeliveredCursor(groupId, session->userId(), &cts, &cid);
+  auto stream = msgRepo_->fetchGroupMessages(groupId, cts, cid, 0, 200, true);
+  int64_t nts = cts, nid = cid;
+  for (const auto& m : stream) {
+    if (m.fromUser == session->userId() || m.status == kMsgRecalled) {
+      nts = m.ts;  // 不可交付：越过，不阻塞游标
+      nid = m.id;
+      continue;
+    }
+    if (acked.count(m.messageId) == 0) break;  // 空洞：停止推进（连续前缀结束）
+    nts = m.ts;
+    nid = m.id;
+  }
+  if ((nts != cts || nid != cid) &&
+      !groupRepo_->advanceDeliveredCursor(groupId, session->userId(), nts, nid)) {
     session->reply(makeResult(kRes, 500, "服务器内部错误", json::object()));
     return;
   }
@@ -570,9 +590,10 @@ void AppServer::onGroupSend(const std::shared_ptr<Session>& session, const json&
   // （watermark）记 pending，重连补发；发送者其他在线端回显（v2.2）
                             const std::string& content, const std::string& clientMsgId,
                             const std::string& msgType, int64_t mediaId) {
-  auto ack = [&](int code, const std::string& msg) {
+  auto ack = [&](int code, const std::string& msg, const std::string& messageId = "") {
     session->reply(makeEnvelopeText("msg.ack",
-        json{{"code", code}, {"msg", msg}, {"clientMsgId", clientMsgId}}));
+        json{{"code", code}, {"msg", msg}, {"clientMsgId", clientMsgId},
+             {"messageId", messageId}}));
   };
   int64_t groupId = 0;
   if (data.contains("to") && data["to"].is_number_integer()) {
@@ -624,7 +645,7 @@ void AppServer::onGroupSend(const std::shared_ptr<Session>& session, const json&
     return;
   }
   msgDedup_->remember(session->userId(), clientMsgId);
-  ack(0, "ok");
+  ack(0, "ok", messageId);
   // 发送方信息（from 为账号，userId 对客户端不透明）
   std::string fromNick, fromAccount;
   userStore_->nickname(session->userId(), &fromNick);
@@ -650,8 +671,12 @@ void AppServer::onGroupSend(const std::shared_ptr<Session>& session, const json&
       pushed = true;
     }
     if (pushed) {
-      // v3.3：在线投递不再推进投递游标——由客户端 group.offline_ack 严格只进推进
-      g_metrics.messagesDelivered.fetch_add(1, std::memory_order_relaxed);
+      // v3.3：确认制(on)下在线投递不推进游标（由 group.offline_ack 推进）；
+      // 阶段A(off)兼容旧语义：推送即推进水位线。
+      if (!config::deliveryAckRequired()) {
+        groupRepo_->advanceDeliveredCursor(groupId, uid, now, 0);
+      }
+      g_metrics.messagesPushed.fetch_add(1, std::memory_order_relaxed);
     } else {
       g_metrics.messagesOffline.fetch_add(1, std::memory_order_relaxed);
     }

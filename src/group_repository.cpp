@@ -472,4 +472,21 @@ bool GroupRepository::advanceDeliveredCursor(int64_t groupId, int64_t userId, in
   return true;
 }
 
+bool GroupRepository::setWatermarkTs(int64_t groupId, int64_t userId, int64_t ts) {
+  // 阶段A(off)兼容旧语义：无条件覆盖 ts 水位线，id 分量归零
+  std::lock_guard<std::mutex> lock(mutex_);
+  if (!client_.ok()) return false;
+  int errNo = 0;
+  MYSQL_STMT* stmt = client_.stmtExec(
+      "UPDATE group_members SET last_delivered_ts = ?, last_delivered_id = 0 "
+      "WHERE group_id = ? AND user_id = ?",
+      {std::to_string(ts), std::to_string(groupId), std::to_string(userId)}, &errNo);
+  if (!stmt) {
+    LOG_E("[mysql] 设置群水位线失败 errno=" << errNo);
+    return false;
+  }
+  mysql_stmt_close(stmt);
+  return true;
+}
+
 }  // namespace im

@@ -3,6 +3,8 @@
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
+#include <cstdlib>
+#include <string>
 
 // 集中资源预算与安全限制（P0-4）：
 // 所有连接/会话/业务/存储的输入限制与队列上限统一在此定义，
@@ -79,6 +81,14 @@ inline constexpr int kMaxConcurrentPbkdf2 = 2;
 inline constexpr size_t kMaxClientMsgIdBytes = 64;
 // msg.offline_ack 单次确认数量上限（防单包触发海量 DB 更新）
 inline constexpr size_t kMaxOfflineAckIds = 1000;
+// 投递确认语义开关（v3.3）：off=阶段A 旧语义（在线推送即 delivered/推进水位线）；
+// on=阶段B 确认制（单聊恒 PENDING 仅 ACK 驱动；群仅 ACK 驱动游标）。
+// 控制单聊+群聊整体切换（禁止单/群分灰度：群游标用户级，混合设备会漏收）。
+inline bool deliveryAckRequired() {
+  const char* v = std::getenv("IM_DELIVERY_ACK_REQUIRED");
+  return v != nullptr && std::string(v) == "1";
+}
+
 // 消息撤回时间窗：发送者可在消息落库后 120 秒内撤回（msg.recall）
 inline constexpr int64_t kRecallWindowSec = 120;
 // 会话列表（conversation.list）：缺省返回条数与上限（有界 N+1 末条点查的界）

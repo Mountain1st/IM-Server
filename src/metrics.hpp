@@ -15,7 +15,8 @@ struct Metrics {
   std::atomic<uint64_t> protocolErrors{0};      // 协议错误断开
   std::atomic<uint64_t> authFailures{0};        // 登录失败（403/429）
   std::atomic<uint64_t> rateLimited{0};         // msg.send 限流拒绝
-  std::atomic<uint64_t> messagesDelivered{0};   // 在线投递消息数
+  std::atomic<uint64_t> messagesPushed{0};      // 消息推送成功数（msg.recv 写出，≠已确认）
+  std::atomic<uint64_t> messagesDelivered{0};   // 客户端确认投递数（ACK 驱动）
   std::atomic<uint64_t> messagesOffline{0};     // 离线入队消息数
   std::atomic<uint64_t> writeOverflows{0};      // 写缓冲超限断开
 };

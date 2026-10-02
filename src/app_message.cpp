@@ -87,12 +87,12 @@ void AppServer::pushOfflineMessages(int64_t userId,
   for (const int64_t gid : groupRepo_->listUserGroups(userId)) {
     int64_t joined = 0, left = 0;
     if (!groupRepo_->memberPeriod(gid, userId, &joined, &left)) continue;
-    // 投递游标（v3.3）：客户端已确认位置，严格只进；补发不在此推进（由 group.offline_ack 推进）
+    // 投递游标（v3.3）：on=确认制用 (ts,id) 严格游标且补发不推进；off=阶段A 旧水位线语义
+    const bool ackRequired = config::deliveryAckRequired();
     int64_t cts = 0, cid = 0;
     groupRepo_->getDeliveredCursor(gid, userId, &cts, &cid);
-    // 游标 = max(已确认游标, 入群前一刻)：入群前消息不可见（joined-1 使同秒可见）
     const int64_t sinceTs = std::max(cts, joined - 1);
-    const int64_t sinceId = (sinceTs == cts) ? cid : 0;
+    const int64_t sinceId = ackRequired ? ((sinceTs == cts) ? cid : 0) : -1;
     auto grows = msgRepo_->fetchGroupMessages(gid, sinceTs, sinceId, left, 100, true);
     std::string gname;
     groupRepo_->getGroup(gid, &gname, nullptr);
@@ -101,7 +101,10 @@ void AppServer::pushOfflineMessages(int64_t userId,
       if (m.status == kMsgRecalled) continue;  // 已撤回不补发（不可交付，不阻塞游标）
       arr.push_back(messageToJson(m, gname));
       maxTs = std::max(maxTs, m.ts);
-      // 注意：不在此推进游标——由客户端 group.offline_ack 确认后严格只进推进
+      if (!ackRequired) {
+        // 阶段A(off)兼容：补发时推进旧水位线（确认制下改由 ACK 推进，不在此处）
+        groupRepo_->setWatermarkTs(gid, userId, m.ts);
+      }
     }
   }
   if (!arr.empty()) {
@@ -207,9 +210,10 @@ void AppServer::onSend(const std::shared_ptr<Session>& session, const json& data
   // chatType=group 时分流 onGroupSend（幂等/限流已完成）
   std::string content = data.value("content", "");
   std::string clientMsgId = data.value("clientMsgId", "");
-  auto ack = [&](int code, const std::string& msg) {
+  auto ack = [&](int code, const std::string& msg, const std::string& messageId = "") {
     session->reply(makeEnvelopeText("msg.ack",
-        json{{"code", code}, {"msg", msg}, {"clientMsgId", clientMsgId}}));
+        json{{"code", code}, {"msg", msg}, {"clientMsgId", clientMsgId},
+             {"messageId", messageId}}));
   };
   // clientMsgId 长度上限：与 DB 列宽对齐，超长直接拒绝（单聊/群聊同规则）
   if (clientMsgId.size() > kMaxClientMsgIdBytes) {
@@ -383,15 +387,16 @@ void AppServer::onSend(const std::shared_ptr<Session>& session, const json& data
       return;
     }
     msgDedup_->remember(session->userId(), clientMsgId);
-    ack(0, "ok");
+    ack(0, "ok", messageId);
     return;
   }
-  // 投递确认语义 v2：单聊一律先落 PENDING，由客户端 msg.offline_ack 推进为 delivered
-  // （在线也如此——“服务端已发送”≠“客户端已确认收到”）。targetOnline 仅决定是否即时推送。
+  // 投递确认语义开关（v3.3）：on=确认制，单聊恒落 PENDING，由 msg.offline_ack 推进；
+  // off=阶段A 兼容旧语义，在线即 delivered（targetOnline 决定）。targetOnline 亦决定是否即时推送。
   const int64_t now = static_cast<int64_t>(std::time(nullptr));
   const std::string messageId = nextMessageId();
   const bool targetOnline = !onlineMgr_.sessions(to).empty();
-  const int status = kMsgOfflinePending;  // v3.3：恒 PENDING，ACK 后由 markDelivered 推 0→1
+  const bool ackRequired = config::deliveryAckRequired();
+  const int status = (ackRequired || !targetOnline) ? kMsgOfflinePending : kMsgDelivered;
   // 先持久化成功再确认（避免"内存入队伪装成持久化"）
   if (!msgRepo_->saveMessage(messageId, session->userId(), to, content, now,
                              clientMsgId, chatType, status, 0, msgType,
@@ -400,7 +405,7 @@ void AppServer::onSend(const std::shared_ptr<Session>& session, const json& data
     return;
   }
   msgDedup_->remember(session->userId(), clientMsgId);
-  ack(0, "ok");
+  ack(0, "ok", messageId);
   // 发送方昵称与账号（供接收方/离线消息直接展示，无需客户端另查；
   // from 为登录账号 account，userId 对客户端不透明）
   std::string fromNick;
@@ -423,7 +428,7 @@ void AppServer::onSend(const std::shared_ptr<Session>& session, const json& data
     for (auto& t : onlineMgr_.sessions(to)) {
       t->reply(makeEnvelopeText("msg.recv", recvData));
     }
-    g_metrics.messagesDelivered.fetch_add(1, std::memory_order_relaxed);
+    g_metrics.messagesPushed.fetch_add(1, std::memory_order_relaxed);
   } else {
     // 目标离线：已持久化为 offline_pending，待其登录后补发
     g_metrics.messagesOffline.fetch_add(1, std::memory_order_relaxed);
@@ -451,7 +456,11 @@ void AppServer::onOfflineAck(const std::shared_ptr<Session>& session, const json
       if (v.is_string()) messageIds.push_back(v.get<std::string>());
     }
   }
-  msgRepo_->markDelivered(session->userId(), messageIds);
+  const int64_t confirmed = msgRepo_->markDelivered(session->userId(), messageIds);
+  if (confirmed > 0) {
+    g_metrics.messagesDelivered.fetch_add(static_cast<uint64_t>(confirmed),
+                                          std::memory_order_relaxed);
+  }
   session->reply(makeResult("msg.offline_ack_res", 0, "ok", json::object()));
 }
 

@@ -27,8 +27,8 @@ public:
   int64_t purgeExpiredOffline(int64_t nowSec) override;
   // 保留期清理：删除超期已消费消息与群消息。返回删除条数。
   int64_t purgeAgedHistory(int64_t nowSec, int retentionDays) override;
-  void markDelivered(int64_t toUser,
-                     const std::vector<std::string>& messageIds) override;
+  int64_t markDelivered(int64_t toUser,
+                        const std::vector<std::string>& messageIds) override;
   std::vector<StoredMessage> fetchHistory(int64_t userA, int64_t userB,
                                           int limit) override;
   void markRead(int64_t toUser, int64_t fromUser, int64_t readTs) override;

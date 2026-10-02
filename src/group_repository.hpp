@@ -57,6 +57,8 @@ public:
   // 严格只进推进：仅当新游标 (ts,id) 按字典序 > 旧游标才更新（幂等，ACK 重复/回退无副作用）。
   // 返回 true=成功写库或无需更新；false=DB 错误。
   bool advanceDeliveredCursor(int64_t groupId, int64_t userId, int64_t ts, int64_t id);
+  // 阶段A(off)兼容：无条件设 ts 分量（旧“水位线”语义），id 置 0。返回 true=成功。
+  bool setWatermarkTs(int64_t groupId, int64_t userId, int64_t ts);
 
 private:
   void loadMembersCache();

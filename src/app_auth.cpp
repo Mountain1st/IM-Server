@@ -30,8 +30,13 @@ void AppServer::onRegister(const std::shared_ptr<Session>& session, const json& 
   // 即可调用，无限流可被刷成未认证 CPU DoS。IP 哈希为 int64 作限流键
   // （碰撞=不同 IP 共享额度，粗粒度可接受）
   {
+    // 注册限流按真实 IP（v3.3，权威规格 #4）：可信代理命中时用 XFF 解析的 realIp()，
+    // 否则回落 TCP 对端 peerIp()。realIp() 仅在 IM_TRUSTED_PROXIES 命中且做注入白名单
+    // 校验后赋值。IP 哈希为 int64 作限流键（碰撞=不同 IP 共享额度，粗粒度可接受）。
+    const std::string regIp =
+        session->realIp().empty() ? session->conn()->peerIp() : session->realIp();
     const int64_t ipKey = static_cast<int64_t>(
-        static_cast<uint64_t>(std::hash<std::string>{}(session->conn()->peerIp())));
+        static_cast<uint64_t>(std::hash<std::string>{}(regIp)));
     if (!registerLimiter_->allow(ipKey, registerLimit_, config::kRegisterWindow)) {
       session->reply(makeResult("auth.register_res", 429,
           "注册过于频繁，请稍后再试", json::object()));

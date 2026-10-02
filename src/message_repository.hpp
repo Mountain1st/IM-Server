@@ -9,6 +9,7 @@ namespace im {
 
 // 一条已存储的单聊消息（含状态字段）。
 struct StoredMessage {
+  int64_t id = 0;         // messages.id 主键（内部定位，不对外；投递游标 id 分量）
   std::string messageId;  // 全局唯一 ID（对外）
   int64_t fromUser;
   int64_t toUser;
@@ -87,9 +88,9 @@ public:
   // 保留期清理：删除超期的已送达/已读消息与全部群消息（ts < nowSec - 保留天数，
   // pending 状态不在此列——由 TTL 负责）。返回删除条数。
   virtual int64_t purgeAgedHistory(int64_t nowSec, int retentionDays) = 0;
-  // 批量标记离线消息为 delivered（客户端 msg.offline_ack 确认）。
-  virtual void markDelivered(int64_t toUser,
-                             const std::vector<std::string>& messageIds) = 0;
+  // 批量标记离线消息为 delivered（客户端 msg.offline_ack 确认）。返回实际确认条数。
+  virtual int64_t markDelivered(int64_t toUser,
+                                const std::vector<std::string>& messageIds) = 0;
   // 拉取 userA 与 userB 之间的单聊历史，按 ts 倒序（最新的在前），limit 条。
   virtual std::vector<StoredMessage> fetchHistory(int64_t userA, int64_t userB,
                                                   int limit) = 0;
