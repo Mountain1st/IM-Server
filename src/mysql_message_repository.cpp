@@ -153,26 +153,39 @@ std::vector<StoredMessage> MySqlMessageRepository::fetchOffline(int64_t toUser) 
 
 int64_t MySqlMessageRepository::markDelivered(int64_t toUser,
                                               const std::vector<std::string>& messageIds) {
+  // 任务③B：单条有界批量 UPDATE（原逐条循环在 1000 条 ACK 时持锁执行 1000 次 SQL）。
+  // 谓词不变（to_user + status=0 + IN），已 delivered/recalled/不存在的 id 命中 0 行
+  // 幂等安全；返回 affected_rows=本轮真实迁移数（指标只计真实确认）。
+  // 批量上限由 handler 层 kMaxOfflineAckIds=1000 保证；此处再兜底截断防直调绕过。
   if (messageIds.empty()) return 0;
   std::lock_guard<std::mutex> lock(mutex_);
   if (!client_.ok()) return 0;
-  int64_t now = static_cast<int64_t>(std::time(nullptr));
-  int64_t confirmed = 0;
-  for (const auto& mid : messageIds) {
-    int errNo = 0;
-    MYSQL_STMT* stmt = client_.stmtExec(
-        "UPDATE messages SET status = ?, delivered_ts = ? "
-        "WHERE to_user = ? AND message_id = ? AND status = ?",
-        {std::to_string(kMsgDelivered), std::to_string(now),
-         std::to_string(toUser), mid, std::to_string(kMsgOfflinePending)},
-        &errNo);
-    if (stmt) {
-      confirmed += static_cast<int64_t>(mysql_stmt_affected_rows(stmt));
-      mysql_stmt_close(stmt);
-    } else {
-      LOG_E("[mysql] 标记已投递失败 errno=" << errNo);
-    }
+  const size_t n = std::min(messageIds.size(), config::kMaxOfflineAckIds);
+  const int64_t now = static_cast<int64_t>(std::time(nullptr));
+  // 参数化 IN 列表：每个 id 一个 ?（预处理防注入），非字符串拼接
+  std::string sql =
+      "UPDATE messages SET status = ?, delivered_ts = ? WHERE to_user = ? AND status = ? "
+      "AND message_id IN (";
+  for (size_t i = 0; i < n; ++i) {
+    if (i > 0) sql += ",";
+    sql += "?";
   }
+  sql += ")";
+  std::vector<std::string> params;
+  params.reserve(n + 4);
+  params.push_back(std::to_string(kMsgDelivered));
+  params.push_back(std::to_string(now));
+  params.push_back(std::to_string(toUser));
+  params.push_back(std::to_string(kMsgOfflinePending));
+  for (size_t i = 0; i < n; ++i) params.push_back(messageIds[i]);
+  int errNo = 0;
+  MYSQL_STMT* stmt = client_.stmtExec(sql, params, &errNo);
+  if (!stmt) {
+    LOG_E("[mysql] 批量标记已投递失败 errno=" << errNo);
+    return 0;
+  }
+  const int64_t confirmed = static_cast<int64_t>(mysql_stmt_affected_rows(stmt));
+  mysql_stmt_close(stmt);
   return confirmed;
 }
 
