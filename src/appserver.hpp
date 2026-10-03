@@ -169,6 +169,11 @@ private:
   std::unique_ptr<MsgDedupStore> msgDedup_;    // 消息幂等去重（内存/Redis 双后端）
   std::unique_ptr<RateLimiterStore> msgLimiter_; // msg.send 限流（内存/Redis 双后端）
   std::unique_ptr<RateLimiterStore> queryLimiter_; // 重查询限流（history/members；Redis 键前缀 qrate: 独立额度桶）
+  // ACK/已读准入限流（任务③A，独立 arate:/rrate: 额度桶）：
+  // 防高频空转 DB（ACK 批量 UPDATE/流式扫描；read 为 UPDATE+查询）。
+  // ACK 与 read 分开计费（语义不同；互不挤占额度）。
+  std::unique_ptr<RateLimiterStore> ackLimiter_;
+  std::unique_ptr<RateLimiterStore> readLimiter_;
   std::unique_ptr<RateLimiterStore> registerLimiter_; // 注册限流（按 IP；Redis 键前缀 reg: 独立额度桶）
   // 媒体限流（media.presign 按用户 30 次/分钟；Redis 键前缀 mrate: 独立额度桶）。
   // 用 shared_ptr 是因为 MediaService 持有其共享所有权。

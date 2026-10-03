@@ -81,6 +81,11 @@ inline constexpr int kMaxConcurrentPbkdf2 = 2;
 inline constexpr size_t kMaxClientMsgIdBytes = 64;
 // msg.offline_ack 单次确认数量上限（防单包触发海量 DB 更新）
 inline constexpr size_t kMaxOfflineAckIds = 1000;
+// ACK/已读准入限流（任务③A）：接收端高频回执会打 DB（单聊批量 UPDATE/群流式游标），
+// 与发送限流同等窗口但独立额度桶（arate:）。正常客户端批量确认远低于此。
+inline constexpr std::chrono::seconds kAckWindow(10);
+inline constexpr size_t kMaxAckPerWindow = 60;   // msg.offline_ack / group.offline_ack
+inline constexpr size_t kMaxReadPerWindow = 60;  // msg.read（翻页高频但同属重路径）
 // 投递确认语义开关（v3.3）：off=阶段A 旧语义（在线推送即 delivered/推进水位线）；
 // on=阶段B 确认制（单聊恒 PENDING 仅 ACK 驱动；群仅 ACK 驱动游标）。
 // 控制单聊+群聊整体切换（禁止单/群分灰度：群游标用户级，混合设备会漏收）。

@@ -2473,12 +2473,78 @@ def main():
     elif medias_enabled:
         skip("media GC e2e", "IM_MEDIA_GC_INTERVAL_SEC!=1（非 test_biz.sh 调度，跳过）")
 
+    # ===== 任务③A：ACK/已读准入限流 + ③B：批量 markDelivered 幂等 =====
+    # 独立账号 + token 连接（不受前段会话状态影响）
+    K1, K2 = base + "97", base + "98"
+    k1 = WS(); check("throttle k1 register ok", register(k1, K1, "pw1234")["data"]["code"] == 0)
+    k2 = WS(); check("throttle k2 register ok", register(k2, K2, "pw1234")["data"]["code"] == 0)
+    check("throttle k1 login ok", login(k1, K1, "pw1234")["data"]["code"] == 0)
+    check("throttle k2 login ok", login(k2, K2, "pw1234")["data"]["code"] == 0)
+    k1.send(env("contact.request", {"account": K2})); json.loads(k1.recv())
+    k2.send(env("contact.accept", {"account": K1})); json.loads(k2.recv())
+    json.loads(k1.recv()); json.loads(k2.recv())
+
+    # ③B 幂等：同一 messageId 两次 ACK → 第二次 affected=0（不重复计数）
+    r = send_msg(k1, K2, "batch幂等", "kthr1-%s" % base)
+    bmid = r["data"]["messageId"]
+    json.loads(k2.recv())  # K2 在线收
+    r = send(k2, "msg.offline_ack", {"messageIds": [bmid]})
+    check("throttle batch ack first ok", r["data"]["code"] == 0)
+    r = send(k2, "msg.offline_ack", {"messageIds": [bmid]})
+    check("throttle batch ack second idempotent", r["data"]["code"] == 0)
+    # 混合脏 id（不存在/已 delivered）与有效 id：整批成功、有效 id 生效
+    r = send_msg(k1, K2, "batch混合", "kthr2-%s" % base)
+    m2id = r["data"]["messageId"]
+    json.loads(k2.recv())
+    r = send(k2, "msg.offline_ack",
+             {"messageIds": ["no-such-message-id", m2id, bmid]})
+    check("throttle batch mixed ids ok", r["data"]["code"] == 0)
+    # 混合 id 中有效者已 delivered：重登不应再补发
+    k2.close(); time.sleep(0.4)
+    k2b = WS(); check("throttle k2 relogin ok", login(k2b, K2, "pw1234")["data"]["code"] == 0)
+    try:
+        k2b.s.settimeout(1.2)
+        off = json.loads(k2b.recv())
+    except Exception:
+        off = None
+    k2b.s.settimeout(5)
+    omids = [m.get("messageId") for m in off.get("data", {}).get("msgs", [])] \
+        if off and off.get("type") == "msg.offline" else []
+    check("throttle mixed batch persisted (no backfill)", bmid not in omids and m2id not in omids)
+    k2b.close()
+
+    # ③A ACK 限流：同一账号 10s 窗口连发 >60 次 ACK → 429（独立桶，不占发送额度）
+    # 用已登录连接 k1：连发空 ACK 包触发专用桶
+    got_ack_429 = False
+    for i in range(70):
+        k1.send(env("msg.offline_ack", {"messageIds": []}))
+        r = json.loads(k1.recv())
+        if r.get("type") == "msg.offline_ack_res" and r["data"].get("code") == 429:
+            got_ack_429 = True
+            break
+    check("throttle ack 429 after burst", got_ack_429)
+    # 发送额度未被 ACK 桶挤占：ACK 被限流后仍可正常发消息
+    r = send_msg(k1, K2, "still can send", "kthr3-%s" % base)
+    check("throttle send unaffected by ack bucket",
+          r["type"] == "msg.ack" and r["data"]["code"] == 0)
+    # ③A read 限流：独立 rrate: 桶，连发 >60 次 msg.read → 429
+    got_read_429 = False
+    for i in range(70):
+        k1.send(env("msg.read", {"from": K2}))
+        r = json.loads(k1.recv())
+        if r.get("type") == "msg.read_res" and r["data"].get("code") == 429:
+            got_read_429 = True
+            break
+    check("throttle read 429 after burst", got_read_429)
+    k1.close()
+
     a.close(); b.close()
 
     # 清理本次注册的测试账号及其关联消息（精确账号列表，不误删真实用户）
     import subprocess
     used = [A, B, C, SINK, SPAM, SINK2, SPAM2, D, E, F, G, H, base + "50", G1, G2,
-            M1, M2, M3, M4, PIMG, QIMG, CIMG, RA, RB, RC, V1, V2, V3, D1, D2, D3] \
+            M1, M2, M3, M4, PIMG, QIMG, CIMG, RA, RB, RC, V1, V2, V3, D1, D2, D3,
+            K1, K2] \
         + cap_accounts + [OVER, X, Y, Z, BL, BL2, BL3, BL4]
     inlist = ",".join("'%s'" % x for x in used)
     # 群表清理必须在 users 删除之前（按 account 查 user_id，无级联外键）

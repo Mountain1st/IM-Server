@@ -448,6 +448,13 @@ void AppServer::onOfflineAck(const std::shared_ptr<Session>& session, const json
   // 通用投递确认（v3.3）：单聊在线/离线通用（在线也落 PENDING，见 onSend）。
   // 服务端把对应单聊消息 status 0→1（markDelivered 谓词 to_user/status=0，幂等）。
   // 群消息不走此指令（群 to_user=0，经 group.offline_ack 推进成员游标）。
+  // 准入限流（任务③A）：ACK 会触发批量 UPDATE，防高频空转 DB（独立 arate: 桶）
+  if (!ackLimiter_->allow(session->userId(), kMaxAckPerWindow, kAckWindow)) {
+    g_metrics.rateLimited.fetch_add(1, std::memory_order_relaxed);
+    session->reply(makeResult("msg.offline_ack_res", 429, "操作过于频繁，请稍后再试",
+                              json::object()));
+    return;
+  }
   if (data.contains("messageIds") && data["messageIds"].is_array() &&
       data["messageIds"].size() > kMaxOfflineAckIds) {
     session->reply(makeResult("msg.offline_ack_res", 400, "确认数量超限", json::object()));
@@ -501,6 +508,13 @@ void AppServer::onHistory(const std::shared_ptr<Session>& session, const json& d
 void AppServer::onRead(const std::shared_ptr<Session>& session, const json& data) {
   // 已读回执：把与某用户、截至 ts 的未读消息标记为已读。
   // from 为目标登录账号 account（协议 v1.7；兼容旧 userId 数字与 0=自己）。
+  // 准入限流（任务③A）：read 触发 UPDATE + hasConversation 查询（独立 rrate: 桶）
+  if (!readLimiter_->allow(session->userId(), kMaxReadPerWindow, kAckWindow)) {
+    g_metrics.rateLimited.fetch_add(1, std::memory_order_relaxed);
+    session->reply(makeResult("msg.read_res", 429, "操作过于频繁，请稍后再试",
+                              json::object()));
+    return;
+  }
   const int64_t from = resolveTarget(userStore_.get(), data, "from");
   if (from == -1 || from == -2 || from == -3) {
     session->reply(makeResult("msg.read_res", 400, "参数错误", json::object()));

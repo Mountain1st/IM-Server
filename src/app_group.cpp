@@ -535,6 +535,12 @@ void AppServer::onGroupOfflineAck(const std::shared_ptr<Session>& session, const
   // 服务端严格只推进到连续前缀最远端——不得按最大 (ts,id) 无条件跃迁（否则空洞被跳过）。
   // 账号级语义（任一设备确认即推进）；仅确认制(on)驱动游标，阶段A(off) 下只接收不改事实。
   const char* kRes = "group.offline_ack_res";
+  // 准入限流（任务③A）：群 ACK 触发 200 条流式游标扫描，防高频空转 DB（独立 arate: 桶）
+  if (!ackLimiter_->allow(session->userId(), kMaxAckPerWindow, kAckWindow)) {
+    g_metrics.rateLimited.fetch_add(1, std::memory_order_relaxed);
+    session->reply(makeResult(kRes, 429, "操作过于频繁，请稍后再试", json::object()));
+    return;
+  }
   if (!data.contains("groupId") || !data["groupId"].is_number_integer() ||
       !data.contains("messageIds") || !data["messageIds"].is_array()) {
     session->reply(makeResult(kRes, 400, "参数错误", json::object()));

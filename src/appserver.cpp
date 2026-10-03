@@ -190,6 +190,8 @@ AppServer::AppServer(uint16_t port, size_t ioThreads, size_t workThreads, size_t
       msgDedup_(makeMsgDedup(redisConfig)),
       msgLimiter_(makeRateLimiter(redisConfig, "发送限流")),
       queryLimiter_(makeRateLimiter(redisConfig, "查询限流", "qrate:")),
+      ackLimiter_(makeRateLimiter(redisConfig, "ACK 限流", "arate:")),
+      readLimiter_(makeRateLimiter(redisConfig, "已读限流", "rrate:")),
       registerLimiter_(makeRateLimiter(redisConfig, "注册限流", "reg:")),
       mediaLimiter_(makeRateLimiter(redisConfig, "媒体限流", "mrate:")),
       mediaService_(std::make_unique<MediaService>(mediaRepo_, objectStore_,

@@ -27,6 +27,10 @@ constexpr size_t kMaxClientMsgIdBytes = config::kMaxClientMsgIdBytes;
 constexpr size_t kMaxOfflineAckIds = config::kMaxOfflineAckIds;
 constexpr std::chrono::seconds kQueryWindow(config::kQueryWindow);
 constexpr size_t kQueryLimitPerWindow = config::kQueryLimitPerWindow;
+// ACK/已读准入限流（任务③A）：接收端回执触达 DB 重路径，独立额度桶 arate:
+constexpr std::chrono::seconds kAckWindow(config::kAckWindow);
+constexpr size_t kMaxAckPerWindow = config::kMaxAckPerWindow;
+constexpr size_t kMaxReadPerWindow = config::kMaxReadPerWindow;
 
 // 账号格式：10-11 位纯数字（如手机号）。
 // 注册与新建对话（chat.create）均按此校验，不合规回 400；
