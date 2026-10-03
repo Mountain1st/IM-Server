@@ -25,8 +25,8 @@ inline constexpr size_t kMaxHandshakeHeaderBytes = 8 * 1024;
 inline constexpr size_t kMaxQueuedBytes = 8 * 1024 * 1024;
 // 单条消息（含分片累积）上限：防御恶意超大帧
 inline constexpr size_t kMaxMessageBytes = 2 * 1024 * 1024;
-// 单个 WebSocket 帧上限（解析层）
-inline constexpr size_t kMaxFrameBytes = 64u * 1024 * 1024;
+// 单个 WebSocket 帧上限（解析层）：与消息上限保持一致，避免客户端发大帧被断开
+inline constexpr size_t kMaxFrameBytes = 2 * 1024 * 1024;
 // 单 IP 并发连接上限（防单 IP 建数千连接耗尽 fd/内存；0 表示不限）
 inline constexpr size_t kMaxPerIpConnections = 100;
 
