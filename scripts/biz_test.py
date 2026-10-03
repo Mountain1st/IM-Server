@@ -2228,6 +2228,151 @@ def main():
         d1b.close()
         d2.close(); d3.close()
 
+        # ===== T1–T7 群投递游标 membership epoch（P0-1/P0-2 修复回归）=====
+        # 权威 spec：docs/superpowers/specs/2026-10-03-group-cursor-membership-epoch-design.md
+        def drain_ws(w, tmo=0.6):
+            # 消费并返回当前已到达的全部帧（登录补发/事件推送清场），超时结束
+            w.s.settimeout(tmo)
+            frames = []
+            try:
+                while True:
+                    frames.append(json.loads(w.recv()))
+            except Exception:
+                pass
+            w.s.settimeout(5)
+            return frames
+
+        def offline_ids(frames):
+            return [m.get("messageId") for f in frames if f.get("type") == "msg.offline"
+                    for m in f.get("data", {}).get("msgs", [])]
+
+        t1a = WS(); t1b = WS()
+        assert login(t1a, D1, "pw1234")["data"]["code"] == 0
+        assert login(t1b, D2, "pw1234")["data"]["code"] == 0
+        # 清场：历史段遗留的未确认补发（旧群 dgid 等）不影响本组断言
+        drain_ws(t1a); drain_ws(t1b)
+
+        # T1: 新成员加入已有历史 → 入群前消息不进 ACK 窗口；M1 可 ACK；重连不重复
+        r = send(t1a, "group.create", {"name": "纪元T1"})
+        check("epoch T1 group create ok", r["data"]["code"] == 0)
+        eg1 = r["data"]["data"]["groupId"]
+        pres = []
+        for i in range(3):
+            r = send_msg(t1a, eg1, "T1PRE%d" % i, "t1pre%d-%s" % (i, base), chat_type="group")
+            pres.append(r["data"]["messageId"])
+        time.sleep(1.1)  # 保证 M1/入群边界与 PRE 不同秒
+        r = send(t1a, "group.invite", {"groupId": eg1, "account": D2})
+        check("epoch T1 invite ok", r["data"]["code"] == 0)
+        drain_ws(t1a)  # member_changed
+        json.loads(t1b.recv())  # group.added
+        time.sleep(1.1)
+        r = send_msg(t1a, eg1, "T1M1", "t1m1-%s" % base, chat_type="group")
+        m1 = r["data"]["messageId"]
+        gg = json.loads(t1b.recv())
+        check("epoch T1 online recv M1", gg.get("data", {}).get("messageId") == m1)
+        r = send(t1b, "group.offline_ack", {"groupId": eg1, "messageIds": [m1]})
+        check("epoch T1 ack M1 ok", r["data"]["code"] == 0)
+        t1b.close(); time.sleep(0.4)
+        t1b2 = WS(); assert login(t1b2, D2, "pw1234")["data"]["code"] == 0
+        omids = offline_ids(drain_ws(t1b2, 1.2))
+        check("epoch T1 pre-history never delivered", all(p not in omids for p in pres))
+        check("epoch T1 acked M1 not re-delivered", m1 not in omids)
+
+        # T2/T3: 退群 → 群内消息 → 重入 → 新纪元在线 Y1/Y2 ACK → 重连不重复
+        r = send(t1b2, "group.leave", {"groupId": eg1})
+        check("epoch T2 leave ok", r["data"]["code"] == 0)
+        drain_ws(t1a)
+        time.sleep(1.1)
+        x1 = send_msg(t1a, eg1, "T2X1", "t2x1-%s" % base, chat_type="group")["data"]["messageId"]
+        time.sleep(1.1)
+        x2 = send_msg(t1a, eg1, "T2X2", "t2x2-%s" % base, chat_type="group")["data"]["messageId"]
+        r = send(t1a, "group.invite", {"groupId": eg1, "account": D2})
+        check("epoch T2 re-invite ok", r["data"]["code"] == 0)
+        drain_ws(t1a)              # member_changed
+        json.loads(t1b2.recv())    # group.added（在线）
+        time.sleep(1.1)
+        y1 = send_msg(t1a, eg1, "T3Y1", "t3y1-%s" % base, chat_type="group")["data"]["messageId"]
+        gg = json.loads(t1b2.recv())
+        check("epoch T3 online recv Y1", gg.get("data", {}).get("messageId") == y1)
+        y2 = send_msg(t1a, eg1, "T3Y2", "t3y2-%s" % base, chat_type="group")["data"]["messageId"]
+        gg = json.loads(t1b2.recv())
+        check("epoch T3 online recv Y2", gg.get("data", {}).get("messageId") == y2)
+        r = send(t1b2, "group.offline_ack", {"groupId": eg1, "messageIds": [y1, y2]})
+        check("epoch T3 ack Y1Y2 ok", r["data"]["code"] == 0)
+        t1b2.close(); time.sleep(0.4)
+        t1b3 = WS(); assert login(t1b3, D2, "pw1234")["data"]["code"] == 0
+        omids = offline_ids(drain_ws(t1b3, 1.2))
+        check("epoch T2 old epoch cursor not inherited (X not replayed)",
+              x1 not in omids and x2 not in omids)
+        check("epoch T3 acked Y1Y2 not re-delivered", y1 not in omids and y2 not in omids)
+
+        # T4: 入群边界同秒——SPRE 与 SPOST 尽量同秒，按 (ts,id) 精确归属
+        r = send(t1b3, "group.leave", {"groupId": eg1})
+        check("epoch T4 leave ok", r["data"]["code"] == 0)
+        drain_ws(t1a)
+        while (time.time() % 1) > 0.15:  # 卡秒初，压缩 SPRE→invite→SPOST 时差
+            time.sleep(0.01)
+        spre = send_msg(t1a, eg1, "T4PRE", "t4pre-%s" % base, chat_type="group")["data"]["messageId"]
+        r = send(t1a, "group.invite", {"groupId": eg1, "account": D2})
+        check("epoch T4 invite ok", r["data"]["code"] == 0)
+        drain_ws(t1a, 0.3)  # 消费 member_changed（拉起者自身端也收），防误读为 msg.ack
+        t1b3.close()        # 单会话纪律：D2 旧连接下线后再新登录
+        spost = send_msg(t1a, eg1, "T4POST", "t4post-%s" % base, chat_type="group")["data"]["messageId"]
+        drain_ws(t1a)
+        t1b4 = WS(); assert login(t1b4, D2, "pw1234")["data"]["code"] == 0
+        omids = offline_ids(drain_ws(t1b4, 1.2))
+        check("epoch T4 post-join message deliverable", spost in omids)
+        check("epoch T4 pre-join message not delivered", spre not in omids)
+        r = send(t1b4, "group.offline_ack", {"groupId": eg1, "messageIds": [spost]})
+        check("epoch T4 ack post ok", r["data"]["code"] == 0)
+        t1b4.close(); time.sleep(0.4)
+        t1b5 = WS(); assert login(t1b5, D2, "pw1234")["data"]["code"] == 0
+        omids = offline_ids(drain_ws(t1b5, 1.2))
+        check("epoch T4 cursor advanced (no re-delivery)",
+              spost not in omids and spre not in omids)
+
+        # T6: recalled 位于 ACK 前缀中间——无需 ACK 即可被游标跨过
+        a1 = send_msg(t1a, eg1, "T6A1", "t6a1-%s" % base, chat_type="group")["data"]["messageId"]
+        gg = json.loads(t1b5.recv())
+        check("epoch T6 online recv A1", gg.get("data", {}).get("messageId") == a1)
+        a2 = send_msg(t1a, eg1, "T6A2", "t6a2-%s" % base, chat_type="group")["data"]["messageId"]
+        gg = json.loads(t1b5.recv())
+        check("epoch T6 online recv A2", gg.get("data", {}).get("messageId") == a2)
+        a3 = send_msg(t1a, eg1, "T6A3", "t6a3-%s" % base, chat_type="group")["data"]["messageId"]
+        gg = json.loads(t1b5.recv())
+        check("epoch T6 online recv A3", gg.get("data", {}).get("messageId") == a3)
+        r = send(t1a, "msg.recall", {"messageId": a2})
+        check("epoch T6 recall A2 ok", r["data"]["code"] == 0)
+        json.loads(t1b5.recv())  # recall_notify
+        r = send(t1b5, "group.offline_ack", {"groupId": eg1, "messageIds": [a1, a3]})
+        check("epoch T6 ack A1A3 (A2 recalled) ok", r["data"]["code"] == 0)
+        t1b5.close(); time.sleep(0.4)
+        t1b6 = WS(); assert login(t1b6, D2, "pw1234")["data"]["code"] == 0
+        omids = offline_ids(drain_ws(t1b6, 1.2))
+        check("epoch T6 recalled crossed (A3 not re-delivered)",
+              a1 not in omids and a3 not in omids)
+
+        # T7: ACK 落库后响应丢失即断线（不重放）；未 ACK 断线（必须重放）
+        b1 = send_msg(t1a, eg1, "T7B1", "t7b1-%s" % base, chat_type="group")["data"]["messageId"]
+        gg = json.loads(t1b6.recv())
+        check("epoch T7 online recv B1", gg.get("data", {}).get("messageId") == b1)
+        t1b6.send(env("group.offline_ack", {"groupId": eg1, "messageIds": [b1]}))
+        time.sleep(0.3)  # 让 ACK 先到服务端，再断线（不读 ack_res）
+        t1b6.close(); time.sleep(0.4)
+        t1b7 = WS(); assert login(t1b7, D2, "pw1234")["data"]["code"] == 0
+        omids = offline_ids(drain_ws(t1b7, 1.2))
+        check("epoch T7 raced ack persisted (B1 not replayed)", b1 not in omids)
+        b2 = send_msg(t1a, eg1, "T7B2", "t7b2-%s" % base, chat_type="group")["data"]["messageId"]
+        gg = json.loads(t1b7.recv())
+        check("epoch T7 online recv B2", gg.get("data", {}).get("messageId") == b2)
+        t1b7.close(); time.sleep(0.4)  # 未 ACK 即断线
+        t1b8 = WS(); assert login(t1b8, D2, "pw1234")["data"]["code"] == 0
+        omids = offline_ids(drain_ws(t1b8, 1.2))
+        check("epoch T7 unacked B2 replayed", b2 in omids)
+        r = send(t1b8, "group.offline_ack", {"groupId": eg1, "messageIds": [b2]})
+        check("epoch T7 ack B2 ok", r["data"]["code"] == 0)
+        t1b8.close(); t1a.close()
+
     a.close(); b.close()
 
     # 清理本次注册的测试账号及其关联消息（精确账号列表，不误删真实用户）

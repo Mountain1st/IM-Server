@@ -1,6 +1,7 @@
 #include "group_repository.hpp"
 
 #include "log.hpp"
+#include "server_config.hpp"
 
 #include <cstdlib>
 #include <cstring>
@@ -98,9 +99,10 @@ int64_t GroupRepository::createGroup(const std::string& name, int64_t ownerId,
   const int64_t gid = static_cast<int64_t>(mysql_stmt_insert_id(stmt));
   mysql_stmt_close(stmt);
   if (gid <= 0) return 0;
-  // 建群者自动入群
+  // 建群者自动入群：新群无消息，纪元边界显式写 (0,0)（不依赖列默认值漂移）
   MYSQL_STMT* s2 = client_.stmtExec(
-      "INSERT INTO group_members (group_id, user_id, joined_ts) VALUES (?, ?, ?)",
+      "INSERT INTO group_members (group_id, user_id, joined_ts, last_delivered_ts, "
+      "last_delivered_id) VALUES (?, ?, ?, 0, 0)",
       {std::to_string(gid), std::to_string(ownerId), std::to_string(now)}, &errNo);
   if (!s2) {
     LOG_E("[mysql] 建群者入群失败 errno=" << errNo);
@@ -300,15 +302,74 @@ bool GroupRepository::memberPeriod(int64_t groupId, int64_t userId, int64_t* joi
   return found;
 }
 
+bool GroupRepository::boundaryCursorLocked(int64_t groupId, int64_t* bts, int64_t* bid) {
+  // membership epoch 边界：该群当前最大 (ts,id)。无消息 → (0,0)。
+  if (bts) *bts = 0;
+  if (bid) *bid = 0;
+  if (!client_.ok() || groupId <= 0) return false;
+  int errNo = 0;
+  MYSQL_STMT* stmt = client_.stmtExec(
+      "SELECT ts, id FROM messages WHERE group_id = ? "
+      "ORDER BY ts DESC, id DESC LIMIT 1",
+      {std::to_string(groupId)}, &errNo);
+  if (!stmt) {
+    LOG_E("[mysql] 查询纪元边界失败 errno=" << errNo);
+    return false;
+  }
+  int64_t vts = 0, vid = 0;
+  MYSQL_BIND res[2];
+  memset(res, 0, sizeof res);
+  res[0].buffer_type = MYSQL_TYPE_LONGLONG;
+  res[0].buffer = &vts;
+  res[1].buffer_type = MYSQL_TYPE_LONGLONG;
+  res[1].buffer = &vid;
+  int fetchRc = -1;
+  if (mysql_stmt_bind_result(stmt, res) == 0 && mysql_stmt_store_result(stmt) == 0) {
+    fetchRc = mysql_stmt_fetch(stmt);
+  }
+  mysql_stmt_close(stmt);
+  if (fetchRc == 0) {
+    if (bts) *bts = vts;
+    if (bid) *bid = vid;
+    return true;
+  }
+  // 仅 NO_DATA（群内暂无消息）为合法空边界 (0,0)；bind/store/其它 fetch
+  // 异常均为查询失败——不得静默按 0 兜底（会把全部历史放回投递窗口）
+  if (fetchRc == MYSQL_NO_DATA) return true;
+  LOG_E("[mysql] 纪元边界结果读取失败: " << client_.errStr());
+  return false;
+}
+
 bool GroupRepository::addMember(int64_t groupId, int64_t userId, int64_t now) {
   std::lock_guard<std::mutex> lock(mutex_);
   if (!client_.ok()) return false;
+  // 确认制(on)：新入群/重入开启新 membership epoch——投递游标重置为纪元边界
+  // （入群前历史 (ts,id)<=边界，不进入连续 ACK 窗口、不阻塞游标）。
+  // off：保持旧水位线语义，不触碰游标列。
+  int64_t bts = 0, bid = 0;
+  const bool resetCursor = config::deliveryAckRequired();
+  if (resetCursor && !boundaryCursorLocked(groupId, &bts, &bid)) {
+    LOG_E("[mysql] 群加人失败: 纪元边界查询失败");
+    return false;
+  }
   int errNo = 0;
   // 新加或重入：重入时 joined_ts=now、left_ts=0（旧时段自然不可见）
   MYSQL_STMT* stmt = client_.stmtExec(
-      "INSERT INTO group_members (group_id, user_id, joined_ts) VALUES (?, ?, ?) "
-      "ON DUPLICATE KEY UPDATE joined_ts = VALUES(joined_ts), left_ts = 0",
-      {std::to_string(groupId), std::to_string(userId), std::to_string(now)}, &errNo);
+      resetCursor
+          ? "INSERT INTO group_members (group_id, user_id, joined_ts, last_delivered_ts, "
+            "last_delivered_id) VALUES (?, ?, ?, ?, ?) "
+            "ON DUPLICATE KEY UPDATE joined_ts = VALUES(joined_ts), left_ts = 0, "
+            "last_delivered_ts = VALUES(last_delivered_ts), "
+            "last_delivered_id = VALUES(last_delivered_id)"
+          : "INSERT INTO group_members (group_id, user_id, joined_ts) VALUES (?, ?, ?) "
+            "ON DUPLICATE KEY UPDATE joined_ts = VALUES(joined_ts), left_ts = 0",
+      resetCursor
+          ? std::vector<std::string>{std::to_string(groupId), std::to_string(userId),
+                                     std::to_string(now), std::to_string(bts),
+                                     std::to_string(bid)}
+          : std::vector<std::string>{std::to_string(groupId), std::to_string(userId),
+                                     std::to_string(now)},
+      &errNo);
   if (!stmt) {
     LOG_E("[mysql] 群加人失败 errno=" << errNo);
     return false;
@@ -333,11 +394,30 @@ int GroupRepository::addMemberCapped(int64_t groupId, int64_t userId, int64_t no
     if (k.compare(0, prefix.size(), prefix) == 0) ++n;
   }
   if (n >= cap) return 1; // 已满
+  // 确认制(on)：新纪元游标重置为入群瞬时边界（同 addMember，理由见该函数）
+  int64_t bts = 0, bid = 0;
+  const bool resetCursor = config::deliveryAckRequired();
+  if (resetCursor && !boundaryCursorLocked(groupId, &bts, &bid)) {
+    LOG_E("[mysql] 群加人失败: 纪元边界查询失败");
+    return 2;
+  }
   int errNo = 0;
   MYSQL_STMT* stmt = client_.stmtExec(
-      "INSERT INTO group_members (group_id, user_id, joined_ts) VALUES (?, ?, ?) "
-      "ON DUPLICATE KEY UPDATE joined_ts = VALUES(joined_ts), left_ts = 0",
-      {std::to_string(groupId), std::to_string(userId), std::to_string(now)}, &errNo);
+      resetCursor
+          ? "INSERT INTO group_members (group_id, user_id, joined_ts, last_delivered_ts, "
+            "last_delivered_id) VALUES (?, ?, ?, ?, ?) "
+            "ON DUPLICATE KEY UPDATE joined_ts = VALUES(joined_ts), left_ts = 0, "
+            "last_delivered_ts = VALUES(last_delivered_ts), "
+            "last_delivered_id = VALUES(last_delivered_id)"
+          : "INSERT INTO group_members (group_id, user_id, joined_ts) VALUES (?, ?, ?) "
+            "ON DUPLICATE KEY UPDATE joined_ts = VALUES(joined_ts), left_ts = 0",
+      resetCursor
+          ? std::vector<std::string>{std::to_string(groupId), std::to_string(userId),
+                                     std::to_string(now), std::to_string(bts),
+                                     std::to_string(bid)}
+          : std::vector<std::string>{std::to_string(groupId), std::to_string(userId),
+                                     std::to_string(now)},
+      &errNo);
   if (!stmt) {
     LOG_E("[mysql] 群加人失败 errno=" << errNo);
     return 2;

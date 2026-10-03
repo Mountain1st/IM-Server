@@ -64,6 +64,9 @@ private:
   void loadMembersCache();
   // 锁内全量查询现成员关系到 out；查询失败返回 false（不动 out）
   bool fetchActiveMembers(std::unordered_set<std::string>* out);
+  // 调用方须已持有 mutex_。群当前最大消息 (ts,id)=membership epoch 边界；
+  // 无消息写 (0,0)；查询失败返回 false（调用方按错误处理，不得静默用 0 兜底）。
+  bool boundaryCursorLocked(int64_t groupId, int64_t* bts, int64_t* bid);
 
   MySqlClient client_;
   std::mutex mutex_;  // 串行化 DB 访问 + 缓存读写

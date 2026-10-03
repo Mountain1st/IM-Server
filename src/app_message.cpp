@@ -91,8 +91,11 @@ void AppServer::pushOfflineMessages(int64_t userId,
     const bool ackRequired = config::deliveryAckRequired();
     int64_t cts = 0, cid = 0;
     groupRepo_->getDeliveredCursor(gid, userId, &cts, &cid);
-    const int64_t sinceTs = std::max(cts, joined - 1);
-    const int64_t sinceId = ackRequired ? ((sinceTs == cts) ? cid : 0) : -1;
+    // on：低界=持久游标纯值——membership epoch 边界由 addMember/重入时重置游标保证，
+    //     入群前历史 (ts,id)<=边界<游标 被排除，不再引用 joined 时间边界；
+    // off：保持旧语义 max(cts,joined-1) + sinceId<0（严格 ts>，同秒可见）。
+    const int64_t sinceTs = ackRequired ? cts : std::max(cts, joined - 1);
+    const int64_t sinceId = ackRequired ? cid : -1;
     auto grows = msgRepo_->fetchGroupMessages(gid, sinceTs, sinceId, left, 100, true);
     std::string gname;
     groupRepo_->getGroup(gid, &gname, nullptr);
