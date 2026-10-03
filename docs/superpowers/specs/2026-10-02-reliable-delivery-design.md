@@ -2,8 +2,9 @@
 
 > 状态：**部分被修订**。§5 的群游标推进/下界语义已由
 > `docs/superpowers/specs/2026-10-03-group-cursor-membership-epoch-design.md` **修订**：
-> - `:68` 的「群游标 `max((ts,id))` 推进」**作废**，实际语义为**连续可交付前缀**（`4acb731` 强制修订）；
-> - `:75` 的补发下界 `(max(wm,joined-1),0)` **作废**，改为成员资格纪元边界（见新规格 §3）。
+> - §5「游标推进」中的「群游标 `max((ts,id))` 推进 / `setWatermark(gid,uid,maxTs,maxId)`」**作废**，
+>   实际语义为**连续可交付前缀**（`4acb731` 强制修订）；
+> - §5「离线补发谓词」中的初值 `(max(wm,joined-1),0)` **作废**，改为成员资格纪元边界（新规格 §3）。
 > 其余（§3 双 ACK、§4 `msg.ack.messageId`、§6 开关、§7 真实 IP）仍有效。
 > 目标仓库：`IM-Server`（HEAD `5bdeb20`）。客户端配合改动见 §8。
 
@@ -67,17 +68,20 @@
 
 **游标推进（仅确认后）**：
 - **删除** `app_group.cpp:617` 的在线 `setWatermark` 与 `app_message.cpp:99` 的补发 `setWatermark`。
-- 仅 `applyDeliveryAcks` → 群分支推进成员游标：
-  `setWatermark(gid, uid, maxTs, maxId)`，其中 `(maxTs,maxId)=max((ts,id))` over 本批已确认且属于该群的成员消息。
-- **安全性**：同一连接内 `msg.recv` 按 `(ts,id)` 有序推送、客户端按序批量确认；单 TCP 丢帧会连带后续，故确认天然近似连续，`max` 推进不会越过未确认前缀。多设备各自连接、消息流一致，亦安全。极端乱序下的重复由客户端 `messageId` 去重兜底（at-least-once）。
+- ~~仅 `applyDeliveryAcks` → 群分支推进成员游标：
+  `setWatermark(gid, uid, maxTs, maxId)`，其中 `(maxTs,maxId)=max((ts,id))` over 本批已确认且属于该群的成员消息。~~
+  **[已作废]**：群游标为**连续可交付前缀**推进（见新规格 §3）；~~上一行 `max` 推进的"安全性"论证~~不再适用——
+  `max` 会越过空洞。实际实现见 `src/app_group.cpp` `onGroupOfflineAck`。
 
 **离线补发谓词（严格序）**：
 ```sql
 WHERE group_id=? AND ( ts > :sinceTs OR (ts = :sinceTs AND id > :sinceId) )
   [AND ts <= :untilTs]  ORDER BY ts ASC, id ASC LIMIT ?
 ```
-- `fetchGroupMessages(groupId, sinceTs, sinceId, untilTs, limit, asc)` 增加 `sinceId` 参数；`(sinceTs,sinceId)` 初值 `(max(wm,joined-1), 0)`。
-- 补发仍**不推进水位**；推进只发生在其后客户端 `msg.delivered`。
+- `fetchGroupMessages(groupId, sinceTs, sinceId, untilTs, limit, asc)` 增加 `sinceId` 参数；
+  ~~`(sinceTs,sinceId)` 初值 `(max(wm,joined-1), 0)`~~ **[已作废]**：on 模式初值 = 成员资格纪元边界，
+  不再引用 `joined-1`（新规格 §3.1/§3.3）。
+- 补发仍**不推进水位**；推进只发生在其后客户端 ACK。
 
 **在线群推送**：正常向在线成员 `reply(msg.recv)`；**不再** setWatermark；由成员确认推进。
 
@@ -114,7 +118,7 @@ WHERE group_id=? AND ( ts > :sinceTs OR (ts = :sinceTs AND id > :sinceId) )
 
 **单元**
 - 游标谓词：同秒多条 `(ts,id)` 严格序不漏、不重。
-- `applyDeliveryAcks`：单聊 0→1；群游标 max 推进；非成员忽略。
+- `applyDeliveryAcks`：单聊 0→1；群游标**连续前缀**推进；非成员忽略。
 - `msg.ack` 带 `messageId`。
 
 **业务回归（`scripts/biz_test.py` 新增）**
@@ -130,4 +134,4 @@ WHERE group_id=? AND ( ts > :sinceTs OR (ts = :sinceTs AND id > :sinceId) )
 
 - 协议/DB 迁移需与服务端既有 v3.2 兼容；`group_members` 加列需幂等迁移（既有 migration 机制）。
 - 过渡期开关管理：`off→on` 需客户端全量更新后。
-- `max` 推进假设（同连接有序确认）已在 §5 论证；极端乱序由客户端去重兜底。
+- ~~`max` 推进假设~~ **[已作废]**：群游标为连续可交付前缀（新规格 §3），`max` 论证不再适用。
