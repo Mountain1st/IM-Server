@@ -364,18 +364,23 @@ def main():
     except socket.timeout:
         r = None
     check("self to acct no msg.recv echo", r is None)
-    # to 传自身登录账号（字符串/数字）也是自己对话框
-    for i, target in enumerate((C, int(C))):
+    # to 传自身登录账号（字符串/数字）也是自己对话框。
+    # 注意：数字形态仅在 int 往返无损时才有意义——账号以 0 开头时 int(C) 会丢前导零
+    # 变成另一个数（非账号非合法 userId），属客户端无法无损传数字的账号，跳过该子例。
+    targets = [("str", C)]
+    if str(int(C)) == C:
+        targets.append(("int", int(C)))
+    for i, (tname, target) in enumerate(targets):
         c1.send(env("msg.send", {"to": target, "content": "to self acct",
                                  "clientMsgId": "selfacct%d" % i}))
         r = json.loads(c1.recv())
-        check("self account ack ok (%s)" % type(target).__name__,
+        check("self account ack ok (%s)" % tname,
               r["type"] == "msg.ack" and r["data"]["code"] == 0)
         try:
             r = c1.recv(0.5)
         except socket.timeout:
             r = None
-        check("self account no msg.recv echo (%s)" % type(target).__name__, r is None)
+        check("self account no msg.recv echo (%s)" % tname, r is None)
     # 发给自己的 userId：只回 ack，不投递 msg.recv
     c1.send(env("msg.send", {"to": carol, "content": "to self", "clientMsgId": "self1"}))
     r = json.loads(c1.recv())
