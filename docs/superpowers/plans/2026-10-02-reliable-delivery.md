@@ -1,6 +1,9 @@
 # 可靠投递语义 v1（P0.5）实现计划
 
 > 依赖规格：`docs/superpowers/specs/2026-10-02-reliable-delivery-design.md`。
+> **T5 已被修订**：群补发下界不再用 `(max(wm,joined-1),0)`，改为成员资格纪元边界——
+> 见 `docs/superpowers/plans/2026-10-03-group-cursor-membership-epoch.md`。T3 的 `setWatermark(max)`
+> 亦以连续前缀为准。
 > 顺序固定：T1→T2→T3→T4→T5→T6→T7；T8 为客户端仓库跟进。
 
 ## T1 Schema 与仓储：复合游标 `(ts,id)`
