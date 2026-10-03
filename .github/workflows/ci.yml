@@ -4,8 +4,18 @@ on: [push, pull_request]
 
 jobs:
   test:
+    # 双模式矩阵（任务④）：off（阶段A 旧语义）/ on（阶段B 确认制）各跑完整
+    # build+单测+内存/Redis/ASan 业务回归——biz 投递段按 IM_DELIVERY_ACK_REQUIRED=1
+    # 门禁执行；off/on 是产品两条不同代码路径，防止只保旧语义。
+    name: test (ack-${{ matrix.delivery_ack }})
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false  # 任一模式失败也要看到另一种模式结果
+      matrix:
+        delivery_ack: ["0", "1"]
     env:
+      # 投递语义模式（0=off 旧语义 / 1=on 确认制）
+      IM_DELIVERY_ACK_REQUIRED: ${{ matrix.delivery_ack }}
       # 一次性 CI 容器的密码（run 结束即焚，无生产价值；源码/模板已脱敏）
       IM_MYSQL_PASSWORD: "520010"
       # 媒体对象存储（MinIO）测试配置：媒体用例据此启用，未设则整段 SKIP

@@ -25,16 +25,21 @@ cmake --build build-ci -j"$(nproc)" 2>&1 | grep -E "error|Error" && exit 1 || tr
 echo "=== [3/5] 单元测试 ==="
 ctest --test-dir build-ci --output-on-failure 2>&1 | tail -2
 
-echo "=== [4/5] 业务回归（内存模式） ==="
-IM_SERVER_BIN=./build-ci/imserver bash scripts/test_biz.sh 2>&1 | tail -1
-
-if [ "$REDIS_OK" = "1" ]; then
-  echo "=== [5/5] 业务回归（Redis 模式） ==="
-  IM_REDIS_ENABLED=1 IM_REDIS_PORT=6379 IM_SERVER_BIN=./build-ci/imserver \
+# 业务回归双模式（任务④，与 GitHub Actions matrix 对齐）：
+# 0=off 阶段A 旧语义 / 1=on 阶段B 确认制——biz 投递/媒体 GC 等段按开关门禁执行
+for ACK in 0 1; do
+  echo "=== [4/5] 业务回归（内存模式 ack=$ACK） ==="
+  IM_DELIVERY_ACK_REQUIRED=$ACK IM_SERVER_BIN=./build-ci/imserver \
     bash scripts/test_biz.sh 2>&1 | tail -1
-else
-  echo "=== [5/5] 业务回归（Redis 模式）：SKIP ==="
-fi
+
+  if [ "$REDIS_OK" = "1" ]; then
+    echo "=== [5/5] 业务回归（Redis 模式 ack=$ACK） ==="
+    IM_DELIVERY_ACK_REQUIRED=$ACK IM_REDIS_ENABLED=1 IM_REDIS_PORT=6379 \
+      IM_SERVER_BIN=./build-ci/imserver bash scripts/test_biz.sh 2>&1 | tail -1
+  else
+    echo "=== [5/5] 业务回归（Redis 模式 ack=$ACK）：SKIP ==="
+  fi
+done
 
 if [ "$1" = "--full" ]; then
   echo "=== [+] Sanitizer（ASan+UBSan）构建与全链路 ==="
@@ -42,10 +47,13 @@ if [ "$1" = "--full" ]; then
   cmake -B build-ci-asan -DIM_SANITIZE=ON 2>&1 | tail -1
   cmake --build build-ci-asan -j"$(nproc)" 2>&1 | grep -E " error" && exit 1 || true
   ctest --test-dir build-ci-asan --output-on-failure 2>&1 | tail -2
-  IM_SERVER_BIN=./build-ci-asan/imserver ASAN_OPTIONS=detect_leaks=1 \
-    bash scripts/test_biz.sh 2>&1 | tail -1
-  grep -cE 'AddressSanitizer|runtime error' server.log \
-    && { echo "FAIL: Sanitizer 有报告"; exit 1; } || echo "Sanitizer 零报告"
+  for ACK in 0 1; do
+    echo "=== [+] Sanitizer 业务回归（ack=$ACK） ==="
+    IM_DELIVERY_ACK_REQUIRED=$ACK IM_SERVER_BIN=./build-ci-asan/imserver \
+      ASAN_OPTIONS=detect_leaks=1 bash scripts/test_biz.sh 2>&1 | tail -1
+    grep -E 'AddressSanitizer|runtime error' server.log \
+      && { echo "FAIL: Sanitizer 有报告（ack=$ACK）"; exit 1; } || echo "Sanitizer 零报告（ack=$ACK）"
+  done
 fi
 
 rm -rf build-ci build-ci-asan
