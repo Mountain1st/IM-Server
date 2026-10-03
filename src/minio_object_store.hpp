@@ -2,6 +2,7 @@
 #include "object_store.hpp"
 
 #include <string>
+#include <vector>
 
 namespace im {
 
@@ -25,6 +26,8 @@ class MinioObjectStore : public ObjectStore {
                           const std::string& amzDate = "") override;
   ObjectInfo headObject(const std::string& key) override;
   bool deleteObject(const std::string& key) override;
+  bool getObject(const std::string& key, size_t maxBytes,
+                 std::vector<uint8_t>* out) override;
 
  private:
   MinioConfig cfg_;

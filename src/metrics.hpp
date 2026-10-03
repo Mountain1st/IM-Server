@@ -19,6 +19,8 @@ struct Metrics {
   std::atomic<uint64_t> messagesDelivered{0};   // 客户端确认投递数（ACK 驱动）
   std::atomic<uint64_t> messagesOffline{0};     // 离线入队消息数
   std::atomic<uint64_t> writeOverflows{0};      // 写缓冲超限断开
+  // 媒体（任务② M1：commit 内容校验）
+  std::atomic<uint64_t> mediaCommitRejected{0};      // commit 内容校验拒绝数（magic/MIME/维度）
 };
 
 extern Metrics g_metrics;

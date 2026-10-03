@@ -179,6 +179,8 @@ im_add_unit_test(login_guard_test tests/login_guard_test.cpp)
 im_add_unit_test(tcpserver_test tests/tcpserver_test.cpp)
 im_add_unit_test(threadpool_test tests/threadpool_test.cpp)
 im_add_unit_test(media_store_test tests/test_media_store.cpp)
+# MediaService 直连测试：fake 仓储/对象存储（media_service.cpp 依赖 g_metrics）
+im_add_unit_test(media_service_test tests/media_service_test.cpp src/media_service.cpp src/metrics.cpp)
 im_add_unit_test(crypto_test tests/crypto_test.cpp)
 im_add_unit_test(sigv4_test tests/sigv4_test.cpp)
 im_add_unit_test(minio_object_store_test tests/minio_object_store_test.cpp src/minio_object_store.cpp)

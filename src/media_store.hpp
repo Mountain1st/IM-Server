@@ -24,6 +24,8 @@ class MediaStore {
   static std::optional<std::vector<uint8_t>> b64Decode(std::string_view s);
   // 按 magic + 维度解析类型；w/h 可为空；非法/SVG/超限返回 kReject
   static MediaKind detectKind(const std::vector<uint8_t>& bytes, int* w = nullptr, int* h = nullptr);
+  // 类型对应的规范 MIME（kReject → application/octet-stream）；供 commit 与声明 MIME 比对
+  static const char* mimeOf(MediaKind k);
   // 解码→校验→HMAC 对象键落盘，成功返回 "/uploads/<64hex>.<ext>"
   static std::optional<std::string> decodeAndStore(std::string_view b64, const std::string& dir);
   // 过期清理：删除 dir 下超过 olderThanSec 未修改的媒体文件，返回删除数。

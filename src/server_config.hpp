@@ -130,6 +130,11 @@ inline constexpr std::chrono::seconds kMediaWindow(60);
 inline constexpr size_t kMediaPresignPerWindow = 30;
 // 未 commit 的 PENDING 记录保留时长（24h 后由 GC 回收）
 inline constexpr int64_t kMediaPendingTtlSec = 24 * 3600;
+// COMMITTED 但无消息引用的孤儿媒体保留时长（7 天后由 GC 回收）。
+// 远大于「commit→msg.send」的正常间隔，避免误删正在发送的媒体。
+inline constexpr int64_t kMediaOrphanTtlSec = 7 * 86400;
+// commit 内容校验下载的对象前缀上限（256KB）：四类图片头部/维度均在前部
+inline constexpr size_t kMediaValidatePrefixBytes = 256 * 1024;
 // GC 单轮回收条数上限
 inline constexpr int kMediaGcBatch = 100;
 // media.url 单次批量签名上限（防单包触发海量 DB 查询）

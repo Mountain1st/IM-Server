@@ -23,6 +23,26 @@ size_t discardBody(char* ptr, size_t size, size_t nmemb, void* userdata) {
   return size * nmemb;
 }
 
+// 前缀下载写回调：累积到 cap 字节后中止传输（truncated=true 标记为主动截断）。
+// 返回值必须等于 n，否则 libcurl 以 CURLE_WRITE_ERROR 中止——这正是截断所需。
+struct PrefixSink {
+  std::vector<uint8_t>* out = nullptr;
+  size_t cap = 0;
+  bool truncated = false;
+};
+size_t collectPrefix(char* ptr, size_t size, size_t nmemb, void* userdata) {
+  auto* sink = static_cast<PrefixSink*>(userdata);
+  const size_t n = size * nmemb;
+  const size_t remain = sink->out->size() < sink->cap ? sink->cap - sink->out->size() : 0;
+  const size_t take = std::min(n, remain);
+  sink->out->insert(sink->out->end(), ptr, ptr + take);
+  if (take < n || sink->out->size() >= sink->cap) {
+    sink->truncated = true;
+    return take;  // take<n 或已满：中止（CURLE_WRITE_ERROR）
+  }
+  return n;
+}
+
 // MinioConfig → SigV4Config（两者字段同源，pathStyle/scheme 直通）
 SigV4Config toSigV4(const MinioConfig& c) {
   SigV4Config s;
@@ -133,6 +153,40 @@ bool MinioObjectStore::deleteObject(const std::string& key) {
     ok = httpCode >= 200 && httpCode < 300;
   }
   curl_easy_cleanup(curl);
+  return ok;
+}
+
+bool MinioObjectStore::getObject(const std::string& key, size_t maxBytes,
+                                 std::vector<uint8_t>* out) {
+  if (!enabled_ || out == nullptr || maxBytes == 0) return false;
+  const std::string date = nowAmzDate();
+  // 与服务端其它对象操作同一先例：预签名 GET + libcurl（不写第二套 header 认证）
+  SigV4Request req{"GET", key, date, 300};
+  const std::string url = sigV4Presign(toSigV4(cfg_), req);
+  if (url.empty()) return false;
+
+  ensureCurlInit();
+  CURL* curl = curl_easy_init();
+  if (!curl) return false;
+
+  out->clear();
+  out->reserve(maxBytes);
+  PrefixSink sink{out, maxBytes};
+  curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
+  curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, collectPrefix);
+  curl_easy_setopt(curl, CURLOPT_WRITEDATA, &sink);
+  curl_easy_setopt(curl, CURLOPT_TIMEOUT, 10L);
+  curl_easy_setopt(curl, CURLOPT_NOSIGNAL, 1L);
+
+  const CURLcode rc = curl_easy_perform(curl);
+  long httpCode = 0;
+  curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &httpCode);
+  curl_easy_cleanup(curl);
+  // 成功条件：HTTP 2xx 且（正常读完 或 命中 maxBytes 主动截断）。
+  // 截断但 HTTP 非 2xx（如 404 且响应体写满）不算成功——防把错误页当对象字节。
+  const bool httpOk = httpCode >= 200 && httpCode < 300;
+  const bool ok = httpOk && (rc == CURLE_OK || (rc == CURLE_WRITE_ERROR && sink.truncated));
+  if (!ok) out->clear();
   return ok;
 }
 

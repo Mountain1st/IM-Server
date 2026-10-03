@@ -93,7 +93,9 @@ const char* kindExt(MediaKind k) {
   return "bin";
 }
 
-const char* kindMime(MediaKind k) {
+}  // namespace
+
+const char* MediaStore::mimeOf(MediaKind k) {
   switch (k) {
     case MediaKind::kPng: return "image/png";
     case MediaKind::kJpeg: return "image/jpeg";
@@ -103,8 +105,6 @@ const char* kindMime(MediaKind k) {
   }
   return "application/octet-stream";
 }
-
-}  // namespace
 
 // 对象键命名模式检查：64 位小写 hex + 图片扩展名
 bool isMediaObjectName(const std::string& name) {
@@ -331,7 +331,7 @@ std::optional<std::string> MediaStore::decodeAndStore(std::string_view b64, cons
   }
   std::string target = dir + "/" + fileName;
   if (std::filesystem::exists(target, ec) && !ec) {
-    LOG_I("[media] 命中去重：mime=" << kindMime(kind) << " bytes=" << raw->size() << " file=" << fileName);
+    LOG_I("[media] 命中去重：mime=" << MediaStore::mimeOf(kind) << " bytes=" << raw->size() << " file=" << fileName);
     return std::string("/uploads/") + fileName;
   }
 
@@ -365,7 +365,7 @@ std::optional<std::string> MediaStore::decodeAndStore(std::string_view b64, cons
     return std::nullopt;
   }
   // 只记大小 / mime / 文件名，不打字节
-  LOG_I("[media] 落盘成功：mime=" << kindMime(kind) << " bytes=" << raw->size() << " w=" << w << " h=" << h
+  LOG_I("[media] 落盘成功：mime=" << MediaStore::mimeOf(kind) << " bytes=" << raw->size() << " w=" << w << " h=" << h
                                  << " file=" << fileName);
   return std::string("/uploads/") + fileName;
 }

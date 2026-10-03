@@ -269,6 +269,7 @@ void Session::serveHealth() {
       << ",\"messagesDelivered\":" << g_metrics.messagesDelivered.load(std::memory_order_relaxed)
       << ",\"messagesOffline\":" << g_metrics.messagesOffline.load(std::memory_order_relaxed)
       << ",\"writeOverflows\":" << g_metrics.writeOverflows.load(std::memory_order_relaxed)
+      << ",\"mediaCommitRejected\":" << g_metrics.mediaCommitRejected.load(std::memory_order_relaxed)
       << "}\r\n";
   conn_->send(oss.str());
   conn_->shutdownAfterFlush();

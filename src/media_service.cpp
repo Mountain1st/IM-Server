@@ -11,12 +11,15 @@
 #include "media_service.hpp"
 
 #include "log.hpp"
+#include "media_store.hpp"
+#include "metrics.hpp"
 #include "server_config.hpp"
 
 #include <cstdio>
 #include <ctime>
 #include <random>
 #include <utility>
+#include <vector>
 
 namespace im {
 namespace {
@@ -84,7 +87,7 @@ std::string MediaService::objectKey(int64_t userId, const std::string& fileId,
   int year = 0;
   int month = 0;
   utcYearMonth(&year, &month);
-  char ym[16];
+  char ym[32];  // 容 int 极值下的 "%04d/%02d" 最坏展开（防 -Wformat-truncation）
   std::snprintf(ym, sizeof(ym), "%04d/%02d", year, month);
   return prefix_ + "/" + std::to_string(userId) + "/" + ym + "/" + fileId +
          mimeExt(mime);
@@ -234,8 +237,30 @@ CommitResult MediaService::commit(int64_t userId, const std::string& fileId,
     r.msg = "文件大小不匹配";
     return r;
   }
-  if (!repo_->commit(fileId, static_cast<int64_t>(info.size), width, height,
-                     duration)) {
+  // 内容校验（P0-3）：下载对象前缀，按 magic 复核真实类型与维度。
+  // 声明 MIME 只是白名单提示，实际字节必须匹配（防伪装文件/SVG/超限图进入 COMMITTED）。
+  std::vector<uint8_t> prefix;
+  if (!store_->getObject(rec->objectKey, config::kMediaValidatePrefixBytes, &prefix)) {
+    // HEAD 成功但 GET 失败：对象存储异常，503 可重试（不计校验拒绝）
+    r.code = 503;
+    r.msg = "对象存储不可用";
+    return r;
+  }
+  int vw = 0, vh = 0;
+  const MediaKind kind = MediaStore::detectKind(prefix, &vw, &vh);
+  if (kind == MediaKind::kReject || rec->mimeType != MediaStore::mimeOf(kind)) {
+    // 非法内容或声明 MIME 与实际不符：保持 PENDING（由 PENDING GC 兜底回收）
+    g_metrics.mediaCommitRejected.fetch_add(1, std::memory_order_relaxed);
+    LOG_W("[media] commit 校验拒绝：声明 mime=" << rec->mimeType
+          << " 实际=" << MediaStore::mimeOf(kind) << " bytes(前缀)=" << prefix.size());
+    r.code = 400;
+    r.msg = "媒体内容校验失败";
+    return r;
+  }
+  // 宽高以服务端解析值为准（客户端上报值忽略），与「size 以 HEAD 为准」同一先例
+  (void)width;
+  (void)height;
+  if (!repo_->commit(fileId, static_cast<int64_t>(info.size), vw, vh, duration)) {
     r.code = 500;
     r.msg = "提交失败";
     return r;

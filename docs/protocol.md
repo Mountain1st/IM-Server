@@ -135,7 +135,7 @@
 | `group.rename` | `{ "groupId": 1, "name": "新群名" }` | 改群名（v2.0，仅群主，`name` 非空且长度 ≤ 32），回 `group.rename_res`；成功推送在线成员 `group.renamed` |
 | `group.announce` | `{ "groupId": 1, "content": "公告正文" }` | 群公告（v2.0，仅群主，`content` ≤ 1024 字节，空=清空），回 `group.announce_res`；成功推送在线成员 `group.announced`（正文走 `group.list` 拉取） |
 | `media.presign` | `{ "fileName": "a.png", "mimeType": "image/png", "size": 102400, "kind": "image" }` | 申请媒体上传（v3.0，须登录）：服务端校验 `kind`（V1 仅 `"image"`）/`mimeType` 白名单/`size`（≤20MB）/文件名后，生成 `fileId` 并落 `media` 表 PENDING 行，回 `media.presign_res`（携带 PUT 预签名 URL）；**每用户 30 次/分钟限流** |
-| `media.commit` | `{ "fileId": "<32位hex>", "size": 102400, "width": 800, "height": 600, "duration": 0 }` | 提交媒体（v3.0，须登录，仅上传者可提交）：服务端对对象存储 `HEAD` 校验对象存在且**实际大小与声明 `size` 一致**（以 HEAD 为准，防超传绕过），`width/height/duration` 为客户端上报元数据（服务端不生成缩略图）；成功 PENDING→COMMITTED，回 `media.commit_res`；重复提交幂等 |
+| `media.commit` | `{ "fileId": "<32位hex>", "size": 102400, "width": 800, "height": 600, "duration": 0 }` | 提交媒体（v3.0，须登录，仅上传者可提交）：服务端对对象存储 `HEAD` 校验对象存在且**实际大小与声明 `size` 一致**（以 HEAD 为准，防超传绕过）；**内容校验（v3.3.2）**：下载对象前缀（≤256KB）按 magic 复核真实类型（PNG/JPEG/GIF/WebP）且与 presign 声明 `mimeType` 一致、任一边 ≤4096，**不符回 `400 媒体内容校验失败` 并保持 PENDING**（伪装文件/SVG/超限图不得 COMMITTED）；`width/height` 以服务端解析为准（客户端上报值仅供兼容，服务端不生成缩略图）；成功 PENDING→COMMITTED，回 `media.commit_res`；重复提交幂等 |
 | `media.url` | `{ "fileId": "<32位hex>" }` 或 `{ "fileIds": ["...", ...] }` | 取媒体访问 URL（v3.0，须登录且**须为消息相关方**）：鉴权通过后签发短期 GET 预签名 URL，回 `media.url_res`（`urls` 为 `{fileId: {url, expiresIn}}` 映射）；单值 `fileId` 与批量 `fileIds`（≤100）均支持；越权回 403 |
 
 心跳不在业务指令层：保活由 WebSocket 协议层 Ping/Pong 承担（服务器每 30 秒发 Ping，60 秒无响应判僵尸断开），客户端无需发送心跳指令。
@@ -215,7 +215,7 @@
 | `group.renamed` | `{ "groupId": 1, "name": "..." }` | 改群名推送（v2.0），推送给群内在线成员 |
 | `group.announced` | `{ "groupId": 1 }` | 群公告推送（v2.0，正文走 `group.list` 拉取，避免大包扇出），推送给群内在线成员 |
 | `media.presign_res` | `{ "code": 0, "msg": "ok", "data": { "fileId": "<32位hex>", "uploadUrl": "http://...&X-Amz-Signature=...", "expiresIn": 900 } }` | 申请上传结果（v3.0）：`fileId` 为媒体唯一标识（32 位 hex），`uploadUrl` 为 PUT 预签名直传 URL，`expiresIn` 为有效期秒（900）；`400` 参数错误（kind/mime/size/fileName 非法）、`413` 文件过大、`429` 请求过于频繁、`503` 对象存储不可用 |
-| `media.commit_res` | `{ "code": 0, "msg": "ok", "data": {} }` | 提交结果（v3.0）：成功 `code=0`；`400` 参数错误 / 媒体状态不可提交 / 对象不存在 / 文件大小不匹配、`403` 无权操作该媒体、`404` 媒体不存在、`413` 文件过大、`503` 对象存储不可用；已 COMMITTED 重复提交幂等回 `code=0` |
+| `media.commit_res` | `{ "code": 0, "msg": "ok", "data": {} }` | 提交结果（v3.0）：成功 `code=0`；`400` 参数错误 / 媒体状态不可提交 / 对象不存在 / 文件大小不匹配 / **媒体内容校验失败（v3.3.2）**、`403` 无权操作该媒体、`404` 媒体不存在、`413` 文件过大、`503` 对象存储不可用；已 COMMITTED 重复提交幂等回 `code=0` |
 | `media.url_res` | `{ "code": 0, "msg": "ok", "data": { "urls": { "<fileId>": { "url": "http://...&X-Amz-Signature=...", "expiresIn": 3600 }, ... } } }` | 取 URL 结果（v3.0）：`urls` 为 `fileId → {url, expiresIn}` 映射；单值项成功只含 `{url,expiresIn}`，失败项为 `{code,msg}`（如 `403 无权访问该媒体`/`404 媒体不存在`）；整包 `code` 为 `0`，逐项错误在 `urls` 值内。顶层 `400` 参数错误（缺 `fileId`/`fileIds`、非串/非数组、批量 >100） |
 | `error` | `{ "code": 400, "msg": "..." }` | 通用错误事件（简式结构） |
 
