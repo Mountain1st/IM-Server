@@ -40,6 +40,10 @@ public:
   bool isMember(int64_t groupId, int64_t userId);  // 现成员（走缓存）
   // 成员关系（含退群）：有行返回 true（写出 joinedTs/leftTs，leftTs==0 表示在群）。
   bool memberPeriod(int64_t groupId, int64_t userId, int64_t* joinedTs, int64_t* leftTs);
+  // 入群边界（v3.4，未读窗口用）：写出 (joined_ts, joined_boundary_id) 严格边界。
+  // 有行返回 true；无行/查询失败返回 false。
+  bool getJoinBoundary(int64_t groupId, int64_t userId, int64_t* joinedTs,
+                       int64_t* boundaryId);
   // 加人（新加或重入：重入时 joined_ts=now、left_ts=0）。成功返回 true。
   bool addMember(int64_t groupId, int64_t userId, int64_t now);
   // 带上限的原子加人（B4：校验与插入同一临界区，防 TOCTOU 击穿上限）。
@@ -59,6 +63,12 @@ public:
   bool advanceDeliveredCursor(int64_t groupId, int64_t userId, int64_t ts, int64_t id);
   // 阶段A(off)兼容：无条件设 ts 分量（旧“水位线”语义），id 置 0。返回 true=成功。
   bool setWatermarkTs(int64_t groupId, int64_t userId, int64_t ts);
+
+  // ---- 已读游标（v3.4，语义=成员最后阅读到的位置，用户级；≠ 投递游标）----
+  // 返回 (last_read_ts, last_read_id)（无行返回 0,0）
+  void getReadCursor(int64_t groupId, int64_t userId, int64_t* ts, int64_t* id);
+  // 严格只进推进（与 advanceDeliveredCursor 同 CAS 语义）；返回 true=成功或无需更新
+  bool advanceReadCursor(int64_t groupId, int64_t userId, int64_t ts, int64_t id);
 
 private:
   void loadMembersCache();

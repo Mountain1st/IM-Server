@@ -2051,7 +2051,9 @@ def main():
     check("conv list sorted desc", order == sorted(order, reverse=True))
     check("conv list newest is group", convs[0]["chatType"] == "group"
           and convs[0]["groupId"] == cgid and convs[0]["groupName"] == "会话群")
-    check("conv group unread placeholder 0", convs[0]["unreadCount"] == 0
+    # v3.4：群未读真实值——V2 群发 1 条且未撤回前 v1 未读；此处消息已撤回
+    # → 撤回退出未读，故 v1 视角群未读 0、已读游标仍 0（从未 group.read）
+    check("conv group unread after recall 0", convs[0]["unreadCount"] == 0
           and convs[0]["lastReadTs"] == 0)
     check("conv group lastMsgRecalled", convs[0]["lastMsgRecalled"] is True
           and convs[0]["lastMsgType"] == "text")
@@ -2091,6 +2093,139 @@ def main():
     check("conv peer view", len(v2by) == 1 and v2by[V1]["unreadCount"] == 1)
     v1.close(); v2.close(); v3.close()
 
+    # ================= 群已读/未读（v3.4）=================
+    # GR1 群主、GR2 成员、GR3 非成员；GR2 第二端（token）验证多端 read_notify
+    # 后缀 84-86：避开 cap_accounts（16-74 连续分配）与既有 V/D/M 系列
+    GR1, GR2, GR3 = base + "84", base + "85", base + "86"
+    gr1 = WS(); gr2 = WS()
+    assert register(gr1, GR1, "pw1234")["data"]["code"] == 0
+    assert login(gr1, GR1, "pw1234")["data"]["code"] == 0
+    assert register(gr2, GR2, "pw1234")["data"]["code"] == 0
+    lr2 = login(gr2, GR2, "pw1234")
+    assert lr2["data"]["code"] == 0
+    gr2_token = lr2["data"]["data"]["token"]
+    # 邀请要求对方是联系人：GR1→GR2、GR1→GR3 建立好友
+    gr3_pre = WS(); register(gr3_pre, GR3, "pw1234"); login(gr3_pre, GR3, "pw1234")
+    for web, acct in ((gr2, GR2), (gr3_pre, GR3)):
+        gr1.send(env("contact.request", {"account": acct})); json.loads(gr1.recv())
+        web.send(env("contact.accept", {"account": GR1})); json.loads(web.recv())
+        json.loads(gr1.recv()); json.loads(web.recv())
+    gr3_pre.close()
+    r = send(gr1, "group.create", {"name": "已读群"})
+    check("gread create ok", r["data"]["code"] == 0)
+    grgid = r["data"]["data"]["groupId"]
+    r = send(gr1, "group.invite", {"groupId": grgid, "account": GR2})
+    check("gread invite ok", r["data"]["code"] == 0)
+    json.loads(gr1.recv())  # member_changed
+    json.loads(gr2.recv())  # group.added
+    time.sleep(1.1)
+    # GR1 发两条（GR2 未读应=2）；GR2 自发一条（不计自己未读，GR1 未读+1）
+    m_a = send_msg(gr1, grgid, "ga", "gr-a-%s" % base, chat_type="group")["data"]["messageId"]
+    json.loads(gr2.recv())
+    m_b = send_msg(gr1, grgid, "gb", "gr-b-%s" % base, chat_type="group")["data"]["messageId"]
+    json.loads(gr2.recv())
+    send_msg(gr2, grgid, "gc", "gr-c-%s" % base, chat_type="group")
+    json.loads(gr1.recv())
+    # GR2 列表：群未读=2（自发不计）
+    r = send(gr2, "conversation.list", {"limit": 10})
+    g2conv = [c for c in r["data"]["data"]["conversations"]
+              if c["chatType"] == "group" and c["groupId"] == grgid]
+    check("gread unread count 2", len(g2conv) == 1
+          and g2conv[0]["unreadCount"] == 2 and g2conv[0]["lastReadTs"] == 0)
+    # GR1 列表：未读=1（GR2 的 gc）
+    r = send(gr1, "conversation.list", {"limit": 10})
+    g1conv = [c for c in r["data"]["data"]["conversations"]
+              if c["chatType"] == "group" and c["groupId"] == grgid]
+    check("gread unread excludes own", len(g1conv) == 1
+          and g1conv[0]["unreadCount"] == 1)
+    # 撤回 m_b → GR2 未读降为 1（撤回退出未读）
+    r = send(gr1, "msg.recall", {"messageId": m_b})
+    check("gread recall ok", r["data"]["code"] == 0)
+    json.loads(gr2.recv())  # recall_notify
+    r = send(gr2, "conversation.list", {"limit": 10})
+    g2conv = [c for c in r["data"]["data"]["conversations"]
+              if c["chatType"] == "group" and c["groupId"] == grgid]
+    check("gread recall exits unread", g2conv[0]["unreadCount"] == 1)
+    # 按类型收帧（多端场景：回显/补发等推送可能与目标帧交错）
+    def recv_until(w, typ, tmo=2.0):
+        w.s.settimeout(tmo)
+        try:
+            while True:
+                f = json.loads(w.recv())
+                if f.get("type") == typ:
+                    return f
+        except Exception:
+            return None
+        finally:
+            w.s.settimeout(5)
+
+    # GR2 第二端（token 登录）用于验证 read_notify 多端同步
+    gr2b = WS()
+    gr2b.send(env("auth.token", {"token": gr2_token}))
+    r = json.loads(gr2b.recv())
+    check("gread second device login ok",
+          r["type"] == "auth.token_res" and r["data"]["code"] == 0)
+    # 伪造/跨群 messageId：不存在 404
+    r = send(gr2, "group.read", {"groupId": grgid, "messageId": "no-such-msg"})
+    check("gread unknown message 404", r["data"]["code"] == 404)
+    # 跨群 messageId：gr1 另建群发一条，拿其 id 到本群 read → 400
+    r = send(gr1, "group.create", {"name": "他群"})
+    other_gid = r["data"]["data"]["groupId"]
+    m_x = send_msg(gr1, other_gid, "x", "gr-x-%s" % base, chat_type="group")["data"]["messageId"]
+    r = send(gr2, "group.read", {"groupId": grgid, "messageId": m_x})
+    check("gread cross-group message 400", r["data"]["code"] == 400)
+    # GR2 发一条作为最后可见消息（拿回 messageId），read 到最后可见应跨过更早未读
+    m_d = send_msg(gr2, grgid, "gd", "gr-d-%s" % base, chat_type="group")["data"]["messageId"]
+    json.loads(gr1.recv())
+    r = send(gr2, "group.read", {"groupId": grgid, "messageId": m_d})
+    check("gread read ok", r["data"]["code"] == 0)
+    # 第二端收到 read_notify（帧流中可能先有 m_d 多端回显，按类型取）
+    nt = recv_until(gr2b, "group.read_notify", 2.0)
+    check("gread notify to other device", nt is not None
+          and nt["data"].get("groupId") == grgid)
+    # GR2 列表：未读归零、lastReadTs > 0
+    r = send(gr2, "conversation.list", {"limit": 10})
+    g2conv = [c for c in r["data"]["data"]["conversations"]
+              if c["chatType"] == "group" and c["groupId"] == grgid]
+    check("gread read zeroes unread", g2conv[0]["unreadCount"] == 0
+          and g2conv[0]["lastReadTs"] > 0)
+    # 幂等/回退：重复 read 旧消息（m_d 之前的 m_a）不回退
+    r = send(gr2, "group.read", {"groupId": grgid, "messageId": m_a})
+    check("gread backward idempotent", r["data"]["code"] == 0)
+    r = send(gr2, "conversation.list", {"limit": 10})
+    g2conv = [c for c in r["data"]["data"]["conversations"]
+              if c["chatType"] == "group" and c["groupId"] == grgid]
+    check("gread cursor not regressed", g2conv[0]["unreadCount"] == 0)
+    # 非成员 GR3：403（GR3 已在建好友时注册，此处仅重登）
+    gr3 = WS(); assert login(gr3, GR3, "pw1234")["data"]["code"] == 0
+    r = send(gr3, "group.read", {"groupId": grgid, "messageId": m_d})
+    check("gread non-member 403", r["data"]["code"] == 403)
+    gr3.close()
+    # GR3 入群后：入群前消息（含 m_d）不计未读
+    r = send(gr1, "group.invite", {"groupId": grgid, "account": GR3})
+    check("gread invite gr3 ok", r["data"]["code"] == 0)
+    json.loads(gr1.recv()); json.loads(gr2.recv())
+    time.sleep(1.1)
+    m_e = send_msg(gr1, grgid, "ge", "gr-e-%s" % base, chat_type="group")["data"]["messageId"]
+    json.loads(gr2.recv())
+    # 按类型取会话列表（登录补发/推送可能与响应交错）
+    def list_convs(w, limit=10):
+        w.send(env("conversation.list", {"limit": limit}))
+        f = recv_until(w, "conversation.list_res", 2.0)
+        assert f is not None, "conversation.list_res timeout"
+        return f["data"]["data"]["conversations"]
+
+    gr3b = WS(); assert login(gr3b, GR3, "pw1234")["data"]["code"] == 0
+    g3conv = [c for c in list_convs(gr3b)
+              if c["chatType"] == "group" and c["groupId"] == grgid]
+    check("gread pre-join history not unread", len(g3conv) == 1
+          and g3conv[0]["unreadCount"] == 1)  # 仅 m_e（入群后）
+    r = send(gr3b, "group.read", {"groupId": grgid, "messageId": m_e})
+    check("gread gr3 read ok", r["data"]["code"] == 0)
+    g3conv = [c for c in list_convs(gr3b)
+              if c["chatType"] == "group" and c["groupId"] == grgid]
+    check("gread gr3 zero after read", g3conv[0]["unreadCount"] == 0)
+    gr1.close(); gr2.close(); gr2b.close(); gr3b.close()
 
     # ================= 可靠投递（delivery ack，权威 v3.3）=================
     # 仅在确认制(on)下运行：本段验证“未 ACK 即重登补发/ACK 后不补/连续前缀游标”。
@@ -2544,7 +2679,7 @@ def main():
     import subprocess
     used = [A, B, C, SINK, SPAM, SINK2, SPAM2, D, E, F, G, H, base + "50", G1, G2,
             M1, M2, M3, M4, PIMG, QIMG, CIMG, RA, RB, RC, V1, V2, V3, D1, D2, D3,
-            K1, K2] \
+            K1, K2, GR1, GR2, GR3] \
         + cap_accounts + [OVER, X, Y, Z, BL, BL2, BL3, BL4]
     inlist = ",".join("'%s'" % x for x in used)
     # 群表清理必须在 users 删除之前（按 account 查 user_id，无级联外键）

@@ -56,6 +56,9 @@ public:
   bool fetchLastMessageGroup(int64_t groupId, LastMessageInfo* out) override;
   std::vector<std::pair<int64_t, int64_t>> fetchGroupLastTs(
       const std::vector<int64_t>& groupIds) override;
+  int64_t countGroupUnread(int64_t groupId, int64_t userId, int64_t readTs,
+                           int64_t readId, int64_t joinedTs,
+                           int64_t joinedBoundaryId) override;
 
 private:
   MySqlClient client_;

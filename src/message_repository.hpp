@@ -139,6 +139,13 @@ public:
   // 返回 (groupId, lastTs)；无消息的群不出现。
   virtual std::vector<std::pair<int64_t, int64_t>> fetchGroupLastTs(
       const std::vector<int64_t>& groupIds) = 0;
+
+  // 群未读计数（v3.4，conversation.list 群条目）：严格 (ts,id) 已读游标之后、
+  // 排除自发与已撤回、且严格晚于入群边界 (joinedTs,joinedBoundaryId) 的消息数
+  //（同秒入群边界安全；不变量 I3）。查询失败返回 -1（调用方按 0 展示）。
+  virtual int64_t countGroupUnread(int64_t groupId, int64_t userId, int64_t readTs,
+                                   int64_t readId, int64_t joinedTs,
+                                   int64_t joinedBoundaryId) = 0;
 };
 
 } // namespace im

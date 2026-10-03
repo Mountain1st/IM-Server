@@ -91,9 +91,12 @@ CREATE TABLE IF NOT EXISTS group_members (
   group_id          BIGINT UNSIGNED NOT NULL,
   user_id           BIGINT UNSIGNED NOT NULL,
   joined_ts         BIGINT       NOT NULL,
+  joined_boundary_id BIGINT UNSIGNED NOT NULL DEFAULT 0, -- 入群瞬间群内最大消息 id（v3.4，(ts,id) 严格边界；0=新群）
   left_ts           BIGINT       NOT NULL DEFAULT 0,  -- 0=在群，非0=离开时间
   last_delivered_ts BIGINT       NOT NULL DEFAULT 0,  -- 投递游标 ts 分量（v3.3：客户端 ACK 推进）
   last_delivered_id BIGINT UNSIGNED NOT NULL DEFAULT 0, -- 有序投递游标 id（v3.3，与 ts 组成严格游标）
+  last_read_ts      BIGINT       NOT NULL DEFAULT 0,  -- 已读游标 ts 分量（v3.4：group.read 推进；≠ 投递游标）
+  last_read_id      BIGINT UNSIGNED NOT NULL DEFAULT 0, -- 有序已读游标 id（v3.4，与 ts 组成严格游标）
   UNIQUE KEY uk_group_user (group_id, user_id),
   KEY idx_user (user_id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;

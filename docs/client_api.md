@@ -1,4 +1,4 @@
-# IM 客户端接入标准（client_api，协议 v3.3）
+# IM 客户端接入标准（client_api，协议 v3.4）
 
 > 面向 **Qt 客户端（QWebSocket）** 与 **Web 客户端（浏览器 WebSocket）** 的开发接入文档。
 > 客户端实现只依赖本文件即可；协议正文（字段细则、时序、变更历史）见 [protocol.md](./protocol.md)。
@@ -509,12 +509,12 @@
 ```json
 { "type": "conversation.list_res", "data": { "code": 0, "msg": "ok", "data": { "conversations": [
   { "chatType": "single", "account": "13900139000", "nick": "小波", "lastMessageId": "...", "lastMsgTs": 1720000000, "lastMsgType": "text", "lastMsgRecalled": false, "unreadCount": 3, "lastReadTs": 1720000000 },
-  { "chatType": "group", "groupId": 1, "groupName": "项目群", "lastMessageId": "...", "lastMsgTs": 1720000000, "lastMsgType": "text", "lastMsgRecalled": true, "unreadCount": 0, "lastReadTs": 0 }
+  { "chatType": "group", "groupId": 1, "groupName": "项目群", "lastMessageId": "...", "lastMsgTs": 1720000000, "lastMsgType": "text", "lastMsgRecalled": true, "unreadCount": 2, "lastReadTs": 1720000000 }
 ] } } }
 ```
 - 按 `lastMsgTs` 倒序；`limit` 缺省 50、上限 100；`429` 查询限流（与 history 同桶）
 - 单聊 `unreadCount` 为**真实未读数**（服务端 status 派生）：`msg.read` 后自动归零、对方撤回后自动减少，客户端**无需本地维护计数**
-- **群聊 `unreadCount`/`lastReadTs` 恒 0（v3.2 占位）**：群已读能力尚未实现，客户端不得据此渲染群未读角标（后续 `group.read` 上线后启用真实值）
+- **群聊 `unreadCount`/`lastReadTs` 为真实值（v3.4）**：未读=已读游标之后、排除自发消息/已撤回消息/入群前历史的条数；`group.read` 后归零、他人撤回后自动减少。客户端可直接渲染群未读角标，无需本地维护
 - `lastMsgRecalled`=末条消息已撤回：客户端**优先判它**再判 `lastMsgType`，渲染「XXX 撤回了一条消息」
 - 自己对话框不返回；已退群/已解散群不出现在群段
 - 末条信息无 `content` 预览（服务端不下发，客户端按 `lastMsgType` 渲染占位如「[图片]」）
@@ -538,6 +538,25 @@
 - **开关**：仅 `IM_DELIVERY_ACK_REQUIRED=on` 时驱动游标；`off`（阶段A）下两种 ACK 均仅接收、不改投递事实（旧客户端兼容）
 - 自身发送的群消息与已撤回群消息在补发中跳过，**无需 ACK 也不阻塞游标**——ACK 后续可交付消息时游标可跨过它们（`group.history` 仍可取到自身历史消息）
 - **投递游标不跨成员资格纪元（v3.3.1）**：加入/重新入群后，投递从**入群瞬间的群消息流边界**开始——入群前的历史消息不会被补发、不需 ACK、不阻塞游标；断线重连（未退群）不开启新纪元，游标续用。客户端无需感知边界，按本协议正常收发/ACK 即可
+
+### 5.35 群已读 `group.read`（v3.4）
+
+用户**实际阅读**群消息到某位置的回执（与 `group.offline_ack` 的「已收到」语义独立）：
+```json
+{ "type": "group.read", "seq": 36, "data": { "groupId": 12, "messageId": "1720000000-42" } }
+```
+响应：
+```json
+{ "type": "group.read_res", "data": { "code": 0, "msg": "ok", "data": {} } }
+```
+- `messageId`：客户端当前**最后一条可见消息**的 ID（来自 `msg.recv`/`msg.offline`/历史/`conversation.list.lastMessageId`）。服务端反查其 `(ts,内部id)` 推进成员级已读游标——整段（含更早未读）视为已读
+- 客户端建议：**进入会话或滚动到底部时发一次**（不是每条消息都发）；无新消息时无需重复发
+- 已读游标 `(ts,内部id)` **严格只进**：重复/回退 `group.read` 幂等回 0，不会把已读位置改小
+- **账号级（非设备级）**：任一在线设备已读即推进；该用户其他在线端收 `group.read_notify{groupId,readTs,messageId}`（**免 ACK**，客户端收到后刷新本地已读位置/角标即可）
+- 服务端不向群内**其他成员**推送已读状态（无「谁已读」回执）
+- 与投递互不驱动：`group.offline_ack`（收到）不会推进已读；`group.read` 不会改变投递
+- 错误码：`400` 参数错误/消息不属于该群、`403` 非群成员、`404` 群不存在/已解散/消息不存在、`429` 限流（60 次/10s）、`500` 内部错误
+- `conversation.list` 群未读角标依赖此推进：客户端在用户读完消息后必须调用，否则角标不归零
 
 ## 6. 服务端 → 客户端事件
 
@@ -582,9 +601,22 @@
 ```json
 { "type": "group.offline_ack_res", "data": { "code": 0, "msg": "ok", "data": {} } }
 ```
-- `group.offline_ack` 的响应；`code=0` 含幂等（重复/回退 ACK）；`403` 非群成员、`404` 消息不存在或不属于该群
+- `group.offline_ack` 的响应；`code=0` 含幂等（重复/回退 ACK）；`429` ACK 限流（60 次/10s）
 
-### 6.6 历史查询回执 `chat.history_res`
+### 6.7 群已读响应与多端同步（v3.4）
+
+```json
+{ "type": "group.read_res", "data": { "code": 0, "msg": "ok", "data": {} } }
+```
+- `group.read` 的响应；`code=0` 含幂等/回退；`400` 参数错误或消息不属于该群、`403` 非群成员、`404` 群不存在/已解散/消息不存在、`429` 限流
+
+该用户**其他在线端**另会收到：
+```json
+{ "type": "group.read_notify", "data": { "groupId": 12, "readTs": 1720000000, "messageId": "1720000000-42" } }
+```
+- 免 ACK；客户端收到后把该群本地已读位置刷新到 `readTs`/`messageId`，清除未读角标
+
+### 6.8 历史查询回执 `chat.history_res`
 
 ```json
 { "type": "chat.history_res", "data": { "code": 0, "msg": "ok", "data": { "msgs": [ { "from": "13800138000", "fromNick": "小爱", "content": "你好", "ts": 1720000000, "clientMsgId": "...", "messageId": "...", "chatType": "single" } ] } } }

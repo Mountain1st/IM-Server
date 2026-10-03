@@ -588,6 +588,62 @@ void AppServer::onGroupOfflineAck(const std::shared_ptr<Session>& session, const
   session->reply(makeResult(kRes, 0, "ok", json::object()));
 }
 
+void AppServer::onGroupRead(const std::shared_ptr<Session>& session, const json& data) {
+  // 群已读（v3.4）：成员级已读游标推进（用户级非设备级）。
+  // 语义：messageId = 客户端最后可见消息，服务端反查 (ts,内部id) 严格游标，
+  // CAS 只进；免 ACK（状态声明，丢失靠重进会话/列表拉取自愈，与 msg.read 同先例）。
+  const char* kRes = "group.read_res";
+  // 限流：复用已读桶（rrate:，与 msg.read 同额度；防高频推进空转 DB）
+  if (!readLimiter_->allow(session->userId(), kMaxReadPerWindow, kAckWindow)) {
+    g_metrics.rateLimited.fetch_add(1, std::memory_order_relaxed);
+    session->reply(makeResult(kRes, 429, "操作过于频繁，请稍后再试", json::object()));
+    return;
+  }
+  if (!data.contains("groupId") || !data["groupId"].is_number_integer() ||
+      !data.contains("messageId") || !data["messageId"].is_string() ||
+      data["messageId"].get<std::string>().empty()) {
+    session->reply(makeResult(kRes, 400, "参数错误", json::object()));
+    return;
+  }
+  const int64_t groupId = data["groupId"].get<int64_t>();
+  const std::string messageId = data["messageId"].get<std::string>();
+  bool dissolved = false;
+  if (!groupRepo_->getGroup(groupId, nullptr, nullptr, nullptr, nullptr, &dissolved)) {
+    session->reply(makeResult(kRes, 404, "群不存在", json::object()));
+    return;
+  }
+  if (dissolved) {
+    session->reply(makeResult(kRes, 404, "群已解散", json::object()));
+    return;
+  }
+  if (!groupRepo_->isMember(groupId, session->userId())) {
+    session->reply(makeResult(kRes, 403, "非群成员", json::object()));
+    return;
+  }
+  // 反查消息 (ts,id) 与所属群：不存在 404；跨群 400（防用别群消息推进本群已读）
+  int64_t mts = 0, mid = 0, mgid = 0;
+  if (!msgRepo_->fetchMessageCursor(messageId, &mts, &mid, &mgid)) {
+    session->reply(makeResult(kRes, 404, "消息不存在", json::object()));
+    return;
+  }
+  if (mgid != groupId) {
+    session->reply(makeResult(kRes, 400, "消息不属于该群", json::object()));
+    return;
+  }
+  // 严格只进 CAS；失败=DB 错误（命中 0 行即幂等成功）
+  if (!groupRepo_->advanceReadCursor(groupId, session->userId(), mts, mid)) {
+    session->reply(makeResult(kRes, 500, "服务器内部错误", json::object()));
+    return;
+  }
+  session->reply(makeResult(kRes, 0, "ok", json::object()));
+  // 多端同步：该用户其他在线端（发起端不收；不向群内其他成员推送）
+  json rd = {{"groupId", groupId}, {"readTs", mts}, {"messageId", messageId}};
+  for (auto& t : onlineMgr_.sessions(session->userId())) {
+    if (t.get() == session.get()) continue;
+    t->reply(makeEnvelopeText("group.read_notify", rd));
+  }
+}
+
 void AppServer::onGroupSend(const std::shared_ptr<Session>& session, const json& data,
   // 群发（onSend 按 chatType=group 分流进入，msgType/幂等/图片管线已在上游完成，
   // content 已是正文或落盘 URL；发送限流在本函数内执行）：

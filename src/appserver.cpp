@@ -287,6 +287,7 @@ void AppServer::buildRoutes() {
     {"group.members", &AppServer::onGroupMembers},
     {"group.history", &AppServer::onGroupHistory},
     {"group.offline_ack", &AppServer::onGroupOfflineAck},
+    {"group.read", &AppServer::onGroupRead},
     {"block.add", &AppServer::onBlockAdd},
     {"block.remove", &AppServer::onBlockRemove},
     {"block.list", &AppServer::onBlockList},

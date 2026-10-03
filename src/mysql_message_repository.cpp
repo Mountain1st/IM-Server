@@ -577,6 +577,38 @@ bool MySqlMessageRepository::fetchLastMessageGroup(int64_t groupId,
   return ok;
 }
 
+int64_t MySqlMessageRepository::countGroupUnread(int64_t groupId, int64_t userId,
+                                                 int64_t readTs, int64_t readId,
+                                                 int64_t joinedTs,
+                                                 int64_t joinedBoundaryId) {
+  std::lock_guard<std::mutex> lock(mutex_);
+  if (!client_.ok() || groupId <= 0 || userId <= 0) return -1;
+  // 未读 = 已读游标之后 ∧ 非自发 ∧ 未撤回 ∧ 严格晚于入群边界 (joinedTs,id)
+  // 两处均严格 (ts,id) 序（同秒入群/同秒已读均无歧义）
+  const std::string jts = std::to_string(joinedTs);
+  const std::string jid = std::to_string(joinedBoundaryId);
+  const std::string rts = std::to_string(readTs);
+  const std::string rid = std::to_string(readId);
+  const std::string sql =
+      "SELECT COUNT(*) FROM messages WHERE group_id = " + std::to_string(groupId) +
+      " AND from_user != " + std::to_string(userId) +
+      " AND status != " + std::to_string(kMsgRecalled) +
+      " AND (ts > " + jts + " OR (ts = " + jts + " AND id > " + jid + "))" +
+      " AND (ts > " + rts + " OR (ts = " + rts + " AND id > " + rid + "))";
+  if (!client_.query(sql.c_str())) {
+    LOG_E("[mysql] 群未读计数失败: " << client_.errStr());
+    return -1;
+  }
+  MYSQL_RES* res = mysql_store_result(client_.handle());
+  if (!res) return -1;
+  int64_t n = -1;
+  if (MYSQL_ROW row = mysql_fetch_row(res)) {
+    if (row[0]) n = std::atoll(row[0]);
+  }
+  mysql_free_result(res);
+  return n;
+}
+
 std::vector<std::pair<int64_t, int64_t>> MySqlMessageRepository::fetchGroupLastTs(
     const std::vector<int64_t>& groupIds) {
   // 各群末条 ts 一次聚合（idx_group_ts）；IN 列表为服务端群 ID（纯数字）拼接

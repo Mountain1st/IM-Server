@@ -619,9 +619,8 @@ void AppServer::onRecall(const std::shared_ptr<Session>& session, const json& da
 
 void AppServer::onConversationList(const std::shared_ptr<Session>& session, const json& data) {
   // 会话列表（v3.2，派生式）：单聊未读/已读游标出自 messages.status 事实源；
-  // 群条目 unreadCount/lastReadTs 恒 0——last_delivered_ts 是投递水位线
-  // （在线投递即推进），不是已读游标，语义不可混用；群已读为独立能力
-  // （group_members.last_read_ts + group.read）v3.x 再启用（协议字段细则占位）。
+  // 群条目未读/已读为真实值（v3.4）——成员级已读游标 group_members.last_read_*
+  // 由 group.read 推进（用户级），与投递水位线 last_delivered_* 语义独立。
   // 流程：单聊聚合 + 群末条 ts 聚合 → 合并按 lastMsgTs 倒序截 limit →
   // 幸存者逐个末条点查（有界 N+1，(ts,id) 严格序防同秒边界）→ 装配展示字段。
   if (!queryLimiter_->allow(session->userId(), kQueryLimitPerWindow, kQueryWindow)) {
@@ -654,8 +653,17 @@ void AppServer::onConversationList(const std::shared_ptr<Session>& session, cons
     if (!groupRepo_->getGroup(gid, nullptr, nullptr, nullptr, nullptr, &dissolved)) continue;
     if (!dissolved) alive.push_back(gid);
   }
+  // 群：真实未读/已读（v3.4）——成员级已读游标 (ts,id) + 未读计数点查
+  // （已读游标之后 ∧ 非自发 ∧ 未撤回 ∧ 入群窗口内；已读≠投递水位线）
   for (const auto& [gid, lastTs] : msgRepo_->fetchGroupLastTs(alive)) {
-    cands.push_back({true, gid, lastTs, 0, 0});
+    int64_t rts = 0, rid = 0;
+    groupRepo_->getReadCursor(gid, me, &rts, &rid);
+    int64_t joined = 0, jboundary = 0;
+    if (!groupRepo_->getJoinBoundary(gid, me, &joined, &jboundary)) continue;
+    int64_t unread =
+        msgRepo_->countGroupUnread(gid, me, rts, rid, joined, jboundary);
+    if (unread < 0) unread = 0;  // 计数失败按 0 展示（不阻断列表）
+    cands.push_back({true, gid, lastTs, unread, rts});
   }
   std::sort(cands.begin(), cands.end(),
             [](const Cand& a, const Cand& b) { return a.lastTs > b.lastTs; });

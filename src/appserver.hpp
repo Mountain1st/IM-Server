@@ -125,6 +125,8 @@ private:
   void onGroupMembers(const std::shared_ptr<Session>& session, const json& data);
   void onGroupHistory(const std::shared_ptr<Session>& session, const json& data);
   void onGroupOfflineAck(const std::shared_ptr<Session>& session, const json& data);
+  // 群已读（v3.4）：用户级已读游标推进（≠ 投递游标），多端 read_notify 同步
+  void onGroupRead(const std::shared_ptr<Session>& session, const json& data);
   // v2.4 拉黑（block.add/remove/list；语义见 docs/protocol.md §4）
   void onBlockAdd(const std::shared_ptr<Session>& session, const json& data);
   void onBlockRemove(const std::shared_ptr<Session>& session, const json& data);
