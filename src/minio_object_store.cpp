@@ -43,16 +43,19 @@ size_t collectPrefix(char* ptr, size_t size, size_t nmemb, void* userdata) {
   return n;
 }
 
-// MinioConfig → SigV4Config（两者字段同源，pathStyle/scheme 直通）
-SigV4Config toSigV4(const MinioConfig& c) {
+// MinioConfig → SigV4Config（两者字段同源，pathStyle/scheme 直通）。
+// publicFacing=true（客户端直传/直取 URL）：host/scheme 用公网配置（留空回落内网）——
+// 预签名覆盖 Host，内网地址签出来的 URL 外部客户端解析不了（审计 P0-1）。
+SigV4Config toSigV4(const MinioConfig& c, bool publicFacing) {
   SigV4Config s;
-  s.host = c.endpointHost;
+  const bool usePublic = publicFacing && !c.publicHost.empty();
+  s.host = usePublic ? c.publicHost : c.endpointHost;
+  s.scheme = usePublic ? c.publicScheme : c.scheme;
   s.region = c.region;
   s.bucket = c.bucket;
   s.accessKey = c.accessKey;
   s.secretKey = c.secretKey;
   s.pathStyle = c.pathStyle;
-  s.scheme = c.scheme;
   return s;
 }
 
@@ -78,7 +81,7 @@ PresignedUrl MinioObjectStore::presignPut(const std::string& key, int64_t ttlSec
   if (!enabled_) return out;
   const std::string date = amzDate.empty() ? nowAmzDate() : amzDate;
   SigV4Request req{"PUT", key, date, ttlSec};
-  out.url = sigV4Presign(toSigV4(cfg_), req);
+  out.url = sigV4Presign(toSigV4(cfg_, /*publicFacing=*/true), req);
   out.expiresIn = out.url.empty() ? 0 : ttlSec;
   return out;
 }
@@ -89,7 +92,7 @@ PresignedUrl MinioObjectStore::presignGet(const std::string& key, int64_t ttlSec
   if (!enabled_) return out;
   const std::string date = amzDate.empty() ? nowAmzDate() : amzDate;
   SigV4Request req{"GET", key, date, ttlSec};
-  out.url = sigV4Presign(toSigV4(cfg_), req);
+  out.url = sigV4Presign(toSigV4(cfg_, /*publicFacing=*/true), req);
   out.expiresIn = out.url.empty() ? 0 : ttlSec;
   return out;
 }
@@ -99,7 +102,7 @@ ObjectInfo MinioObjectStore::headObject(const std::string& key) {
   if (!enabled_) return info;
   // SigV4 签名覆盖 HTTP 方法：HEAD 必须以 HEAD 方法签名，用 GET URL 发 HEAD 会 403
   SigV4Request req{"HEAD", key, nowAmzDate(), 300};
-  const std::string url = sigV4Presign(toSigV4(cfg_), req);
+  const std::string url = sigV4Presign(toSigV4(cfg_, /*publicFacing=*/false), req);
   if (url.empty()) return info;
 
   ensureCurlInit();
@@ -132,7 +135,7 @@ bool MinioObjectStore::deleteObject(const std::string& key) {
   if (!enabled_) return false;
   const std::string date = nowAmzDate();
   SigV4Request req{"DELETE", key, date, 300};
-  const std::string url = sigV4Presign(toSigV4(cfg_), req);
+  const std::string url = sigV4Presign(toSigV4(cfg_, /*publicFacing=*/false), req);
   if (url.empty()) return false;
 
   ensureCurlInit();
@@ -162,7 +165,7 @@ bool MinioObjectStore::getObject(const std::string& key, size_t maxBytes,
   const std::string date = nowAmzDate();
   // 与服务端其它对象操作同一先例：预签名 GET + libcurl（不写第二套 header 认证）
   SigV4Request req{"GET", key, date, 300};
-  const std::string url = sigV4Presign(toSigV4(cfg_), req);
+  const std::string url = sigV4Presign(toSigV4(cfg_, /*publicFacing=*/false), req);
   if (url.empty()) return false;
 
   ensureCurlInit();

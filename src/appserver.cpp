@@ -144,11 +144,20 @@ std::shared_ptr<ObjectStore> makeObjectStore() {
   if (const char* v = std::getenv("IM_S3_ACCESS_KEY")) c.accessKey = v;
   if (const char* v = std::getenv("IM_S3_SECRET_KEY")) c.secretKey = v;
   if (const char* v = std::getenv("IM_S3_PATH_STYLE")) c.pathStyle = (std::string(v) != "0");
+  // 公网 endpoint（可选）：预签名 PUT/GET 返回给外部客户端，Host 参与 SigV4 签名。
+  // 不配时回落内网 endpoint（本地/CI 同网段可用；生产公网经 OSS/CDN 域名必配）。
+  if (const char* v = std::getenv("IM_S3_PUBLIC_ENDPOINT")) c.publicHost = v;
+  if (const char* v = std::getenv("IM_S3_PUBLIC_SCHEME")) c.publicScheme = v;
+  // 公网 host/scheme 先取出（move 后 c 不可用）
+  const bool hasPublic = !c.publicHost.empty();
+  const std::string publicHost = c.publicHost;
+  const std::string publicScheme = c.publicScheme;
   auto store = std::make_shared<MinioObjectStore>(std::move(c));
   if (store->enabled()) {
     LOG_I("[media] 对象存储: MinIO (endpoint=" << std::getenv("IM_S3_ENDPOINT")
           << ", bucket=" << (std::getenv("IM_S3_BUCKET") ? std::getenv("IM_S3_BUCKET") : "")
-          << ")");
+          << ", 预签名 host="
+          << (hasPublic ? publicScheme + "://" + publicHost : "同内网 endpoint") << ")");
   } else {
     LOG_I("[media] 对象存储未配置（IM_S3_* 缺失），媒体功能降级");
   }
