@@ -233,6 +233,72 @@ std::vector<MediaRecord> MySqlMediaRepository::findPendingOlderThan(
   return out;
 }
 
+std::vector<MediaRecord> MySqlMediaRepository::findCommittedOrphanOlderThan(
+    int64_t olderThanSec, int limit) {
+  std::lock_guard<std::mutex> lock(mutex_);
+  std::vector<MediaRecord> out;
+  if (!client_.ok()) return out;
+  if (limit <= 0) limit = 100;
+  if (limit > 1000) limit = 1000;
+  // NOT EXISTS 子查询在 SQL 内判定引用，避免「先查列表再逐条查引用」的竞态放大
+  const std::string sql =
+      "SELECT id,file_id,uploader_id,object_key,file_name,mime_type,file_size,"
+      "width,height,duration,thumb_key,status,created_at FROM media m "
+      "WHERE m.status=2 AND m.created_at<? AND NOT EXISTS("
+      "SELECT 1 FROM messages WHERE messages.media_id=m.id) "
+      "ORDER BY m.created_at ASC LIMIT " +
+      std::to_string(limit);
+  int errNo = 0;
+  MYSQL_STMT* stmt = client_.stmtExec(sql, {std::to_string(olderThanSec)}, &errNo);
+  if (!stmt) {
+    LOG_E("[mysql] 查询孤儿媒体失败 errno=" << errNo);
+    return out;
+  }
+  MediaRowBuf b;
+  bindMediaResult(stmt, b);
+  if (mysql_stmt_store_result(stmt)) {
+    LOG_E("[mysql] 孤儿媒体结果存储失败: " << client_.errStr());
+    mysql_stmt_close(stmt);
+    return out;
+  }
+  while (mysql_stmt_fetch(stmt) == 0) out.push_back(rowToMedia(b));
+  mysql_stmt_close(stmt);
+  return out;
+}
+
+bool MySqlMediaRepository::markOrphanGc(const std::string& fileId) {
+  std::lock_guard<std::mutex> lock(mutex_);
+  if (!client_.ok()) return false;
+  // 仅 COMMITTED(2)→GC(3)：防与 msg.send（只认 COMMITTED）竞态误删引用中对象
+  const std::string sql = "UPDATE media SET status=3 WHERE file_id=? AND status=2";
+  int errNo = 0;
+  MYSQL_STMT* stmt = client_.stmtExec(sql, {fileId}, &errNo);
+  if (!stmt) {
+    LOG_E("[mysql] 标记孤儿媒体失败 errno=" << errNo);
+    return false;
+  }
+  const my_ulonglong affected = mysql_stmt_affected_rows(stmt);
+  mysql_stmt_close(stmt);
+  return affected > 0;
+}
+
+bool MySqlMediaRepository::revertGc(const std::string& fileId, int toStatus) {
+  std::lock_guard<std::mutex> lock(mutex_);
+  if (!client_.ok()) return false;
+  // 仅 GC(3)→toStatus 回滚：状态已被其它路径改写时不覆盖
+  const std::string sql = "UPDATE media SET status=? WHERE file_id=? AND status=3";
+  int errNo = 0;
+  MYSQL_STMT* stmt = client_.stmtExec(
+      sql, {std::to_string(toStatus), fileId}, &errNo);
+  if (!stmt) {
+    LOG_E("[mysql] 回滚媒体状态失败 errno=" << errNo);
+    return false;
+  }
+  const my_ulonglong affected = mysql_stmt_affected_rows(stmt);
+  mysql_stmt_close(stmt);
+  return affected > 0;
+}
+
 int MySqlMediaRepository::isReferenced(const std::string& fileId) {
   std::lock_guard<std::mutex> lock(mutex_);
   if (!client_.ok()) return -1;

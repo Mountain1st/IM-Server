@@ -35,5 +35,13 @@ class MediaRepository {
   virtual std::vector<MediaRecord> findPendingOlderThan(int64_t olderThanSec, int limit) = 0;
   // 是否被任何消息引用：1=被引用，0=确定未引用，-1=查询失败（未知，不可当作未引用）
   virtual int isReferenced(const std::string& fileId) = 0;
+  // 孤儿 GC（任务② M2）：返回 created_at < olderThanSec 且无任何消息引用的
+  // COMMITTED 记录（SQL 内 NOT EXISTS 判定；语义同 findPendingOlderThan 的上界）。
+  virtual std::vector<MediaRecord> findCommittedOrphanOlderThan(int64_t olderThanSec,
+                                                                int limit) = 0;
+  // CAS COMMITTED(2)→GC(3) 抢占；仅当仍为 COMMITTED 才成功（防与 msg.send 竞态误删）
+  virtual bool markOrphanGc(const std::string& fileId) = 0;
+  // CAS GC(3)→toStatus 回滚（删对象失败/引用复查发现已引用时调用，留待下轮重试）
+  virtual bool revertGc(const std::string& fileId, int toStatus) = 0;
 };
 } // namespace im

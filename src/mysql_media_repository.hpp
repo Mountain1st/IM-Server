@@ -28,6 +28,13 @@ class MySqlMediaRepository : public MediaRepository {
                                                 int limit) override;
   // 1=被引用，0=确定未引用，-1=查询失败（未知）
   int isReferenced(const std::string& fileId) override;
+  // 孤儿 GC（任务② M2）：createdAt < upper 且无消息引用的 COMMITTED 记录
+  std::vector<MediaRecord> findCommittedOrphanOlderThan(int64_t olderThanSec,
+                                                        int limit) override;
+  // CAS COMMITTED(2)→GC(3) 抢占；仅当仍为 COMMITTED 才成功
+  bool markOrphanGc(const std::string& fileId) override;
+  // CAS GC(3)→toStatus 回滚（删除失败/复查已引用时留待下轮重试）
+  bool revertGc(const std::string& fileId, int toStatus) override;
 
  private:
   MySqlClient client_;

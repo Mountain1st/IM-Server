@@ -6,7 +6,11 @@ source scripts/db_env.sh
 
 # IM_OFFLINE_PURGE_INTERVAL=2：离线 TTL 清理间隔压到 2 秒以便用例验证（生产默认 1800）
 # IM_REGISTER_LIMIT_PER_WINDOW=100000：注册限流豁免（biz 需注册数十个测试账号；生产默认按 IP 3 次/10 分钟）
+# IM_MEDIA_GC_INTERVAL_SEC=1：媒体 GC 轮询压到 1 秒（仅作用于超期行：PENDING>24h/孤儿>7d，
+#   常规用例不受影响；回收 e2e 用 created_at 回拨 + 短等待验证）
 # IM_SERVER_BIN 可指向 sanitizer 构建的服务端（如 build-asan/imserver）
+# 导出给 biz_test.py 门禁用（GC e2e 需确认服务端确实按 1s 调度）
+export IM_MEDIA_GC_INTERVAL_SEC=1
 IM_SERVER_BIN="${IM_SERVER_BIN:-./build/imserver}"
 IM_OFFLINE_PURGE_INTERVAL=2 IM_REGISTER_LIMIT_PER_WINDOW=100000 "$IM_SERVER_BIN" 9191 </dev/null >server.log 2>&1 &
 SRV=$!

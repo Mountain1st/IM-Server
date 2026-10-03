@@ -498,6 +498,48 @@ def main():
                                      "width": 1, "height": 1})
       check("media commit forged fileId 404",
             r["type"] == "media.commit_res" and r["data"]["code"] == 404)
+      # 内容校验负例矩阵（任务② M1）：声明与真实字节必须一致
+      # 1) 声明 image/png 但上传非图片字节 → 400（保持 PENDING）
+      garbage = b"this is definitely not a png"
+      r = send(pim, "media.presign", {"fileName": "fake.png", "mimeType": "image/png",
+                                      "size": len(garbage), "kind": "image"})
+      fid_fake = media_data(r).get("fileId", "")
+      put(media_data(r).get("uploadUrl", ""), garbage)
+      r = send(pim, "media.commit", {"fileId": fid_fake, "size": len(garbage),
+                                     "width": 1, "height": 1})
+      check("media commit fake png rejected",
+            r["type"] == "media.commit_res" and r["data"]["code"] == 400)
+      # 2) 真 PNG 声明 image/jpeg → 400（MIME 与 magic 不一致）
+      r = send(pim, "media.presign", {"fileName": "mismatch.jpg", "mimeType": "image/jpeg",
+                                      "size": len(png), "kind": "image"})
+      fid_mis = media_data(r).get("fileId", "")
+      put(media_data(r).get("uploadUrl", ""), png)
+      r = send(pim, "media.commit", {"fileId": fid_mis, "size": len(png),
+                                     "width": 1, "height": 1})
+      check("media commit mime mismatch rejected",
+            r["type"] == "media.commit_res" and r["data"]["code"] == 400)
+      # 3) SVG 声明 image/svg+xml → presign 白名单 400
+      r = send(pim, "media.presign", {"fileName": "x.svg", "mimeType": "image/svg+xml",
+                                      "size": 20, "kind": "image"})
+      check("media presign svg mime rejected",
+            r["type"] == "media.presign_res" and r["data"]["code"] == 400)
+      # 4) 超维度 PNG（IHDR 5000x1）→ commit 400
+      big_head = bytes([0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A,
+                        0x00, 0x00, 0x00, 0x0D, 0x49, 0x48, 0x44, 0x52,
+                        0x00, 0x00, 0x13, 0x88, 0x00, 0x00, 0x00, 0x01,
+                        0x08, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00])
+      r = send(pim, "media.presign", {"fileName": "big.png", "mimeType": "image/png",
+                                      "size": len(big_head), "kind": "image"})
+      fid_big = media_data(r).get("fileId", "")
+      put(media_data(r).get("uploadUrl", ""), big_head)
+      r = send(pim, "media.commit", {"fileId": fid_big, "size": len(big_head),
+                                     "width": 1, "height": 1})
+      check("media commit oversize dimension rejected",
+            r["type"] == "media.commit_res" and r["data"]["code"] == 400)
+      # 5) 校验拒绝的媒体不得可发送（仍 PENDING → 400 媒体未提交）
+      r = send_msg(pim, QIMG, "", "img-fake-1", msg_type="image", media_id=fid_fake)
+      check("rejected media cannot send",
+            r["type"] == "msg.ack" and r["data"]["code"] == 400)
       # 负例：他人 fileId commit 拒绝（非 uploader → 403）
       r = send(qim, "media.commit", {"fileId": fid, "size": len(png), "width": 1, "height": 1})
       check("media commit other uploader 403",
@@ -2372,6 +2414,64 @@ def main():
         r = send(t1b8, "group.offline_ack", {"groupId": eg1, "messageIds": [b2]})
         check("epoch T7 ack B2 ok", r["data"]["code"] == 0)
         t1b8.close(); t1a.close()
+
+    # ===== 媒体 GC e2e（任务② M2）：PENDING 超期 / 孤儿 COMMITTED / 引用保护 =====
+    # 门禁：test_biz.sh 导出 IM_MEDIA_GC_INTERVAL_SEC=1（server 用其调度 GC 轮）
+    if medias_enabled and os.environ.get("IM_MEDIA_GC_INTERVAL_SEC") == "1":
+        # 专用连接：on 模式投递段耗时长，主连接 a 可能已被服务端空闲判定断开；
+        # token 重连独立于既有会话（多端语义允许），两种模式行为一致
+        agc = WS()
+        agc.send(env("auth.token", {"token": alice_token}))
+        r = json.loads(agc.recv())
+        check("gc e2e token login ok",
+              r["type"] == "auth.token_res" and r["data"]["code"] == 0)
+        png_gc = base64.b64decode(PNG_1X1_B64)
+        now_gc = int(time.time())
+        # P1：presign 后不 PUT（保持 PENDING），回拨 created_at 超 24h → 应回收
+        r = send(agc, "media.presign", {"fileName": "gc-p1.png", "mimeType": "image/png",
+                                        "size": len(png_gc), "kind": "image"})
+        fid_p1 = media_data(r).get("fileId", "")
+        check("gc e2e p1 presign ok", media_ok(r))
+        # P2：PUT+commit 成 COMMITTED 但不发消息 → 回拨超 7 天 → 孤儿应回收
+        r = send(agc, "media.presign", {"fileName": "gc-p2.png", "mimeType": "image/png",
+                                        "size": len(png_gc), "kind": "image"})
+        fid_p2 = media_data(r).get("fileId", "")
+        put(media_data(r).get("uploadUrl", ""), png_gc)
+        r = send(agc, "media.commit", {"fileId": fid_p2, "size": len(png_gc),
+                                       "width": 1, "height": 1})
+        check("gc e2e p2 commit ok", r["data"]["code"] == 0)
+        # P3：COMMITTED + 自聊图片消息引用 → 回拨超 7 天 → 必须保留（不被误删）
+        r = send(agc, "media.presign", {"fileName": "gc-p3.png", "mimeType": "image/png",
+                                        "size": len(png_gc), "kind": "image"})
+        fid_p3 = media_data(r).get("fileId", "")
+        put(media_data(r).get("uploadUrl", ""), png_gc)
+        r = send(agc, "media.commit", {"fileId": fid_p3, "size": len(png_gc),
+                                       "width": 1, "height": 1})
+        check("gc e2e p3 commit ok", r["data"]["code"] == 0)
+        r = send_msg(agc, A, "", "gc-ref-%s" % base, msg_type="image", media_id=fid_p3)
+        check("gc e2e p3 referenced", r["type"] == "msg.ack" and r["data"]["code"] == 0)
+        sql_q("UPDATE media SET created_at=%d WHERE file_id='%s'" % (now_gc - 90000, fid_p1))
+        sql_q("UPDATE media SET created_at=%d WHERE file_id='%s'" % (now_gc - 8 * 86400, fid_p2))
+        sql_q("UPDATE media SET created_at=%d WHERE file_id='%s'" % (now_gc - 8 * 86400, fid_p3))
+        # 等 GC 轮（间隔 1s + purge 轮询 2s）：轮询 DB 状态直至 P1/P2 均 GC
+        s1 = s2 = s3 = ""
+        deadline_gc = time.time() + 12
+        while time.time() < deadline_gc:
+            time.sleep(1.0)
+            s1 = sql_q("SELECT status FROM media WHERE file_id='%s'" % fid_p1)
+            s2 = sql_q("SELECT status FROM media WHERE file_id='%s'" % fid_p2)
+            s3 = sql_q("SELECT status FROM media WHERE file_id='%s'" % fid_p3)
+            if s1 == "3" and s2 == "3":
+                break
+        check("gc e2e pending reclaimed", s1 == "3")
+        check("gc e2e orphan reclaimed", s2 == "3")
+        check("gc e2e referenced kept committed", s3 == "2")
+        # 保留的已引用媒体仍可正常取 URL（引用未被破坏）
+        r = send(agc, "media.url", {"fileId": fid_p3})
+        check("gc e2e referenced url still ok", media_ok(r))
+        agc.close()
+    elif medias_enabled:
+        skip("media GC e2e", "IM_MEDIA_GC_INTERVAL_SEC!=1（非 test_biz.sh 调度，跳过）")
 
     a.close(); b.close()
 

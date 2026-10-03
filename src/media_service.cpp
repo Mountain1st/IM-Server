@@ -315,32 +315,54 @@ UrlResult MediaService::url(int64_t userId, const std::string& fileId,
   return r;
 }
 
-int64_t MediaService::gcOnce() {
-  if (!repo_) return 0;
-  const int64_t upperBound =
-      static_cast<int64_t>(std::time(nullptr)) - config::kMediaPendingTtlSec;
-  auto list = repo_->findPendingOlderThan(upperBound, config::kMediaGcBatch);
-  int64_t removed = 0;
-  for (const auto& m : list) {
-    // 对象存储不可用（未装配或未启用）时无法确认对象删除：
-    // 若此时仍 markDeleted，会跳过删对象而留下永久孤儿对象。
-    // 故直接跳过本行，保留 PENDING，待对象存储恢复后下轮重试（可能本轮无进展）。
-    if (!store_ || !store_->enabled()) {
+GcStats MediaService::gcOnce(int64_t nowSec) {
+  GcStats stats;
+  if (!repo_) return stats;
+  // 对象存储不可用（未装配或未启用）时无法确认对象删除：整轮跳过（保留状态，
+  // 待存储恢复后下轮重试）。抢占后无法删除会把记录永久标成已回收（P1-2 审计缺陷）。
+  if (!store_ || !store_->enabled()) return stats;
+  const int64_t now = nowSec > 0 ? nowSec : static_cast<int64_t>(std::time(nullptr));
+
+  // ---- 1) 超期 PENDING：CAS 0→3 抢占，删对象失败回滚 3→0（下轮重试）----
+  const int64_t pendingUpper = now - config::kMediaPendingTtlSec;
+  for (const auto& m : repo_->findPendingOlderThan(pendingUpper, config::kMediaGcBatch)) {
+    if (!repo_->markDeleted(m.fileId)) continue;  // 已被 commit/其他轮处理
+    if (!m.objectKey.empty() && !store_->deleteObject(m.objectKey)) {
+      // 删除失败：回滚 PENDING，下轮重试（不再"标记即丢弃"）
+      if (!repo_->revertGc(m.fileId, kMediaPending)) {
+        LOG_W("[media] GC 回滚失败 file_id=" << m.fileId);
+      }
+      ++stats.deleteFailures;
+      LOG_W("[media] GC 删除对象失败（已回滚待重试）: " << m.objectKey);
       continue;
     }
-    // CAS 抢占：仅当仍为 PENDING(0) 时原子置 GC(3)，防止与 commit 竞态——
-    // 若客户端已抢先 commit（status→COMMITTED），本调用返回 false，不删对象。
-    if (!repo_->markDeleted(m.fileId)) {
-      continue;  // 已被 commit 或被其他轮处理，跳过
-    }
-    // 抢到删除权后再删对象（对象可能从未上传，deleteObject 幂等）。
-    // 删除失败仅记日志：状态已一致（不再复扫），对象成孤儿但不影响正确性。
-    if (!m.objectKey.empty() && !store_->deleteObject(m.objectKey)) {
-      LOG_W("[media] GC 删除对象失败（状态已置 GC）: " << m.objectKey);
-    }
-    ++removed;
+    ++stats.pendingReclaimed;
   }
-  return removed;
+
+  // ---- 2) 无引用超期 COMMITTED（孤儿）：CAS 2→3 抢占，抢占后复查引用，删失败回滚 3→2 ----
+  const int64_t orphanUpper = now - config::kMediaOrphanTtlSec;
+  for (const auto& m : repo_->findCommittedOrphanOlderThan(orphanUpper,
+                                                           config::kMediaGcBatch)) {
+    if (!repo_->markOrphanGc(m.fileId)) continue;  // 已非 COMMITTED（并发发送/其它轮）
+    // 抢占后复查：查询列表与抢占之间可能有并发 msg.send 建立引用
+    const int ref = repo_->isReferenced(m.fileId);
+    if (ref != 0) {  // 1=被引用；-1=查询失败（未知，不可当未引用）——均回滚
+      if (!repo_->revertGc(m.fileId, kMediaCommitted)) {
+        LOG_W("[media] GC 孤儿回滚失败 file_id=" << m.fileId);
+      }
+      continue;
+    }
+    if (!m.objectKey.empty() && !store_->deleteObject(m.objectKey)) {
+      if (!repo_->revertGc(m.fileId, kMediaCommitted)) {
+        LOG_W("[media] GC 孤儿回滚失败 file_id=" << m.fileId);
+      }
+      ++stats.deleteFailures;
+      LOG_W("[media] GC 删除孤儿对象失败（已回滚待重试）: " << m.objectKey);
+      continue;
+    }
+    ++stats.orphanReclaimed;
+  }
+  return stats;
 }
 
 }  // namespace im

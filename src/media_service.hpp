@@ -33,6 +33,13 @@ struct UrlResult {
   int64_t expiresIn = 0;
 };
 
+// GC 单轮结果（任务② M2）：删除失败不计入回收数（状态已回滚待下轮重试）
+struct GcStats {
+  int64_t pendingReclaimed = 0;  // 超期 PENDING 成功回收数
+  int64_t orphanReclaimed = 0;   // 无引用 COMMITTED 成功回收数
+  int64_t deleteFailures = 0;    // 对象删除失败数（已回滚）
+};
+
 // 权限校验回调：由 AppServer 注入，判断 user 是否有权访问引用 fileId 的消息
 using MediaAccessFn = std::function<bool(int64_t userId, const std::string& fileId)>;
 
@@ -52,8 +59,9 @@ class MediaService {
                       int width, int height, int duration);
   UrlResult url(int64_t userId, const std::string& fileId,
                 const MediaAccessFn& canAccess);
-  // 清理超期 PENDING：删对象 + 标记，返回处理条数
-  int64_t gcOnce();
+  // 清理一轮：超期 PENDING + 无引用超期 COMMITTED（孤儿）。删对象失败回滚状态，
+  // 下轮重试，不计入回收数。nowSec 供测试注入（0=取当前时间）
+  GcStats gcOnce(int64_t nowSec = 0);
 
   static bool validMime(const std::string& mime);
   static bool validKind(const std::string& kind);

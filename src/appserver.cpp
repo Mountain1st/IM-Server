@@ -321,8 +321,24 @@ void AppServer::purgeLoop() {
       // purge 轮即清一次陈旧记录（符合预期）；未配置对象存储时自然为空转。
       if (now - lastMediaGc_ >= mediaGcIntervalSec_) {
         lastMediaGc_ = now;
-        const int64_t gced = mediaService_->gcOnce();
-        if (gced > 0) LOG_I("[media] 已回收 " << gced << " 条超期 PENDING 媒体");
+        const GcStats gc = mediaService_->gcOnce(now);
+        if (gc.pendingReclaimed > 0) {
+          g_metrics.mediaGcPendingReclaimed.fetch_add(
+              static_cast<uint64_t>(gc.pendingReclaimed), std::memory_order_relaxed);
+        }
+        if (gc.orphanReclaimed > 0) {
+          g_metrics.mediaGcOrphanReclaimed.fetch_add(
+              static_cast<uint64_t>(gc.orphanReclaimed), std::memory_order_relaxed);
+        }
+        if (gc.deleteFailures > 0) {
+          g_metrics.mediaGcDeleteFailed.fetch_add(
+              static_cast<uint64_t>(gc.deleteFailures), std::memory_order_relaxed);
+        }
+        if (gc.pendingReclaimed > 0 || gc.orphanReclaimed > 0 ||
+            gc.deleteFailures > 0) {
+          LOG_I("[media] GC：PENDING 回收 " << gc.pendingReclaimed << "，孤儿回收 "
+                << gc.orphanReclaimed << "，删除失败 " << gc.deleteFailures);
+        }
       }
     } catch (const std::exception& e) {
       LOG_E("[purge] 清理轮异常被兜底捕获: " << e.what());

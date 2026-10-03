@@ -19,8 +19,11 @@ struct Metrics {
   std::atomic<uint64_t> messagesDelivered{0};   // 客户端确认投递数（ACK 驱动）
   std::atomic<uint64_t> messagesOffline{0};     // 离线入队消息数
   std::atomic<uint64_t> writeOverflows{0};      // 写缓冲超限断开
-  // 媒体（任务② M1：commit 内容校验）
+  // 媒体（任务② M1：commit 内容校验；M2：孤儿回收）
   std::atomic<uint64_t> mediaCommitRejected{0};      // commit 内容校验拒绝数（magic/MIME/维度）
+  std::atomic<uint64_t> mediaGcPendingReclaimed{0};  // GC 成功回收的超期 PENDING 数
+  std::atomic<uint64_t> mediaGcOrphanReclaimed{0};   // GC 成功回收的无引用 COMMITTED 数
+  std::atomic<uint64_t> mediaGcDeleteFailed{0};      // GC 删对象失败数（状态已回滚待重试）
 };
 
 extern Metrics g_metrics;
